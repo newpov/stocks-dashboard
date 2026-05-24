@@ -1,0 +1,55 @@
+name: Weekly rebuild
+
+# Triggers:
+#   - push to main (only when source files change; the bot's own docs/data
+#     commits use the default GITHUB_TOKEN and do NOT re-trigger workflows,
+#     so there's no infinite-loop risk here)
+#   - weekly Saturday 08:00 UTC cron (~09:00 London BST) catches new yfinance
+#     prices even if you didn't push anything that week
+#   - manual button via the Actions tab
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'log.xlsx'
+      - 'build.py'
+      - 'requirements.txt'
+      - '.github/workflows/**'
+  schedule:
+    - cron: '0 8 * * 6'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Rebuild dashboard
+        run: python build.py
+
+      - name: Commit & push if anything changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/ data/
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Weekly rebuild $(date -u +'%Y-%m-%d')"
+            git push
+          fi

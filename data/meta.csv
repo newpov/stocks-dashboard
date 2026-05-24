@@ -1,0 +1,271 @@
+ticker,sector,industry,name,currency
+AAPL,Technology,Consumer Electronics,Apple Inc.,USD
+ABBV,Healthcare,Drug Manufacturers - General,AbbVie Inc.,USD
+ABT,Healthcare,Medical Devices,Abbott Laboratories,USD
+ACN,Technology,Information Technology Services,Accenture plc,USD
+ADBE,Technology,Software - Application,Adobe Inc.,USD
+ADC,Real Estate,REIT - Retail,Agree Realty Corporation,USD
+ADI,Technology,Semiconductors,"Analog Devices, Inc.",USD
+ADM,Consumer Defensive,Farm Products,Archer-Daniels-Midland Company,USD
+ADP,Technology,Software - Application,"Automatic Data Processing, Inc.",USD
+AFL,Financial Services,Insurance - Life,AFLAC Incorporated,USD
+AGNC,Real Estate,REIT - Mortgage,AGNC Investment Corp.,USD
+AI,Technology,Software - Infrastructure,"C3.ai, Inc.",USD
+AIR.PA,Industrials,Aerospace & Defense,AIRBUS SE,EUR
+AMAT,Technology,Semiconductor Equipment & Materials,"Applied Materials, Inc.",USD
+AMD,Technology,Semiconductors,"Advanced Micro Devices, Inc.",USD
+AMGN,Healthcare,Drug Manufacturers - General,Amgen Inc.,USD
+AMT,Real Estate,REIT - Specialty,American Tower Corporation (REI,USD
+AMZN,Consumer Cyclical,Internet Retail,"Amazon.com, Inc.",USD
+ANET,Technology,Computer Hardware,"Arista Networks, Inc.",USD
+APH,Technology,Electronic Components,Amphenol Corporation,USD
+APLD,Technology,Information Technology Services,Applied Digital Corporation,USD
+ASM.AS,Technology,Semiconductor Equipment & Materials,ASM International N.V.,EUR
+ASML,Technology,Semiconductor Equipment & Materials,ASML Holding N.V. - New York Re,USD
+ASML.AS,Technology,Semiconductor Equipment & Materials,ASML HOLDING,EUR
+AV.L,Financial Services,Insurance - Diversified,AVIVA PLC ORD 32 17/19P,GBp
+AVAH,Healthcare,Medical Care Facilities,Aveanna Healthcare Holdings Inc,USD
+AVAV,Industrials,Aerospace & Defense,"AeroVironment, Inc.",USD
+AVGO,Technology,Semiconductors,Broadcom Inc.,USD
+AXP,Financial Services,Credit Services,American Express Company,USD
+AZN.L,Healthcare,Drug Manufacturers - General,ASTRAZENECA PLC ORD SHS $0.25,GBp
+BA,Industrials,Aerospace & Defense,Boeing Company (The),USD
+BA.L,Industrials,Aerospace & Defense,BAE SYSTEMS PLC ORD 2.5P,GBp
+BAB.L,Industrials,Engineering & Construction,BABCOCK INTERNATIONAL GROUP PLC,GBp
+BABA,Consumer Cyclical,Internet Retail,Alibaba Group Holding Limited,USD
+BAC,Financial Services,Banks - Diversified,Bank of America Corporation,USD
+BAH,Industrials,Consulting Services,Booz Allen Hamilton Holding Cor,USD
+BBAI,Technology,Information Technology Services,"BigBear.ai, Inc.",USD
+BEN,Financial Services,Asset Management,"Franklin Resources, Inc.",USD
+BESI.AS,Technology,Semiconductor Equipment & Materials,BE Semiconductor Industries N.V,EUR
+BK,Financial Services,Banks - Diversified,The Bank of New York Mellon Cor,USD
+BKCN.L,,,WISDOMTREE ISSUER ICAV WT BLOCK,GBp
+BKNG,Consumer Cyclical,Travel Services,Booking Holdings Inc. Common St,USD
+BKR,Energy,Oil & Gas Equipment & Services,Baker Hughes Company,USD
+BLK,Financial Services,Asset Management,"BlackRock, Inc.",USD
+BMO,Financial Services,Banks - Diversified,Bank Of Montreal,USD
+BMY,Healthcare,Drug Manufacturers - General,Bristol-Myers Squibb Company,USD
+BNS,Financial Services,Banks - Diversified,Bank Nova Scotia Halifax Pfd 3,USD
+BORR,Energy,Oil & Gas Drilling,Borr Drilling Limited,USD
+BRK-B,Financial Services,Insurance - Diversified,Berkshire Hathaway Inc. New,USD
+BROS,Consumer Cyclical,Restaurants,Dutch Bros Inc.,USD
+BX,Financial Services,Asset Management,Blackstone Inc.,USD
+C,Financial Services,Banks - Diversified,"Citigroup, Inc.",USD
+CAH,Healthcare,Medical Distribution,"Cardinal Health, Inc.",USD
+CAT,Industrials,Farm & Heavy Construction Machinery,"Caterpillar, Inc.",USD
+CB,Financial Services,Insurance - Property & Casualty,Chubb Limited,USD
+CCI,Real Estate,REIT - Specialty,Crown Castle Inc.,USD
+CCJ,Energy,Uranium,Cameco Corporation,USD
+CDNS,Technology,Software - Application,"Cadence Design Systems, Inc.",USD
+CEG,Utilities,Utilities - Independent Power Producers,Constellation Energy Corporatio,USD
+CGNX,Technology,Scientific & Technical Instruments,Cognex Corporation,USD
+CHKP,Technology,Software - Infrastructure,Check Point Software Technologi,USD
+CHTR,Communication Services,Telecom Services,"Charter Communications, Inc.",USD
+CI,Healthcare,Healthcare Plans,The Cigna Group,USD
+CL,Consumer Defensive,Household & Personal Products,Colgate-Palmolive Company,USD
+CLS,Technology,Electronic Components,"Celestica, Inc.",USD
+CMCSA,Communication Services,Telecom Services,Comcast Corporation,USD
+CME,Financial Services,Financial Data & Stock Exchanges,CME Group Inc.,USD
+CNI,Industrials,Railroads,Canadian National Railway Compa,USD
+CNQ,Energy,Oil & Gas E&P,Canadian Natural Resources Limi,USD
+COF,Financial Services,Credit Services,Capital One Financial Corporati,USD
+COFF.L,,,WISDOMTREE COMMODITY SECURITIES,USD
+COHR,Technology,Scientific & Technical Instruments,Coherent Corp.,USD
+COP,Energy,Oil & Gas E&P,ConocoPhillips,USD
+COPB.L,,,WISDOMTREE COMMODITY SECURITIES,GBp
+COST,Consumer Defensive,Discount Stores,Costco Wholesale Corporation,USD
+CRM,Technology,Software - Application,"Salesforce, Inc.",USD
+CRVS,Healthcare,Biotechnology,"Corvus Pharmaceuticals, Inc.",USD
+CRWD,Technology,Software - Infrastructure,"CrowdStrike Holdings, Inc.",USD
+CSCO,Technology,Communication Equipment,"Cisco Systems, Inc.",USD
+CVS,Healthcare,Healthcare Plans,CVS Health Corporation,USD
+CVSA,Consumer Defensive,Education & Training Services,Covista Inc.,USD
+CVX,Energy,Oil & Gas Integrated,Chevron Corporation,USD
+CW,Industrials,Aerospace & Defense,Curtiss-Wright Corporation,USD
+DAGB.L,,,VANECK UCITS ETFS PLC VANECK CR,GBP
+DE,Industrials,Farm & Heavy Construction Machinery,Deere & Company,USD
+DELL,Technology,Computer Hardware,Dell Technologies Inc.,USD
+DHR,Healthcare,Diagnostics & Research,Danaher Corporation,USD
+DIS,Communication Services,Entertainment,Walt Disney Company (The),USD
+DLR,Real Estate,REIT - Specialty,"Digital Realty Trust, Inc.",USD
+DOW,Basic Materials,Chemicals,Dow Inc.,USD
+DUK,Utilities,Utilities - Regulated Electric,Duke Energy Corporation (Holdin,USD
+ECL,Basic Materials,Specialty Chemicals,Ecolab Inc.,USD
+EMR,Industrials,Specialty Industrial Machinery,Emerson Electric Company,USD
+ENGI.PA,Utilities,Utilities - Diversified,ENGIE,EUR
+EOG,Energy,Oil & Gas E&P,"EOG Resources, Inc.",USD
+EOSE,Industrials,Electrical Equipment & Parts,"Eos Energy Enterprises, Inc.",USD
+EQIX,Real Estate,REIT - Specialty,"Equinix, Inc.",USD
+EQQQ.L,,,INVESCO MARKETS III PLC INVESCO,GBp
+ESGB.L,,,VANECK UCITS ETFS PLC VANECK VI,GBP
+ETN,Industrials,Specialty Industrial Machinery,"Eaton Corporation, PLC",USD
+F,Consumer Cyclical,Auto Manufacturers,Ford Motor Company,USD
+FDX,Industrials,Integrated Freight & Logistics,FedEx Corporation,USD
+FINMY,Industrials,Aerospace & Defense,Leonardo S.P.A.,USD
+FLEX,Technology,Electronic Components,Flex Ltd.,USD
+FN,Technology,Electronic Components,Fabrinet,USD
+FTNT,Technology,Software - Infrastructure,"Fortinet, Inc.",USD
+FTWG.L,,,INVESCO MARKETS II PLC IVZ FTSE,GBp
+GD,Industrials,Aerospace & Defense,General Dynamics Corporation,USD
+GE,Industrials,Aerospace & Defense,GE Aerospace,USD
+GEV,Industrials,Specialty Industrial Machinery,GE Vernova Inc.,USD
+GILD,Healthcare,Drug Manufacturers - General,"Gilead Sciences, Inc.",USD
+GLDW.L,,,WISDOMTREE METAL SECURITIES LIM,GBp
+GM,Consumer Cyclical,Auto Manufacturers,General Motors Company,USD
+GOOD,Real Estate,REIT - Diversified,Gladstone Commercial Corporatio,USD
+GOOG,Communication Services,Internet Content & Information,Alphabet Inc.,USD
+GOOGL,Communication Services,Internet Content & Information,Alphabet Inc.,USD
+GRAB,Technology,Software - Application,Grab Holdings Limited,USD
+GS,Financial Services,Capital Markets,"Goldman Sachs Group, Inc. (The)",USD
+GWW,Industrials,Industrial Distribution,"W.W. Grainger, Inc.",USD
+HD,Consumer Cyclical,Home Improvement Retail,"Home Depot, Inc. (The)",USD
+HEAW.L,,,SSGA SPDR ETFS EUROPE II PLC SS,GBP
+HERG.L,,,GLOBAL X ETFS ICAV GLOBAL X VID,GBP
+HII,Industrials,Aerospace & Defense,"Huntington Ingalls Industries,",USD
+HOC.L,Basic Materials,Other Precious Metals & Mining,HOCHSCHILD MINING PLC ORD 1P,GBp
+HON,Industrials,Conglomerates,Honeywell International Inc.,USD
+HPE,Technology,Communication Equipment,Hewlett Packard Enterprise Comp,USD
+HSBA.L,Financial Services,Banks - Diversified,HSBC HOLDINGS PLC ORD $0.50 (UK,GBp
+HWM,Industrials,Aerospace & Defense,Howmet Aerospace Inc.,USD
+IBM,Technology,Information Technology Services,International Business Machines,USD
+ICE,Financial Services,Financial Data & Stock Exchanges,Intercontinental Exchange Inc.,USD
+ICL,Basic Materials,Agricultural Inputs,ICL Group Ltd.,USD
+ICSU.L,,,ISHARES V PUBLIC LIMITED COMPAN,GBp
+IIND.L,,,ISHARES IV PLC ISH MSCI INDIA U,GBP
+INTC,Technology,Semiconductors,Intel Corporation,USD
+INTL.L,,,WISDOMTREE ISSUER ICAV WT ART I,GBp
+IRM,Real Estate,REIT - Specialty,Iron Mountain Incorporated (Del,USD
+ISRG,Healthcare,Medical Instruments & Supplies,"Intuitive Surgical, Inc.",USD
+ITW,Industrials,Specialty Industrial Machinery,Illinois Tool Works Inc.,USD
+IUHC.L,,,ISHARES V PUBLIC LIMITED COMPAN,USD
+IUVF.L,,,ISHARES IV PLC ISHARES EDGE MSC,GBp
+JNJ,Healthcare,Drug Manufacturers - General,Johnson & Johnson,USD
+JPM,Financial Services,Banks - Diversified,JP Morgan Chase & Co.,USD
+KLAC,Technology,Semiconductor Equipment & Materials,KLA Corporation,USD
+KMB,Consumer Defensive,Household & Personal Products,Kimberly-Clark Corporation,USD
+KO,Consumer Defensive,Beverages - Non-Alcoholic,Coca-Cola Company (The),USD
+KSS,Consumer Cyclical,Department Stores,Kohl's Corporation,USD
+KTOS,Industrials,Aerospace & Defense,Kratos Defense & Security Solut,USD
+LDOS,Technology,Information Technology Services,"Leidos Holdings, Inc.",USD
+LGEN.L,Financial Services,Asset Management,LEGAL & GENERAL GROUP PLC ORD 2,GBp
+LHX,Industrials,Aerospace & Defense,"L3Harris Technologies, Inc.",USD
+LIN,Basic Materials,Specialty Chemicals,Linde plc,USD
+LLY,Healthcare,Drug Manufacturers - General,Eli Lilly and Company,USD
+LMT,Industrials,Aerospace & Defense,Lockheed Martin Corporation,USD
+LOW,Consumer Cyclical,Home Improvement Retail,"Lowe's Companies, Inc.",USD
+LRCX,Technology,Semiconductor Equipment & Materials,Lam Research Corporation,USD
+LTC,Real Estate,REIT - Healthcare Facilities,"LTC Properties, Inc.",USD
+MA,Financial Services,Credit Services,Mastercard Incorporated,USD
+MAIN,Financial Services,Asset Management,Main Street Capital Corporation,USD
+MCD,Consumer Cyclical,Restaurants,McDonald's Corporation,USD
+MCO,Financial Services,Financial Data & Stock Exchanges,Moody's Corporation,USD
+MDB,Technology,Software - Infrastructure,"MongoDB, Inc.",USD
+MDLZ,Consumer Defensive,Confectioners,"Mondelez International, Inc.",USD
+MDT,Healthcare,Medical Devices,Medtronic plc.,USD
+META,Communication Services,Internet Content & Information,"Meta Platforms, Inc.",USD
+MMM,Industrials,Conglomerates,3M Company,USD
+MO,Consumer Defensive,Tobacco,"Altria Group, Inc.",USD
+MP,Basic Materials,Other Industrial Metals & Mining,MP Materials Corp.,USD
+MRK,Healthcare,Drug Manufacturers - General,"Merck & Company, Inc.",USD
+MRVL,Technology,Semiconductors,"Marvell Technology, Inc.",USD
+MS,Financial Services,Capital Markets,Morgan Stanley,USD
+MSFT,Technology,Software - Infrastructure,Microsoft Corporation,USD
+MSTR,Technology,Software - Application,Strategy Inc,USD
+MSTS.L,,,LEVERAGE SHARES PUBLIC LIMITED,USD
+MU,Technology,Semiconductors,"Micron Technology, Inc.",USD
+MVST,Consumer Cyclical,Auto Parts,"Microvast Holdings, Inc.",USD
+NCLP.L,,,WISDOMTREE ISSUER ICAV WT URNM,GBp
+NEE,Utilities,Utilities - Regulated Electric,"NextEra Energy, Inc.",USD
+NEM,Basic Materials,Gold,Newmont Corporation,USD
+NET,Technology,Software - Infrastructure,"Cloudflare, Inc.",USD
+NFLX,Communication Services,Entertainment,"Netflix, Inc.",USD
+NKE,Consumer Cyclical,Footwear & Accessories,"Nike, Inc.",USD
+NOC,Industrials,Aerospace & Defense,Northrop Grumman Corporation,USD
+NRG,Utilities,Utilities - Independent Power Producers,"NRG Energy, Inc.",USD
+NSC,Industrials,Railroads,Norfolk Southern Corporation,USD
+NUE,Basic Materials,Steel,Nucor Corporation,USD
+NVDA,Technology,Semiconductors,NVIDIA Corporation,USD
+NVO,Healthcare,Drug Manufacturers - General,Novo Nordisk A/S,USD
+O,Real Estate,REIT - Retail,Realty Income Corporation,USD
+OKTA,Technology,Software - Infrastructure,"Okta, Inc.",USD
+ORCL,Technology,Software - Infrastructure,Oracle Corporation,USD
+ORN,Industrials,Engineering & Construction,"Orion Group Holdings, Inc.",USD
+PANW,Technology,Software - Infrastructure,"Palo Alto Networks, Inc.",USD
+PCG,Utilities,Utilities - Regulated Electric,Pacific Gas & Electric Co.,USD
+PEP,Consumer Defensive,Beverages - Non-Alcoholic,"Pepsico, Inc.",USD
+PFE,Healthcare,Drug Manufacturers - General,"Pfizer, Inc.",USD
+PG,Consumer Defensive,Household & Personal Products,Procter & Gamble Company (The),USD
+PL,Industrials,Aerospace & Defense,Planet Labs PBC,USD
+PLD,Real Estate,REIT - Industrial,"Prologis, Inc.",USD
+PLMR,Financial Services,Insurance - Property & Casualty,"Palomar Holdings, Inc.",USD
+PLTR,Technology,Software - Infrastructure,Palantir Technologies Inc.,USD
+PM,Consumer Defensive,Tobacco,Philip Morris International Inc,USD
+PNC,Financial Services,Banks - Regional,"PNC Financial Services Group, I",USD
+PNR,Industrials,Specialty Industrial Machinery,Pentair plc.,USD
+PPG,Basic Materials,Specialty Chemicals,"PPG Industries, Inc.",USD
+PRVA,Healthcare,Health Information Services,"Privia Health Group, Inc.",USD
+PSEC,Financial Services,Asset Management,Prospect Capital Corporation,USD
+PYPL,Financial Services,Credit Services,"PayPal Holdings, Inc.",USD
+QBTS,Technology,Computer Hardware,D-Wave Quantum Inc.,USD
+QCOM,Technology,Semiconductors,QUALCOMM Incorporated,USD
+RACE.MI,Consumer Cyclical,Auto Manufacturers,FERRARI,EUR
+REGN,Healthcare,Biotechnology,"Regeneron Pharmaceuticals, Inc.",USD
+RHM.DE,Industrials,Aerospace & Defense,RHEINMETALL AG                I,EUR
+RKLB,Industrials,Aerospace & Defense,Rocket Lab Corporation,USD
+ROBO.L,,,LEGAL & GENERAL UCITS ETF PUBLI,USD
+ROP,Technology,Software - Application,"Roper Technologies, Inc.",USD
+RR.L,Industrials,Aerospace & Defense,ROLLS-ROYCE HOLDINGS PLC ORD SH,GBp
+RTX,Industrials,Aerospace & Defense,RTX Corporation,USD
+RY,Financial Services,Banks - Diversified,Royal Bank Of Canada,USD
+SAF.PA,Industrials,Aerospace & Defense,SAFRAN,EUR
+SAP.DE,Technology,Software - Application,SAP SE                        I,EUR
+SBUX,Consumer Cyclical,Restaurants,Starbucks Corporation,USD
+SCHW,Financial Services,Capital Markets,Charles Schwab Corporation (The,USD
+SGLN.L,,,ISHARES PHYSICAL METALS PLC ISH,GBp
+SHOP,Technology,Software - Application,Shopify Inc.,USD
+SHW,Basic Materials,Specialty Chemicals,Sherwin-Williams Company (The),USD
+SLB,Energy,Oil & Gas Equipment & Services,SLB Limited,USD
+SMCI,Technology,Computer Hardware,"Super Micro Computer, Inc.",USD
+SNPS,Technology,Software - Infrastructure,"Synopsys, Inc.",USD
+SO,Utilities,Utilities - Regulated Electric,Southern Company (The),USD
+SOUN,Technology,Software - Application,"SoundHound AI, Inc.",USD
+SPG,Real Estate,REIT - Retail,"Simon Property Group, Inc.",USD
+SQQQ.L,,,LEVERAGE SHARES PUBLIC LIMITED,GBp
+STAG,Real Estate,REIT - Industrial,"Stag Industrial, Inc.",USD
+SXLI.L,,,SSGA SPDR ETFS EUROPE II PLC SS,USD
+SYY,Consumer Defensive,Food Distribution,Sysco Corporation,USD
+T,Communication Services,Telecom Services,AT&T Inc.,USD
+TCEHY,Communication Services,Internet Content & Information,Tencent Holding Ltd.,USD
+TD,Financial Services,Banks - Diversified,Toronto Dominion Bank (The),USD
+TDG,Industrials,Aerospace & Defense,Transdigm Group Incorporated,USD
+TEM,Healthcare,Health Information Services,"Tempus AI, Inc.",USD
+TER,Technology,Semiconductor Equipment & Materials,"Teradyne, Inc.",USD
+TFC,Financial Services,Banks - Regional,Truist Financial Corporation,USD
+TGT,Consumer Defensive,Discount Stores,Target Corporation,USD
+TKA.DE,Industrials,Conglomerates,thyssenkrupp AG               I,EUR
+TMO,Healthcare,Diagnostics & Research,Thermo Fisher Scientific Inc,USD
+TMUS,Communication Services,Telecom Services,"T-Mobile US, Inc.",USD
+TROW,Financial Services,Asset Management,"T. Rowe Price Group, Inc.",USD
+TSLA,Consumer Cyclical,Auto Manufacturers,"Tesla, Inc.",USD
+TSM,Technology,Semiconductors,Taiwan Semiconductor Manufactur,USD
+TXN,Technology,Semiconductors,Texas Instruments Incorporated,USD
+TXT,Industrials,Aerospace & Defense,Textron Inc.,USD
+UNH,Healthcare,Healthcare Plans,UnitedHealth Group Incorporated,USD
+UNP,Industrials,Railroads,Union Pacific Corporation,USD
+UPS,Industrials,Integrated Freight & Logistics,"United Parcel Service, Inc.",USD
+URNG.L,,,GLOBAL X ETFS ICAV GLOBAL X URA,GBP
+USB,Financial Services,Banks - Regional,U.S. Bancorp,USD
+USSC.L,,,SSGA SPDR ETFS EUROPE II PLC SS,USD
+V,Financial Services,Credit Services,Visa Inc.,USD
+VDPG.L,,,VANGUARD FUNDS PLC VANGUARD FTS,GBP
+VFEM.L,,,VANGUARD FUNDS PLC VANGUARD FTS,GBP
+VIRT,Financial Services,Capital Markets,"Virtu Financial, Inc.",USD
+VRT,Industrials,Electrical Equipment & Parts,"Vertiv Holdings, LLC",USD
+VST,Utilities,Utilities - Independent Power Producers,Vistra Corp.,USD
+VWRP.L,,,VANGUARD FUNDS PLC VANGUARD FTS,GBP
+VZ,Communication Services,Telecom Services,Verizon Communications Inc.,USD
+WFC,Financial Services,Banks - Diversified,Wells Fargo & Company,USD
+WMT,Consumer Defensive,Discount Stores,Walmart Inc.,USD
+WREE.L,,,WISDOMTREE ISSUER ICAV WT STRAT,GBp
+XOM,Energy,Oil & Gas Integrated,Exxon Mobil Corporation,USD
+ZS,Technology,Software - Infrastructure,"Zscaler, Inc.",USD
