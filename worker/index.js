@@ -9,13 +9,31 @@
 // Edge-cached for 10 minutes — at typical traffic this means a couple of
 // origin fetches per hour to each feed, not per visitor.
 
+// Finance-focused feed allowlist. Narrower than "top stories" feeds, so
+// irrelevant general/politics headlines don't leak in. Add/remove freely.
 const FEEDS = [
-  { source: "Yahoo Finance", url: "https://finance.yahoo.com/news/rssindex" },
-  { source: "MarketWatch",   url: "https://feeds.content.dowjones.io/public/rss/mw_topstories" },
+  { source: "MarketWatch",   url: "https://feeds.content.dowjones.io/public/rss/mw_marketpulse" },
+  { source: "MarketWatch",   url: "https://feeds.content.dowjones.io/public/rss/mw_realtimeheadlines" },
+  { source: "Motley Fool",   url: "https://www.fool.com/feeds/index.aspx" },
+  { source: "CNBC Business", url: "https://www.cnbc.com/id/10001147/device/rss/rss.html" },
+  { source: "Yahoo Finance", url: "https://finance.yahoo.com/rss/topstories" },
 ];
 
-const MAX_ITEMS = 12;
+const MAX_ITEMS = 30;   // returned to the browser; the UI filters down to ~6 visible
 const CACHE_TTL_SECONDS = 600;   // 10 min — RSS publishers don't update faster
+
+// Second-line defence: skip headlines whose title doesn't look finance-shaped.
+// Cheap word filter — adjust the list to taste. An item passes if ANY token
+// appears (case-insensitive). Empty title or off-topic titles are dropped.
+const FINANCE_KEYWORDS = [
+  "stock", "shares", "market", "rally", "earnings", "buy", "sell", "trade",
+  "trader", "trading", "invest", "fund", "etf", "bond", "yield", "rate",
+  "fed ", "dividend", "profit", "loss", "revenue", "guidance", "ipo", "merger",
+  "acquisition", "valuation", "p/e ", "eps", "options", "futures", "sp500",
+  "s&p", "nasdaq", "dow ", "ftse", "ceo", "cfo", "upgrade", "downgrade",
+  "analyst", "price target", "outlook", "forecast", "treasury", "inflation",
+  "recession", "bull", "bear", "crypto", "bitcoin", "ethereum", "$",
+];
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
@@ -61,6 +79,7 @@ export default {
     const deduped = [];
     for (const item of merged) {
       if (seen.has(item.link)) continue;
+      if (!isFinanceRelevant(item.title)) continue;
       seen.add(item.link);
       deduped.push(item);
     }
@@ -112,6 +131,15 @@ function parseRss(xml, source) {
   return items;
 }
 
+function isFinanceRelevant(title) {
+  const t = (title || "").toLowerCase();
+  if (!t) return false;
+  for (const kw of FINANCE_KEYWORDS) {
+    if (t.includes(kw)) return true;
+  }
+  return false;
+}
+
 function extractTag(xml, tag) {
   const re = new RegExp(`<${tag}(?:\\s[^>]*)?>([\\s\\S]*?)</${tag}>`, "i");
   const m = xml.match(re);
@@ -120,13 +148,35 @@ function extractTag(xml, tag) {
   // Unwrap CDATA if present.
   const cdata = v.match(/^<!\[CDATA\[([\s\S]*?)\]\]>$/);
   if (cdata) v = cdata[1];
-  // Decode the common HTML entities (titles often carry &amp;, &#x27; etc.)
-  return v
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&apos;/g, "'")
-    .replace(/&#x27;/g, "'")
-    .replace(/&#39;/g, "'");
+  return decodeEntities(v);
+}
+
+// Decode HTML entities. Handles:
+//   1. Numeric hex   — &#x2018; → '
+//   2. Numeric dec   — &#8217;  → '
+//   3. Common named  — &amp; &lt; &gt; &quot; &apos; &nbsp; etc.
+// Order matters: numeric first, then named, so a decimal-encoded ampersand
+// (e.g. &#38;amp;) decodes correctly to &amp; → &.
+function decodeEntities(s) {
+  if (!s) return "";
+  // Hex numeric — &#x2018;
+  s = s.replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => {
+    try { return String.fromCodePoint(parseInt(hex, 16)); }
+    catch { return _; }
+  });
+  // Decimal numeric — &#8217;
+  s = s.replace(/&#([0-9]+);/g, (_, dec) => {
+    try { return String.fromCodePoint(parseInt(dec, 10)); }
+    catch { return _; }
+  });
+  // Named entities — the handful that show up in finance RSS titles.
+  const named = {
+    "amp": "&", "lt": "<", "gt": ">", "quot": '"', "apos": "'",
+    "nbsp": " ", "ndash": "–", "mdash": "—",
+    "lsquo": "‘", "rsquo": "’",
+    "ldquo": "“", "rdquo": "”",
+    "hellip": "…", "trade": "™", "copy": "©", "reg": "®",
+  };
+  s = s.replace(/&([a-zA-Z]+);/g, (orig, name) => name in named ? named[name] : orig);
+  return s;
 }

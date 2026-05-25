@@ -1064,6 +1064,7 @@ def render_table(returns: pd.DataFrame, weekly: pd.DataFrame, meta: pd.DataFrame
             f'<div class="tkr-main">{tkr}{ccy_badge}{weight_badge}</div>'
             f'<div class="tkr-sub">{industry}</div>'
             f'</td>'
+            f'{sig_cell}'
             f'<td class="t-spark">{spark}</td>'
             f'<td class="num" data-v="{r.latest:.4f}">{BASE_SYMBOL}{r.latest:,.2f}</td>'
             f'{cost_cell}'
@@ -1074,7 +1075,6 @@ def render_table(returns: pd.DataFrame, weekly: pd.DataFrame, meta: pd.DataFrame
             f'{_pct_cell(r["3m_pct"], dim_mobile=True)}'
             f'{_pct_cell(r.ytd_pct)}'
             f'{post_exit_cell}'
-            f'{sig_cell}'
             "</tr>"
         )
     body = "\n".join(rows)
@@ -1082,17 +1082,17 @@ def render_table(returns: pd.DataFrame, weekly: pd.DataFrame, meta: pd.DataFrame
   <thead>
     <tr>
       <th data-col="0" data-num="0">Ticker</th>
+      <th data-col="1" data-num="0">Signal</th>
       <th>Trend</th>
-      <th data-col="2" data-num="1" class="num">Last</th>
-      <th data-col="3" data-num="1" class="num dim-mobile">Cost</th>
-      <th data-col="4" data-num="1" class="num dim-mobile">Purchased</th>
-      <th data-col="5" data-num="1" class="num">Since baseline</th>
-      <th data-col="6" data-num="1" class="num dim-mobile">1W</th>
-      <th data-col="7" data-num="1" class="num dim-mobile">1M</th>
-      <th data-col="8" data-num="1" class="num dim-mobile">3M</th>
-      <th data-col="9" data-num="1" class="num">YTD</th>
-      <th data-col="10" data-num="1" class="num dim-mobile" title="For closed positions: how the stock has moved since you sold. Positive = regret, negative = lucky escape.">Post-exit</th>
-      <th data-col="11" data-num="0">Signal</th>
+      <th data-col="3" data-num="1" class="num">Last</th>
+      <th data-col="4" data-num="1" class="num dim-mobile">Cost</th>
+      <th data-col="5" data-num="1" class="num dim-mobile">Purchased</th>
+      <th data-col="6" data-num="1" class="num">Since baseline</th>
+      <th data-col="7" data-num="1" class="num dim-mobile">1W</th>
+      <th data-col="8" data-num="1" class="num dim-mobile">1M</th>
+      <th data-col="9" data-num="1" class="num dim-mobile">3M</th>
+      <th data-col="10" data-num="1" class="num">YTD</th>
+      <th data-col="11" data-num="1" class="num dim-mobile" title="For closed positions: how the stock has moved since you sold. Positive = regret, negative = lucky escape.">Post-exit</th>
     </tr>
   </thead>
   <tbody>{body}</tbody>
@@ -1174,6 +1174,121 @@ def render_contributors(contrib: pd.DataFrame, meta: pd.DataFrame, n: int = 5) -
     <table class="contrib-table">
       <thead><tr><th>Ticker</th><th class="num">Cost basis</th><th class="num">Return</th><th class="num">Contrib</th></tr></thead>
       <tbody>{bot_rows}</tbody>
+    </table>
+  </div>
+</section>"""
+
+
+def _exit_action(signal_tone: str, analyst_rec: str) -> tuple[str, str]:
+    """3x3 heuristic — joins technical signal tone with analyst rec to suggest
+    a course of action. Returns (label, tone_class).
+
+    This is build-time analytics, not personalized advice; the goal is to
+    highlight tickers where two independent signals agree (high conviction)
+    or disagree (worth investigating). The caller is responsible for caveat.
+    """
+    rec = (analyst_rec or "").strip().lower()
+    if rec in ("strong_buy", "buy", "outperform"):
+        rec_bucket = "buy"
+    elif rec in ("strong_sell", "sell", "underperform"):
+        rec_bucket = "sell"
+    elif rec in ("hold", "neutral"):
+        rec_bucket = "hold"
+    else:
+        rec_bucket = "none"
+    tone = (signal_tone or "neutral").strip().lower()
+    # No analyst data — fall back to technical signal only.
+    if rec_bucket == "none":
+        if tone == "pos":    return ("HOLD",    "pos")
+        if tone == "neg":    return ("REVIEW",  "neg")
+        return ("MONITOR", "neutral")
+    # Two-axis lookup. Order: rows = tone (pos/neutral/neg), cols = rec bucket.
+    matrix = {
+        ("pos",     "buy"):  ("HOLD",          "pos"),
+        ("pos",     "hold"): ("TRIM",          "neutral"),
+        ("pos",     "sell"): ("EXIT",          "neg"),
+        ("neutral", "buy"):  ("HOLD",          "pos"),
+        ("neutral", "hold"): ("MONITOR",       "neutral"),
+        ("neutral", "sell"): ("EXIT",          "neg"),
+        ("neg",     "buy"):  ("REVIEW THESIS", "neutral"),
+        ("neg",     "hold"): ("TRIM",          "neutral"),
+        ("neg",     "sell"): ("CUT LOSS",      "neg"),
+    }
+    return matrix.get((tone, rec_bucket), ("MONITOR", "neutral"))
+
+
+def render_detractors_strategy(contrib: pd.DataFrame, returns: pd.DataFrame,
+                               signals: pd.DataFrame, analyst: pd.DataFrame,
+                               meta: pd.DataFrame, n: int = 8) -> str:
+    """Full-width 'Top detractors' panel with technical signal + analyst rec +
+    suggested action. Only open positions — you can't exit a closed one."""
+    if contrib.empty or returns.empty:
+        return ""
+    # Bottom by contribution (most negative first). Filter to open: closed
+    # positions have weight 0 → contribution 0, so they cluster at the bottom
+    # of the sort even though they're not actionable.
+    open_tickers = set(returns[returns.status == "open"].index.tolist())
+    open_contrib = contrib[contrib.index.isin(open_tickers)]
+    if open_contrib.empty:
+        return ""
+    bot = open_contrib.sort_values("contribution_pp", ascending=True).head(n)
+    rows = []
+    for tkr, r in bot.iterrows():
+        ind = _esc(_industry_label(meta, tkr))
+        cost_str = f"{BASE_SYMBOL}{r.weight:,.0f}"
+        # Technical signal
+        if tkr in signals.index:
+            sig = signals.loc[tkr]
+            sig_label, sig_tone, sig_detail = str(sig.signal), str(sig.tone), str(sig.detail)
+        else:
+            sig_label, sig_tone, sig_detail = "—", "neutral", ""
+        # Analyst rec
+        rec_raw = ""
+        upside = None
+        if not analyst.empty and tkr in analyst.index:
+            a = analyst.loc[tkr]
+            rec_raw = str(a.get("recommendation") or "")
+            target = a.get("target_mean")
+            if target is not None and pd.notna(target) and target > 0 and tkr in returns.index:
+                # Upside in the same units as the returns table (native ccy)
+                latest_native = a.get("current_price")
+                if latest_native is not None and pd.notna(latest_native) and latest_native > 0:
+                    upside = (float(target) / float(latest_native) - 1) * 100
+        rec_label, rec_cls = _REC_LABELS.get(rec_raw, ("—", "an-rec-none"))
+        upside_str = f"{upside:+.0f}%" if upside is not None else "—"
+        # Suggested action
+        action_label, action_tone = _exit_action(sig_tone, rec_raw)
+        rows.append(
+            f'<tr data-ticker="{tkr}">'
+            f'<td class="dt-tkr">{tkr}<div class="dt-ind">{ind}</div></td>'
+            f'<td class="num dt-cost">{cost_str}</td>'
+            f'<td class="num neg dt-ret">{r.total_pct:+.1f}%</td>'
+            f'<td class="num neg dt-contrib">{r.contribution_pp:+.2f} pp</td>'
+            f'<td class="dt-sig sig-{sig_tone}">'
+            f'<div class="sig-main">{_esc(sig_label)}</div>'
+            f'<div class="sig-detail">{_esc(sig_detail)}</div>'
+            f'</td>'
+            f'<td class="dt-rec"><span class="an-rec {rec_cls}">{rec_label}</span>'
+            f'<div class="dt-upside">{upside_str} target</div></td>'
+            f'<td class="dt-action"><span class="dt-action-pill dt-action-{action_tone}">{action_label}</span></td>'
+            f'</tr>'
+        )
+    body = "".join(rows)
+    return f"""<section class="detractors-section">
+  <div class="dt-head-row">
+    <h3>Top detractors &mdash; exit strategy <span class="muted">({len(bot)})</span></h3>
+    <p class="muted">Heaviest drags on your basket return. Suggested action joins
+    the technical signal with Wall Street consensus &mdash; agreement = high conviction,
+    divergence = review thesis. <strong>Not financial advice</strong>; build-time analytics only.</p>
+  </div>
+  <div class="dt-scroll">
+    <table class="dt-table">
+      <thead><tr>
+        <th>Ticker</th><th class="num">Cost basis</th><th class="num">Return</th>
+        <th class="num">Contrib</th><th>Technical signal</th>
+        <th>Analyst</th><th>Suggested action</th>
+      </tr></thead>
+      <tbody>{body}</tbody>
     </table>
   </div>
 </section>"""
@@ -1393,14 +1508,14 @@ def render_watchlist(watchlist_payload: dict, meta: pd.DataFrame) -> str:
 
 def build_analyst_payload(candidates: list[str], analyst: pd.DataFrame,
                           prices_native: pd.DataFrame, meta: pd.DataFrame,
+                          signals: pd.DataFrame | None = None,
                           top_n: int = ANALYST_TOP_N) -> list[dict]:
     """For each candidate ticker with a usable analyst target, compute upside
-    using the latest native close, sort by upside desc, return top N.
-
-    The caller decides what's a candidate (e.g. watchlist minus log.xlsx) —
-    this function is pool-agnostic."""
+    using the latest native close, attach the technical signal (so the card can
+    surface analyst/technical agreement or conflict), sort by upside desc, return top N."""
     if not candidates or analyst.empty:
         return []
+    sig_df = signals if signals is not None else pd.DataFrame()
     rows: list[dict] = []
     for tkr in candidates:
         if tkr not in analyst.index:
@@ -1422,6 +1537,13 @@ def build_analyst_payload(candidates: list[str], analyst: pd.DataFrame,
         target_major = float(target) / divisor
         upside_pct = (target_major / current_native - 1) * 100 if current_native else 0.0
         rec = (a.get("recommendation") or "").strip().lower()
+        # Technical signal — empty/neutral when no data
+        if not sig_df.empty and tkr in sig_df.index:
+            sig_row = sig_df.loc[tkr]
+            sig_label = str(sig_row.signal)
+            sig_tone = str(sig_row.tone)
+        else:
+            sig_label, sig_tone = "—", "neutral"
         rows.append({
             "ticker": tkr,
             "name": str(meta.loc[tkr, "name"]) if tkr in meta.index else tkr,
@@ -1433,6 +1555,8 @@ def build_analyst_payload(candidates: list[str], analyst: pd.DataFrame,
             "upside_pct": upside_pct,
             "num_analysts": int(a["num_analysts"]) if pd.notna(a.get("num_analysts")) else 0,
             "recommendation": rec,
+            "signal": sig_label,
+            "signal_tone": sig_tone,
         })
     rows.sort(key=lambda x: x["upside_pct"], reverse=True)
     return rows[:top_n]
@@ -1460,7 +1584,8 @@ def render_analyst_signals(rows: list[dict], candidate_pool_size: int) -> str:
         upside_cls = "pos" if d["upside_pct"] >= 0 else "neg"
         ccy_sym = d["ccy_symbol"]
         cur = f"{ccy_sym}{d['current']:,.2f}"
-        tgt = f"{ccy_sym}{d['target_mean']:,.2f}"
+        sig_tone = d.get("signal_tone", "neutral")
+        sig_label = d.get("signal", "—")
         cards.append(
             f'<div class="an-card" data-ticker="{d["ticker"]}">'
             f'  <div class="an-head">'
@@ -1468,9 +1593,11 @@ def render_analyst_signals(rows: list[dict], candidate_pool_size: int) -> str:
             f'    <div class="an-rec {rec_cls}">{label}</div>'
             f'  </div>'
             f'  <div class="an-name">{_esc(d["name"])}</div>'
-            f'  <div class="an-prices"><span class="an-cur">{cur}</span>'
-            f'    <span class="an-arrow">→</span><span class="an-tgt">{tgt}</span></div>'
-            f'  <div class="an-upside {upside_cls}">{d["upside_pct"]:+.1f}% upside</div>'
+            f'  <div class="an-line"><span class="an-cur">{cur}</span>'
+            f'    <span class="an-dot">·</span>'
+            f'    <span class="an-upside {upside_cls}">{d["upside_pct"]:+.1f}% upside</span></div>'
+            f'  <div class="an-signal sig-{sig_tone}">'
+            f'    <span class="an-signal-dot"></span>{_esc(sig_label)}</div>'
             f'  <div class="an-foot">{d["num_analysts"]} analysts</div>'
             f'</div>'
         )
@@ -1501,20 +1628,28 @@ def render_news(news_items: list[dict]) -> str:
   <p class="muted">RSS feed unreachable when this page was generated.</p>
 </section>"""
     rows = []
+    sources_seen = []  # preserve order, dedupe
     for it in news_items:
+        src = str(it["source"])
+        if src not in sources_seen:
+            sources_seen.append(src)
         rows.append(
-            f'<a class="news-row" href="{_esc(it["link"])}" target="_blank" rel="noopener noreferrer">'
+            f'<a class="news-row" data-source="{_esc(src)}" href="{_esc(it["link"])}" target="_blank" rel="noopener noreferrer">'
             f'  <div class="news-title">{_esc(it["title"])}</div>'
-            f'  <div class="news-meta"><span class="news-src">{_esc(it["source"])}</span>'
+            f'  <div class="news-meta"><span class="news-src">{_esc(src)}</span>'
             f'  <span class="news-dot">·</span><span class="news-when">{_esc(it["published_pretty"])}</span></div>'
             f'</a>'
         )
+    chips = ['<button class="news-chip active" data-src="*">All</button>']
+    for src in sources_seen:
+        chips.append(f'<button class="news-chip" data-src="{_esc(src)}">{_esc(src)}</button>')
     built = datetime.now(timezone.utc).strftime("%d %b %H:%M UTC")
     return f"""<section class="news-section">
   <div class="news-head">
     <h3>Market news</h3>
     <span class="muted news-stale">as of {built}</span>
   </div>
+  <div class="news-chips" role="tablist">{''.join(chips)}</div>
   <div class="news-list">{''.join(rows)}</div>
 </section>"""
 
@@ -1648,7 +1783,11 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     weekly = prices.resample("W-FRI").last().ffill()
     defs_html = render_svg_defs()
     table_html = render_table(returns, weekly, meta, signals)
-    contrib_html = render_contributors(contrib, meta)
+    detractors_html = render_detractors_strategy(
+        contrib, returns, signals,
+        analyst if analyst is not None else pd.DataFrame(),
+        meta,
+    )
     regret_html = render_regret_tracker(returns, meta)
     untracked_html = render_untracked(untracked) if untracked is not None else ""
     # Watchlist plumbing is preserved; the section is temporarily hidden — the
@@ -1656,7 +1795,7 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     watchlist_payload = (build_watchlist_payload(watchlist, prices, prices_native, meta)
                          if watchlist is not None and not watchlist.empty else {})
     candidates = analyst_candidates or []
-    analyst_rows = (build_analyst_payload(candidates, analyst, prices_native, meta)
+    analyst_rows = (build_analyst_payload(candidates, analyst, prices_native, meta, signals=signals)
                     if analyst is not None and not analyst.empty else [])
     analyst_html = render_analyst_signals(analyst_rows, len(candidates)) if (analyst_rows or candidates) else ""
     news_html = render_news(news_items or [])
@@ -1716,12 +1855,48 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
 <link href="https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400;500&family=Geist:wght@400;500;600&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet">
 <style>
   :root {{
+    /* Default — current dark + amber. Overridden by body.palette-* below. */
     --ink:#0b0e17; --ink-soft:#11151f; --surface:#161b27; --surface-2:#1d2330;
     --border:#232a3d; --text:#ece8e0; --text-2:#b4b9c4; --text-dim:#6b7185;
     --up:#34d399; --down:#f87171; --accent:#f59e0b;
     --font-display:"Instrument Serif",Georgia,serif;
     --font-ui:"Geist",system-ui,-apple-system,sans-serif;
     --font-mono:"Geist Mono","JetBrains Mono","SF Mono",Consolas,monospace;
+  }}
+  /* Palette A — Softer dark (lighter version of default, easier on eyes) */
+  body.palette-softdark{{
+    --ink:#1a1d29; --ink-soft:#22263a; --surface:#262b3a; --surface-2:#2f3548;
+    --border:#3a4156; --text:#f1f5f9; --text-2:#cbd5e1; --text-dim:#7d8aa8;
+    --up:#34d399; --down:#fb7185; --accent:#fbbf24;
+  }}
+  /* Palette B — Editorial light (FT/NYT vibe, prints well, dense-table friendly) */
+  body.palette-light{{
+    --ink:#fffaf0; --ink-soft:#fff5e6; --surface:#ffffff; --surface-2:#f5efe2;
+    --border:#e2d8c2; --text:#1f2937; --text-2:#4a5568; --text-dim:#94816a;
+    --up:#047857; --down:#b91c1c; --accent:#ad1f17;
+  }}
+  /* Palette C — Bloomberg amber-on-black (terminal aesthetic) */
+  body.palette-bloomberg{{
+    --ink:#000000; --ink-soft:#0a0a0a; --surface:#111111; --surface-2:#1a1a1a;
+    --border:#2a2a2a; --text:#ffb800; --text-2:#cc9300; --text-dim:#806000;
+    --up:#00ff66; --down:#ff3030; --accent:#ffb800;
+  }}
+  /* Palette toggle pill cluster (top-right of header) */
+  .palette-toggle{{
+    position:absolute;top:18px;right:28px;display:flex;gap:4px;
+    font-family:var(--font-mono);font-size:10px;letter-spacing:0.06em;
+  }}
+  .palette-toggle button{{
+    background:var(--surface);border:1px solid var(--border);color:var(--text-dim);
+    padding:4px 9px;border-radius:5px;cursor:pointer;font-family:inherit;font-size:inherit;
+    text-transform:uppercase;letter-spacing:inherit;transition:all 0.15s;
+  }}
+  .palette-toggle button:hover{{color:var(--text);border-color:var(--text-dim)}}
+  .palette-toggle button.active{{background:var(--accent);color:var(--ink);
+    border-color:var(--accent);font-weight:600}}
+  .container{{position:relative}}
+  @media (max-width:700px){{
+    .palette-toggle{{position:static;justify-content:flex-end;margin:8px 0 -8px}}
   }}
   *{{box-sizing:border-box}}
   html,body{{margin:0;padding:0}}
@@ -1826,6 +2001,45 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
   .contrib-table tbody tr{{cursor:pointer;transition:background 0.12s}}
   .contrib-table tbody tr:hover{{background:var(--surface-2)}}
 
+  /* Detractors panel — full-width, expanded view with exit-strategy hint */
+  .detractors-section{{
+    background:linear-gradient(180deg,var(--surface) 0%,var(--ink-soft) 100%);
+    border:1px solid var(--border);border-radius:12px;padding:18px 20px;
+    margin:28px 0 8px;
+  }}
+  .dt-head-row h3{{margin:0 0 4px;font-family:var(--font-display);font-size:18px;
+    font-weight:400;color:var(--text);letter-spacing:-0.01em}}
+  .dt-head-row h3 .muted{{color:var(--text-dim);font-size:14px;margin-left:4px}}
+  .dt-head-row p.muted{{margin:0 0 14px;font-family:var(--font-ui);font-size:12px;
+    color:var(--text-dim);line-height:1.5}}
+  .dt-head-row strong{{color:var(--text-2);font-weight:500}}
+  .dt-scroll{{width:100%;overflow-x:auto}}
+  .dt-table{{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}}
+  .dt-table th{{text-align:left;padding:7px 10px;font-size:9.5px;color:var(--text-dim);
+    text-transform:uppercase;letter-spacing:0.14em;font-weight:600;border-bottom:1px solid var(--border)}}
+  .dt-table th.num{{text-align:right}}
+  .dt-table td{{padding:10px 10px;border-bottom:1px solid var(--border);font-size:12.5px;
+    color:var(--text-2);vertical-align:middle}}
+  .dt-table tbody tr:last-child td{{border-bottom:none}}
+  .dt-table tbody tr{{cursor:pointer;transition:background 0.12s}}
+  .dt-table tbody tr:hover{{background:var(--surface-2)}}
+  .dt-tkr{{font-family:var(--font-mono);font-weight:600;color:var(--text);font-size:12.5px;min-width:90px}}
+  .dt-ind{{font-family:var(--font-ui);font-size:10px;color:var(--text-dim);font-weight:400;margin-top:2px}}
+  .dt-table .num{{text-align:right;font-family:var(--font-mono);font-size:12px}}
+  .dt-table .neg.dt-ret,.dt-table .neg.dt-contrib{{color:var(--down);font-weight:500}}
+  .dt-sig{{min-width:130px;line-height:1.2}}
+  .dt-rec{{min-width:110px;line-height:1.3}}
+  .dt-upside{{font-family:var(--font-mono);font-size:10px;color:var(--text-dim);margin-top:3px}}
+  .dt-action{{min-width:140px}}
+  .dt-action-pill{{font-family:var(--font-mono);font-size:10px;font-weight:600;letter-spacing:0.06em;
+    padding:3px 8px;border-radius:4px;border:1px solid;white-space:nowrap;display:inline-block}}
+  .dt-action-pos{{color:var(--up);border-color:var(--up);background:rgba(52,211,153,0.08)}}
+  .dt-action-neutral{{color:var(--accent);border-color:var(--accent);background:rgba(245,158,11,0.08)}}
+  .dt-action-neg{{color:var(--down);border-color:var(--down);background:rgba(248,113,113,0.10)}}
+  @media (max-width:900px){{
+    .dt-table th,.dt-table td{{padding:8px 6px;font-size:11.5px}}
+  }}
+
   /* Regret tracker (closed-position post-exit moves) */
   .regret{{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:22px 0 8px}}
   .regret-col{{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:16px 18px 14px}}
@@ -1893,14 +2107,22 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
   .an-rec-none{{color:var(--text-dim);border-color:var(--text-dim)}}
   .an-name{{font-family:var(--font-ui);font-size:11px;color:var(--text-2);line-height:1.3;
     overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
-  .an-prices{{font-family:var(--font-mono);font-size:11.5px;color:var(--text-2);display:flex;
-    align-items:baseline;gap:6px}}
-  .an-cur{{color:var(--text-2)}}
-  .an-arrow{{color:var(--text-dim)}}
-  .an-tgt{{color:var(--text);font-weight:500}}
-  .an-upside{{font-family:var(--font-mono);font-size:15px;font-weight:600;letter-spacing:-0.01em;line-height:1.1}}
+  .an-line{{font-family:var(--font-mono);font-size:12px;color:var(--text-2);display:flex;
+    align-items:baseline;gap:6px;flex-wrap:wrap}}
+  .an-cur{{color:var(--text);font-weight:500}}
+  .an-dot{{color:var(--text-dim)}}
+  .an-upside{{font-family:var(--font-mono);font-size:13px;font-weight:600;letter-spacing:-0.01em}}
   .an-upside.pos{{color:var(--up)}}
   .an-upside.neg{{color:var(--down)}}
+  /* Technical signal pill — uses sig-pos / sig-neg / sig-neutral classes shared with the table */
+  .an-signal{{font-family:var(--font-ui);font-size:10.5px;font-weight:500;
+    display:flex;align-items:center;gap:6px;letter-spacing:0.01em;line-height:1.2;
+    padding:4px 8px;border-radius:6px;background:var(--surface-2);
+  }}
+  .an-signal-dot{{width:6px;height:6px;border-radius:50%;background:var(--text-dim);flex-shrink:0}}
+  .an-signal.sig-pos{{color:var(--up)}} .an-signal.sig-pos .an-signal-dot{{background:var(--up)}}
+  .an-signal.sig-neg{{color:var(--down)}} .an-signal.sig-neg .an-signal-dot{{background:var(--down)}}
+  .an-signal.sig-neutral{{color:var(--accent)}} .an-signal.sig-neutral .an-signal-dot{{background:var(--accent)}}
   .an-foot{{font-family:var(--font-mono);font-size:9.5px;color:var(--text-dim);
     text-transform:uppercase;letter-spacing:0.08em}}
   @media (max-width:900px){{
@@ -1946,6 +2168,16 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
 
   /* News panel */
   .news-head{{display:flex;justify-content:space-between;align-items:baseline;gap:10px;margin-bottom:10px}}
+  .news-chips{{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:8px}}
+  .news-chip{{
+    background:var(--surface);border:1px solid var(--border);color:var(--text-dim);
+    font-family:var(--font-mono);font-size:9.5px;font-weight:500;letter-spacing:0.04em;
+    padding:3px 8px;border-radius:999px;cursor:pointer;transition:all 0.12s;
+    text-transform:uppercase;
+  }}
+  .news-chip:hover{{color:var(--text);border-color:var(--text-dim)}}
+  .news-chip.active{{background:var(--accent);color:var(--ink);border-color:var(--accent);font-weight:600}}
+  .news-row[hidden]{{display:none}}
   .news-stale{{font-family:var(--font-mono);font-size:10px;letter-spacing:0.04em;color:var(--text-dim)}}
   .news-stale.news-live{{color:var(--up)}}
   .news-stale.news-live::before{{content:"";display:inline-block;width:6px;height:6px;border-radius:50%;
@@ -2012,14 +2244,15 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
   .chip:hover{{border-color:var(--text-dim);color:var(--text)}}
   .chip.active{{background:var(--accent);color:var(--ink);border-color:var(--accent);font-weight:600}}
 
-  /* Table */
-  .table-scroll{{width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch;
-    background:var(--surface);border:1px solid var(--border);border-radius:12px}}
+  /* Table — internal vertical scroll, no horizontal scroll at desktop sizes */
+  .table-scroll{{width:100%;max-height:560px;overflow-y:auto;overflow-x:auto;
+    -webkit-overflow-scrolling:touch;background:var(--surface);
+    border:1px solid var(--border);border-radius:12px}}
   table#ret-table{{width:100%;border-collapse:collapse;background:transparent;
-    font-variant-numeric:tabular-nums;min-width:0}}
-  #ret-table th,#ret-table td{{padding:11px 16px;text-align:left;border-bottom:1px solid var(--border)}}
+    font-variant-numeric:tabular-nums;min-width:0;table-layout:auto}}
+  #ret-table th,#ret-table td{{padding:9px 10px;text-align:left;border-bottom:1px solid var(--border)}}
   #ret-table th{{font-size:10px;font-weight:600;color:var(--text-dim);text-transform:uppercase;
-    letter-spacing:0.16em;background:var(--ink-soft);user-select:none;position:sticky;top:50px;z-index:5}}
+    letter-spacing:0.14em;background:var(--ink-soft);user-select:none;position:sticky;top:0;z-index:5}}
   #ret-table th[data-col]{{cursor:pointer}}
   #ret-table th[data-col]:hover{{color:var(--text)}}
   #ret-table th.num{{text-align:right}}
@@ -2036,7 +2269,7 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
   #ret-table td.num.neg{{color:var(--down);font-weight:500}}
   #ret-table td.dim{{color:var(--text-dim);font-weight:400}}
   #ret-table td.purchased{{font-size:11.5px;color:var(--text-2);letter-spacing:0.02em}}
-  #ret-table td.t-signal{{font-family:var(--font-ui);min-width:140px;padding:8px 14px;line-height:1.2}}
+  #ret-table td.t-signal{{font-family:var(--font-ui);min-width:110px;padding:7px 10px;line-height:1.2}}
   #ret-table td.t-signal.dim{{font-family:var(--font-mono);text-align:left}}
   .sig-main{{font-weight:500;font-size:12px;letter-spacing:0.01em}}
   .sig-detail{{font-family:var(--font-mono);font-size:10px;color:var(--text-dim);margin-top:3px;font-weight:400;letter-spacing:-0.01em}}
@@ -2198,6 +2431,13 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
 {defs_html}
 <div class="container">
 
+<div class="palette-toggle" role="tablist" aria-label="Color palette">
+  <button data-palette="default" aria-pressed="true">Default</button>
+  <button data-palette="softdark">Soft Dark</button>
+  <button data-palette="light">Light</button>
+  <button data-palette="bloomberg">Amber</button>
+</div>
+
 <header>
   <div class="eyebrow">{n_open} open <span class="dot">&middot;</span> {n_closed} closed <span class="dot">&middot;</span> first buy {first_purchase_str} <span class="dot">&middot;</span> in {BASE_CCY}</div>
   <h1>The basket since <em>October &rsquo;24</em></h1>
@@ -2247,9 +2487,7 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
   </div>
 </header>
 
-{contrib_html}
-
-{regret_html}
+{detractors_html}
 
 <div class="wl-news-row">
   {analyst_html}
@@ -2261,7 +2499,7 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
   {table_html}
 </section>
 
-{untracked_html}
+{regret_html}
 
 <footer>Built locally &middot; data via yfinance &middot; TWR basket vs SPY &middot; click any row for the full chart</footer>
 
@@ -2513,7 +2751,7 @@ document.querySelectorAll('#ret-table th[data-col]').forEach(th => {{
     th.classList.add(sortState.asc ? 'sort-asc' : 'sort-desc');
   }});
 }});
-document.querySelector('#ret-table th[data-col="5"]')?.click();
+document.querySelector('#ret-table th[data-col="6"]')?.click();
 
 // ---- Filtering
 const TOTALS = Object.fromEntries(Object.entries(DATA).map(([t, d]) => [t, d.total]));
@@ -2773,12 +3011,33 @@ window.addEventListener('resize', () => {{ if (currentTicker && !modal.hasAttrib
 document.querySelectorAll('#ret-table tbody tr').forEach(row => {{
   row.addEventListener('click', () => openModal(row.dataset.ticker));
 }});
-document.querySelectorAll('.contrib-table tbody tr, .regret-table tbody tr').forEach(row => {{
+document.querySelectorAll('.contrib-table tbody tr, .regret-table tbody tr, .dt-table tbody tr').forEach(row => {{
   row.addEventListener('click', () => openModal(row.dataset.ticker));
 }});
 document.querySelectorAll('.wl-card, .an-card').forEach(card => {{
   card.addEventListener('click', () => openModal(card.dataset.ticker));
 }});
+
+// ---- Palette toggle ---------------------------------------------------
+// Body class controls which set of CSS variables wins. Persist the choice
+// across visits via localStorage so the page remembers the user's preference.
+(function setupPalette() {{
+  const PALETTE_KEY = 'stocks-dashboard-palette';
+  const buttons = document.querySelectorAll('.palette-toggle button');
+  function apply(name) {{
+    document.body.classList.remove('palette-softdark','palette-light','palette-bloomberg');
+    if (name && name !== 'default') document.body.classList.add('palette-' + name);
+    buttons.forEach(b => {{
+      const active = b.dataset.palette === name;
+      b.classList.toggle('active', active);
+      b.setAttribute('aria-pressed', String(active));
+    }});
+    try {{ localStorage.setItem(PALETTE_KEY, name); }} catch (e) {{ /* private mode */ }}
+  }}
+  const saved = (() => {{ try {{ return localStorage.getItem(PALETTE_KEY); }} catch (e) {{ return null; }} }})();
+  apply(saved || 'default');
+  buttons.forEach(b => b.addEventListener('click', () => apply(b.dataset.palette)));
+}})();
 
 // ---- Live news refresh via Cloudflare Worker --------------------------
 // The static news box is rendered server-side at build time as a fallback.
@@ -2803,12 +3062,16 @@ function renderLiveNews(items, fetchedAt) {{
   if (!list) return;
   list.innerHTML = items.map(it => {{
     const when = relativeNewsTime(new Date(it.published));
-    return `<a class="news-row" href="${{escapeNewsHtml(it.link)}}" target="_blank" rel="noopener noreferrer">`
+    return `<a class="news-row" data-source="${{escapeNewsHtml(it.source)}}" href="${{escapeNewsHtml(it.link)}}" target="_blank" rel="noopener noreferrer">`
       + `<div class="news-title">${{escapeNewsHtml(it.title)}}</div>`
       + `<div class="news-meta"><span class="news-src">${{escapeNewsHtml(it.source)}}</span>`
       + `<span class="news-dot">·</span><span class="news-when">${{escapeNewsHtml(when)}}</span></div>`
       + `</a>`;
   }}).join('');
+  // Rebuild source chips from the live data — sources can change as feeds
+  // are tuned on the Worker side, so don't trust the static fallback's list.
+  const sources = [...new Set(items.map(it => it.source))];
+  rebuildNewsChips(sources);
   const stale = document.querySelector('.news-stale');
   if (stale && fetchedAt) {{
     const t = new Date(fetchedAt);
@@ -2818,6 +3081,46 @@ function renderLiveNews(items, fetchedAt) {{
     stale.classList.add('news-live');
   }}
 }}
+
+function rebuildNewsChips(sources) {{
+  const chipBar = document.querySelector('.news-chips');
+  if (!chipBar) return;
+  const saved = (() => {{ try {{ return localStorage.getItem('stocks-dashboard-news-source'); }} catch (e) {{ return null; }} }})();
+  const current = saved || '*';
+  const html = ['<button class="news-chip" data-src="*">All</button>']
+    .concat(sources.map(s => `<button class="news-chip" data-src="${{escapeNewsHtml(s)}}">${{escapeNewsHtml(s)}}</button>`))
+    .join('');
+  chipBar.innerHTML = html;
+  applyNewsFilter(current);
+  chipBar.querySelectorAll('.news-chip').forEach(btn => {{
+    btn.addEventListener('click', () => applyNewsFilter(btn.dataset.src));
+  }});
+}}
+
+function applyNewsFilter(src) {{
+  const chipBar = document.querySelector('.news-chips');
+  if (!chipBar) return;
+  chipBar.querySelectorAll('.news-chip').forEach(b => {{
+    b.classList.toggle('active', b.dataset.src === src);
+  }});
+  document.querySelectorAll('.news-row').forEach(row => {{
+    const match = src === '*' || row.dataset.source === src;
+    if (match) row.removeAttribute('hidden'); else row.setAttribute('hidden', '');
+  }});
+  try {{ localStorage.setItem('stocks-dashboard-news-source', src); }} catch (e) {{ /* ignore */ }}
+}}
+
+// Wire the chip cluster on the static fallback so it works before the Worker
+// fetch (or if the Worker is unreachable). renderLiveNews() rebuilds it later.
+document.querySelectorAll('.news-chips .news-chip').forEach(btn => {{
+  btn.addEventListener('click', () => applyNewsFilter(btn.dataset.src));
+}});
+// Apply any saved filter to the static content on initial paint.
+(function applySavedNewsFilter() {{
+  let saved = null;
+  try {{ saved = localStorage.getItem('stocks-dashboard-news-source'); }} catch (e) {{}}
+  if (saved && saved !== '*') applyNewsFilter(saved);
+}})();
 
 function relativeNewsTime(date) {{
   const secs = Math.floor((Date.now() - date.getTime()) / 1000);
