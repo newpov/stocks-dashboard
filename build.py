@@ -70,7 +70,7 @@ NEWS_MAX_ITEMS = 12
 # build-time fetch (which is fine but caps at the workflow's cron cadence).
 # After deploying, paste the URL here including the /news path, e.g.:
 #   NEWS_WORKER_URL = "https://stocks-dashboard-news.example.workers.dev/news"
-NEWS_WORKER_URL = ""
+NEWS_WORKER_URL = "https://stocks-dashboard-news.newpov.workers.dev/news"
 
 
 # --------------------------------------------------------------------------
