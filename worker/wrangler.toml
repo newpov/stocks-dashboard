@@ -1,0 +1,7 @@
+name = "stocks-dashboard-news"
+main = "index.js"
+compatibility_date = "2025-01-01"
+
+# Observability gives you logs in the Cloudflare dashboard if anything goes wrong.
+[observability]
+enabled = true

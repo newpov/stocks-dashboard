@@ -38,6 +38,13 @@ OUT_HTML = ROOT / "docs" / "index.html"
 CACHE_PARQUET = ROOT / "data" / "prices_cache.parquet"
 BENCHMARK_CACHE = ROOT / "data" / "benchmark_cache.parquet"
 META_CSV = ROOT / "data" / "meta.csv"
+WATCHLIST_CSV = ROOT / "watchlist.csv"
+ANALYST_CACHE = ROOT / "data" / "analyst_cache.parquet"
+ANALYST_TTL_DAYS = 7    # refetch a ticker's analyst data when older than this
+
+# How many candidates the analyst panel shows in total (the grid scrolls
+# internally past ~6 visible). Safety cap for very large closed-position lists.
+ANALYST_TOP_N = 50
 
 DEFAULT_BASELINE = pd.Timestamp("2024-10-21")
 START_DATE = "2024-10-14"
@@ -49,6 +56,21 @@ CCY_SYMBOLS = {"GBP": "£", "USD": "$", "EUR": "€", "JPY": "¥", "CHF": "CHF "
 # Pence/cent variants reported by yfinance are normalized by dividing by 100:
 PENCE_CODES = {"GBp": "GBP", "GBX": "GBP", "ZAc": "ZAR", "ILA": "ILS"}
 FX_CACHE = ROOT / "data" / "fx_cache.parquet"
+
+# Free RSS feeds polled at build time for the news panel. Order matters only
+# for the tie-break when two feeds publish the same headline at the same second.
+NEWS_FEEDS = [
+    ("Yahoo Finance", "https://finance.yahoo.com/news/rssindex"),
+    ("MarketWatch",   "https://feeds.content.dowjones.io/public/rss/mw_topstories"),
+]
+NEWS_MAX_ITEMS = 12
+
+# URL of the deployed Cloudflare Worker (see worker/README.md for how to
+# deploy). Empty string disables live refresh — the page then shows only the
+# build-time fetch (which is fine but caps at the workflow's cron cadence).
+# After deploying, paste the URL here including the /news path, e.g.:
+#   NEWS_WORKER_URL = "https://stocks-dashboard-news.example.workers.dev/news"
+NEWS_WORKER_URL = ""
 
 
 # --------------------------------------------------------------------------
@@ -312,6 +334,81 @@ def download_benchmark() -> pd.Series:
         return pd.Series(dtype=float)
 
 
+def load_watchlist() -> pd.DataFrame:
+    """Read watchlist.csv (columns: ticker, note). Missing file -> empty frame.
+
+    Tickers here are *additional* to whatever is in the broker log: they get
+    priced and FX-converted alongside, but never enter the basket math.
+    """
+    if not WATCHLIST_CSV.exists():
+        return pd.DataFrame(columns=["ticker", "note"])
+    df = pd.read_csv(WATCHLIST_CSV, dtype=str).fillna("")
+    if "ticker" not in df.columns:
+        return pd.DataFrame(columns=["ticker", "note"])
+    df["ticker"] = df["ticker"].str.strip().str.upper()
+    df = df[df["ticker"] != ""].drop_duplicates(subset=["ticker"]).reset_index(drop=True)
+    if "note" not in df.columns:
+        df["note"] = ""
+    return df[["ticker", "note"]]
+
+
+def fetch_news(max_items: int = NEWS_MAX_ITEMS) -> list[dict]:
+    """Pull recent headlines from a couple of free finance RSS feeds.
+
+    Returns a list of {title, link, source, published (ISO), published_pretty}.
+    Build-time only; if feedparser or the network is unavailable, returns [].
+    """
+    try:
+        import feedparser
+    except ImportError:
+        print("WARN feedparser not installed; skipping news panel", file=sys.stderr)
+        return []
+    seen_links = set()
+    items: list[dict] = []
+    for source, url in NEWS_FEEDS:
+        try:
+            feed = feedparser.parse(url)
+        except Exception as e:
+            print(f"WARN news fetch failed for {source}: {e}", file=sys.stderr)
+            continue
+        for entry in feed.entries:
+            link = (entry.get("link") or "").strip()
+            title = (entry.get("title") or "").strip()
+            if not link or not title or link in seen_links:
+                continue
+            seen_links.add(link)
+            pub_struct = entry.get("published_parsed") or entry.get("updated_parsed")
+            if pub_struct:
+                pub_dt = datetime(*pub_struct[:6], tzinfo=timezone.utc)
+            else:
+                pub_dt = datetime.now(timezone.utc)
+            items.append({
+                "title": title, "link": link, "source": source,
+                "published": pub_dt.isoformat(), "published_dt": pub_dt,
+            })
+    items.sort(key=lambda x: x["published_dt"], reverse=True)
+    out = []
+    for it in items[:max_items]:
+        out.append({
+            "title": it["title"], "link": it["link"], "source": it["source"],
+            "published": it["published"],
+            "published_pretty": _relative_time(it["published_dt"]),
+        })
+    print(f"News: fetched {len(out)} headlines from {len(NEWS_FEEDS)} feeds")
+    return out
+
+
+def _relative_time(dt: datetime) -> str:
+    delta = datetime.now(timezone.utc) - dt
+    secs = int(delta.total_seconds())
+    if secs < 60:    return "just now"
+    if secs < 3600:  return f"{secs // 60}m ago"
+    if secs < 86400: return f"{secs // 3600}h ago"
+    days = secs // 86400
+    if days < 7:     return f"{days}d ago"
+    return dt.strftime("%d %b")
+
+
 def load_meta_cache() -> pd.DataFrame:
     if META_CSV.exists():
         df = pd.read_csv(META_CSV, index_col="ticker")
@@ -364,6 +461,79 @@ def fetch_meta(tickers: list[str], cache: pd.DataFrame) -> pd.DataFrame:
     META_CSV.parent.mkdir(parents=True, exist_ok=True)
     combined.to_csv(META_CSV)
     print(f"  cached metadata to {META_CSV}", flush=True)
+    return combined
+
+
+def load_analyst_cache() -> pd.DataFrame:
+    if not ANALYST_CACHE.exists():
+        return pd.DataFrame(columns=[
+            "target_mean", "target_high", "target_low", "num_analysts",
+            "recommendation", "rec_mean", "current_price", "fetched_at",
+        ]).rename_axis("ticker")
+    df = pd.read_parquet(ANALYST_CACHE)
+    if "fetched_at" in df.columns:
+        df["fetched_at"] = pd.to_datetime(df["fetched_at"], utc=True)
+    return df
+
+
+def fetch_analyst_data(tickers: list[str], cache: pd.DataFrame,
+                       ttl_days: int = ANALYST_TTL_DAYS) -> pd.DataFrame:
+    """For each ticker, return Wall-Street consensus (target prices, rating,
+    analyst count). Cache to parquet with a per-row fetched_at; refetch only
+    when missing or older than ttl_days. yfinance .info is slow + flaky, so
+    failures degrade to a NaN row rather than blowing up the build."""
+    now = pd.Timestamp.now(tz="UTC")
+    stale_cutoff = now - pd.Timedelta(days=ttl_days)
+    to_fetch: list[str] = []
+    for t in tickers:
+        if t not in cache.index:
+            to_fetch.append(t)
+        elif pd.isna(cache.loc[t, "fetched_at"]) or cache.loc[t, "fetched_at"] < stale_cutoff:
+            to_fetch.append(t)
+    if not to_fetch:
+        return cache
+    print(f"Fetching analyst data for {len(to_fetch)} ticker(s) (parallel x4, TTL {ttl_days}d)...", flush=True)
+
+    def one(t: str):
+        try:
+            info = yf.Ticker(t).info or {}
+            return t, {
+                "target_mean":  info.get("targetMeanPrice"),
+                "target_high":  info.get("targetHighPrice"),
+                "target_low":   info.get("targetLowPrice"),
+                "num_analysts": info.get("numberOfAnalystOpinions"),
+                "recommendation": (info.get("recommendationKey") or "").lower(),
+                "rec_mean":     info.get("recommendationMean"),
+                "current_price": info.get("currentPrice"),
+                "fetched_at":   now,
+            }
+        except Exception as e:
+            print(f"  analyst fail {t}: {e}", file=sys.stderr)
+            return t, {
+                "target_mean": None, "target_high": None, "target_low": None,
+                "num_analysts": None, "recommendation": "", "rec_mean": None,
+                "current_price": None, "fetched_at": now,
+            }
+
+    rows = []
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        futures = {ex.submit(one, t): t for t in to_fetch}
+        for i, fut in enumerate(as_completed(futures), 1):
+            t, data = fut.result()
+            rows.append({"ticker": t, **data})
+            if i % 20 == 0 or i == len(to_fetch):
+                print(f"  analyst: {i}/{len(to_fetch)}", flush=True)
+
+    new_df = pd.DataFrame(rows).set_index("ticker")
+    combined = (pd.concat([cache.drop(index=[t for t in to_fetch if t in cache.index]), new_df])
+                if not cache.empty else new_df)
+    combined = combined[~combined.index.duplicated(keep="last")].sort_index()
+    ANALYST_CACHE.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        combined.to_parquet(ANALYST_CACHE)
+        print(f"  cached analyst data to {ANALYST_CACHE}", flush=True)
+    except Exception as e:
+        print(f"WARN couldn't cache analyst data: {e}", file=sys.stderr)
     return combined
 
 
@@ -489,7 +659,13 @@ def build_positions(transactions: pd.DataFrame, prices: pd.DataFrame) -> pd.Data
         last_action_date = pd.Timestamp(txns.date.max())
         latest = float(ticker_series.iloc[-1])
 
-        status = "open" if shares_held > 1e-9 else "closed"
+        # Transactional-recency rule: a position is "closed" when the most
+        # recent trade row is a SELL, "open" otherwise. This is robust to
+        # partial exits and to multiple open/close cycles on the same
+        # ticker, where share-net math (e.g. shares_held > 0) would either
+        # misclassify or require real per-row share quantities we don't have.
+        last_action = str(txns.iloc[-1].action).upper()
+        status = "closed" if last_action == "SELL" else "open"
         realized_pnl = (avg_sell_price - avg_buy_price) * total_sold if total_sold > 0 else 0.0
         current_value = shares_held * latest
         current_cost = shares_held * avg_buy_price
@@ -1109,6 +1285,240 @@ def render_untracked(untracked: pd.DataFrame) -> str:
 </section>"""
 
 
+def build_watchlist_payload(watchlist: pd.DataFrame, prices: pd.DataFrame,
+                            prices_native: pd.DataFrame, meta: pd.DataFrame) -> dict:
+    """For each watchlist ticker, produce a payload mirroring build_data_payload
+    so the existing modal opens cleanly. Baseline = price 12 months ago (in
+    BASE_CCY). Tickers with no price data are skipped (logged once)."""
+    if watchlist.empty:
+        return {}
+    cutoff = pd.Timestamp.now(tz="UTC").normalize().tz_localize(None) - pd.DateOffset(months=12)
+    payload: dict = {}
+    for _, row in watchlist.iterrows():
+        tkr = row["ticker"]
+        if tkr not in prices.columns:
+            print(f"  watchlist: no price data for {tkr}, skipping", file=sys.stderr)
+            continue
+        s_base = prices[tkr].dropna()
+        if s_base.empty:
+            print(f"  watchlist: empty series for {tkr}, skipping", file=sys.stderr)
+            continue
+        s_base = s_base[s_base.index >= cutoff]
+        if len(s_base) < 2:
+            print(f"  watchlist: <2 points after 12m cutoff for {tkr}, skipping", file=sys.stderr)
+            continue
+        baseline = float(s_base.iloc[0])
+        latest = float(s_base.iloc[-1])
+        total_pct = (latest / baseline - 1) * 100 if baseline else 0.0
+        weekly = s_base.resample("W-FRI").last().ffill().dropna()
+        if weekly.empty:
+            weekly = s_base.tail(1)
+
+        ccy = ticker_currency(meta, tkr)
+        ccy_symbol = CCY_SYMBOLS.get(ccy, ccy + " ")
+
+        native_baseline = native_latest = native_total = None
+        if tkr in prices_native.columns:
+            sn = prices_native[tkr].dropna()
+            sn = sn[sn.index >= cutoff]
+            if len(sn) >= 2:
+                native_baseline = float(sn.iloc[0])
+                native_latest = float(sn.iloc[-1])
+                native_total = (native_latest / native_baseline - 1) * 100 if native_baseline else 0.0
+
+        payload[tkr] = {
+            "name": str(meta.loc[tkr, "name"]) if tkr in meta.index else tkr,
+            "sector": str(meta.loc[tkr, "sector"]) if tkr in meta.index else "",
+            "industry": str(meta.loc[tkr, "industry"]) if tkr in meta.index else "",
+            "currency": ccy, "ccy_symbol": ccy_symbol,
+            "baseline": baseline, "baseline_date": s_base.index[0].strftime("%Y-%m-%d"),
+            "latest": latest, "total": total_pct,
+            "w1": None, "m1": None, "m3": None, "ytd": None,
+            "weight": 0.0, "contribution": None,
+            "signal": "", "signal_tone": "neutral", "signal_detail": "",
+            "native_total": native_total, "native_baseline": native_baseline,
+            "native_latest": native_latest, "fx_change": None,
+            "status": "watch", "shares_held": 0.0,
+            "total_invested": 0.0, "total_received": 0.0,
+            "realized_pnl": 0.0, "unrealized_pnl": 0.0,
+            "post_exit": None, "transactions": [], "note": row.get("note", ""),
+            "dates": [d.strftime("%Y-%m-%d") for d in weekly.index],
+            "prices": [round(float(p), 4) for p in weekly.tolist()],
+        }
+    return payload
+
+
+def render_watchlist(watchlist_payload: dict, meta: pd.DataFrame) -> str:
+    if not watchlist_payload:
+        return ""
+    cards = []
+    for tkr, d in watchlist_payload.items():
+        ind = _esc(_industry_label(meta, tkr))
+        name = _esc(d["name"])
+        note = _esc(d.get("note") or "")
+        total = d["total"]
+        cls = "pos" if total >= 0 else "neg"
+        ccy_sym = d["ccy_symbol"]
+        latest_native = d["native_latest"] if d["native_latest"] is not None else d["latest"]
+        latest_str = f"{ccy_sym}{latest_native:,.2f}"
+        latest_gbp = f"{BASE_SYMBOL}{d['latest']:,.2f}"
+        gbp_line = "" if d["currency"] == BASE_CCY else f'<div class="wl-gbp">≈ {latest_gbp}</div>'
+        sparkline = sparkline_svg(
+            d["prices"], 180, 48,
+            color_class=cls,
+            gradient_id="grad-up" if total >= 0 else "grad-down",
+        )
+        note_html = f'<div class="wl-note">{note}</div>' if note else ""
+        cards.append(
+            f'<div class="wl-card" data-ticker="{tkr}">'
+            f'  <div class="wl-head">'
+            f'    <div class="wl-tkr">{tkr}<div class="wl-ind">{ind}</div></div>'
+            f'    <div class="wl-pct {cls}">{total:+.1f}%</div>'
+            f'  </div>'
+            f'  <div class="wl-name">{name}</div>'
+            f'  <div class="wl-price"><span class="wl-latest">{latest_str}</span>{gbp_line}</div>'
+            f'  <div class="wl-spark {cls}">{sparkline}</div>'
+            f'  <div class="wl-foot"><span class="wl-period">12-month</span>{note_html}</div>'
+            f'</div>'
+        )
+    return f"""<section class="watchlist-section">
+  <div class="wl-head-row">
+    <h3>Watchlist <span class="muted">({len(watchlist_payload)})</span></h3>
+    <p class="muted">12-month price history for tickers you're following but
+    don't (yet) hold. Add or remove via <code>watchlist.csv</code>. Click a card for the full chart.</p>
+  </div>
+  <div class="wl-grid">{''.join(cards)}</div>
+</section>"""
+
+
+def build_analyst_payload(candidates: list[str], analyst: pd.DataFrame,
+                          prices_native: pd.DataFrame, meta: pd.DataFrame,
+                          top_n: int = ANALYST_TOP_N) -> list[dict]:
+    """For each candidate ticker with a usable analyst target, compute upside
+    using the latest native close, sort by upside desc, return top N.
+
+    The caller decides what's a candidate (e.g. watchlist minus log.xlsx) —
+    this function is pool-agnostic."""
+    if not candidates or analyst.empty:
+        return []
+    rows: list[dict] = []
+    for tkr in candidates:
+        if tkr not in analyst.index:
+            continue
+        a = analyst.loc[tkr]
+        target = a.get("target_mean")
+        if target is None or pd.isna(target) or target <= 0:
+            continue
+        if tkr not in prices_native.columns:
+            continue
+        s = prices_native[tkr].ffill().dropna()
+        if s.empty:
+            continue
+        current_native = float(s.iloc[-1])
+        ccy = ticker_currency(meta, tkr)
+        _, divisor = normalize_currency(str(meta.loc[tkr, "currency"]) if tkr in meta.index else "USD")
+        # Yahoo returns prices in major units; LSE pence-quoted symbols come
+        # back as pence here too, so apply the same divisor for parity with prices_native.
+        target_major = float(target) / divisor
+        upside_pct = (target_major / current_native - 1) * 100 if current_native else 0.0
+        rec = (a.get("recommendation") or "").strip().lower()
+        rows.append({
+            "ticker": tkr,
+            "name": str(meta.loc[tkr, "name"]) if tkr in meta.index else tkr,
+            "industry": _industry_label(meta, tkr),
+            "currency": ccy,
+            "ccy_symbol": CCY_SYMBOLS.get(ccy, ccy + " "),
+            "current": current_native,
+            "target_mean": target_major,
+            "upside_pct": upside_pct,
+            "num_analysts": int(a["num_analysts"]) if pd.notna(a.get("num_analysts")) else 0,
+            "recommendation": rec,
+        })
+    rows.sort(key=lambda x: x["upside_pct"], reverse=True)
+    return rows[:top_n]
+
+
+_REC_LABELS = {
+    "strong_buy":  ("STRONG BUY", "an-rec-strong-buy"),
+    "buy":         ("BUY",        "an-rec-buy"),
+    "outperform":  ("BUY",        "an-rec-buy"),
+    "hold":        ("HOLD",       "an-rec-hold"),
+    "neutral":     ("HOLD",       "an-rec-hold"),
+    "underperform":("SELL",       "an-rec-sell"),
+    "sell":        ("SELL",       "an-rec-sell"),
+    "strong_sell": ("STRONG SELL","an-rec-strong-sell"),
+    "":            ("—",          "an-rec-none"),
+}
+
+
+def render_analyst_signals(rows: list[dict], candidate_pool_size: int) -> str:
+    if not rows and candidate_pool_size == 0:
+        return ""
+    cards = []
+    for d in rows:
+        label, rec_cls = _REC_LABELS.get(d["recommendation"], ("—", "an-rec-none"))
+        upside_cls = "pos" if d["upside_pct"] >= 0 else "neg"
+        ccy_sym = d["ccy_symbol"]
+        cur = f"{ccy_sym}{d['current']:,.2f}"
+        tgt = f"{ccy_sym}{d['target_mean']:,.2f}"
+        cards.append(
+            f'<div class="an-card" data-ticker="{d["ticker"]}">'
+            f'  <div class="an-head">'
+            f'    <div class="an-tkr">{d["ticker"]}<div class="an-ind">{_esc(d["industry"])}</div></div>'
+            f'    <div class="an-rec {rec_cls}">{label}</div>'
+            f'  </div>'
+            f'  <div class="an-name">{_esc(d["name"])}</div>'
+            f'  <div class="an-prices"><span class="an-cur">{cur}</span>'
+            f'    <span class="an-arrow">→</span><span class="an-tgt">{tgt}</span></div>'
+            f'  <div class="an-upside {upside_cls}">{d["upside_pct"]:+.1f}% upside</div>'
+            f'  <div class="an-foot">{d["num_analysts"]} analysts</div>'
+            f'</div>'
+        )
+    shown = len(rows)
+    if shown >= candidate_pool_size:
+        counter = f"{shown} candidate{'s' if shown != 1 else ''} ranked by upside"
+    else:
+        counter = f"Top {shown} of {candidate_pool_size} candidates by upside"
+    body = f'<div class="an-grid">{"".join(cards)}</div>' if cards else (
+        '<div class="an-empty">No closed positions have analyst targets — '
+        'panel will populate once yfinance returns target prices for at least one.</div>'
+    )
+    return f"""<section class="analyst-section">
+  <div class="an-head-row">
+    <h3>Re-entry ideas <span class="muted">({shown})</span></h3>
+    <p class="muted">{counter} &middot; Wall Street mean target vs latest close, for closed
+    positions only (stocks you previously held). Cached {ANALYST_TTL_DAYS}d via yfinance.
+    Click a card for the full chart.</p>
+  </div>
+  {body}
+</section>"""
+
+
+def render_news(news_items: list[dict]) -> str:
+    if not news_items:
+        return """<section class="news-section">
+  <div class="news-head"><h3>Market news</h3><span class="muted news-stale">unavailable at last build</span></div>
+  <p class="muted">RSS feed unreachable when this page was generated.</p>
+</section>"""
+    rows = []
+    for it in news_items:
+        rows.append(
+            f'<a class="news-row" href="{_esc(it["link"])}" target="_blank" rel="noopener noreferrer">'
+            f'  <div class="news-title">{_esc(it["title"])}</div>'
+            f'  <div class="news-meta"><span class="news-src">{_esc(it["source"])}</span>'
+            f'  <span class="news-dot">·</span><span class="news-when">{_esc(it["published_pretty"])}</span></div>'
+            f'</a>'
+        )
+    built = datetime.now(timezone.utc).strftime("%d %b %H:%M UTC")
+    return f"""<section class="news-section">
+  <div class="news-head">
+    <h3>Market news</h3>
+    <span class="muted news-stale">as of {built}</span>
+  </div>
+  <div class="news-list">{''.join(rows)}</div>
+</section>"""
+
+
 def render_toolbar(panel_n: int, n: int) -> str:
     return f"""<div class="toolbar">
   <input class="search" placeholder="Filter by ticker..." aria-label="Filter by ticker" />
@@ -1230,13 +1640,26 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
                 basket: pd.Series, bench: pd.Series, contrib: pd.DataFrame,
                 transactions: pd.DataFrame, signals: pd.DataFrame,
                 prices_native: pd.DataFrame, returns_native: pd.DataFrame,
-                untracked: pd.DataFrame | None = None) -> str:
+                untracked: pd.DataFrame | None = None,
+                watchlist: pd.DataFrame | None = None,
+                news_items: list[dict] | None = None,
+                analyst: pd.DataFrame | None = None,
+                analyst_candidates: list[str] | None = None) -> str:
     weekly = prices.resample("W-FRI").last().ffill()
     defs_html = render_svg_defs()
     table_html = render_table(returns, weekly, meta, signals)
     contrib_html = render_contributors(contrib, meta)
     regret_html = render_regret_tracker(returns, meta)
     untracked_html = render_untracked(untracked) if untracked is not None else ""
+    # Watchlist plumbing is preserved; the section is temporarily hidden — the
+    # analyst panel takes its left-rail slot until the watchlist comes back.
+    watchlist_payload = (build_watchlist_payload(watchlist, prices, prices_native, meta)
+                         if watchlist is not None and not watchlist.empty else {})
+    candidates = analyst_candidates or []
+    analyst_rows = (build_analyst_payload(candidates, analyst, prices_native, meta)
+                    if analyst is not None and not analyst.empty else [])
+    analyst_html = render_analyst_signals(analyst_rows, len(candidates)) if (analyst_rows or candidates) else ""
+    news_html = render_news(news_items or [])
 
     latest_date = prices.index[-1].strftime("%d %b %Y")
     built = datetime.now(timezone.utc).strftime("%d %b %Y &middot; %H:%M UTC")
@@ -1269,11 +1692,15 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
         best_contrib_pp = worst_contrib_pp = 0.0
         best_contrib_wt = worst_contrib_wt = 0.0
 
-    data_json = json.dumps(
-        build_data_payload(returns, prices, meta, contrib, signals,
-                           prices_native, returns_native),
-        separators=(",", ":")
-    )
+    data_dict = build_data_payload(returns, prices, meta, contrib, signals,
+                                   prices_native, returns_native)
+    for tkr, entry in watchlist_payload.items():
+        if tkr not in data_dict:
+            data_dict[tkr] = entry
+    data_json = json.dumps(data_dict, separators=(",", ":"))
+    # JSON-encode the Worker URL so quoting is always correct in the embedded JS,
+    # and an unset URL becomes the literal `""` (falsy in the JS branch).
+    news_worker_url_js = json.dumps(NEWS_WORKER_URL or "")
     portfolio_json = json.dumps(
         build_portfolio_payload(basket, bench, first_purchase), separators=(",", ":")
     )
@@ -1426,6 +1853,121 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
   #ret-table td.post-exit.neg{{color:var(--up)}}      /* escape = green */
 
   /* Untracked entries panel */
+  /* Analyst signals + news side-by-side (watchlist shares the .wl-* classes,
+     reactivated later by swapping render_watchlist back into the layout) */
+  .wl-news-row{{display:grid;grid-template-columns:1.55fr 1fr;gap:14px;margin:28px 0 8px;align-items:start}}
+  .watchlist-section,.news-section,.analyst-section{{
+    background:linear-gradient(180deg,var(--surface) 0%,var(--ink-soft) 100%);
+    border:1px solid var(--border);border-radius:12px;padding:18px 20px;
+  }}
+
+  /* Analyst panel */
+  .an-head-row h3{{margin:0 0 4px;font-family:var(--font-display);font-size:18px;
+    font-weight:400;color:var(--text);letter-spacing:-0.01em}}
+  .an-head-row h3 .muted{{color:var(--text-dim);font-size:14px;margin-left:4px}}
+  .an-head-row p.muted{{margin:0 0 14px;font-family:var(--font-ui);font-size:12px;
+    color:var(--text-dim);line-height:1.5}}
+  .an-grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px;
+    max-height:308px;overflow-y:auto;padding-right:4px}}
+  .an-empty{{font-family:var(--font-ui);font-size:12px;color:var(--text-dim);
+    padding:18px 4px;line-height:1.5}}
+  .an-empty code{{font-family:var(--font-mono);font-size:11px;color:var(--text-2);
+    background:var(--surface-2);padding:1px 5px;border-radius:3px}}
+  .an-card{{
+    background:var(--ink-soft);border:1px solid var(--border);border-radius:10px;
+    padding:12px 14px;cursor:pointer;transition:border-color 0.15s,transform 0.15s;
+    display:flex;flex-direction:column;gap:6px;
+  }}
+  .an-card:hover{{border-color:var(--accent);transform:translateY(-1px)}}
+  .an-head{{display:flex;justify-content:space-between;align-items:flex-start;gap:6px}}
+  .an-tkr{{font-family:var(--font-mono);font-size:13px;font-weight:600;color:var(--text);line-height:1.1}}
+  .an-ind{{font-family:var(--font-ui);font-size:10px;color:var(--text-dim);font-weight:400;
+    margin-top:3px;letter-spacing:0.02em;line-height:1.2}}
+  .an-rec{{font-family:var(--font-mono);font-size:9.5px;font-weight:600;letter-spacing:0.06em;
+    padding:2px 6px;border-radius:4px;border:1px solid;white-space:nowrap;line-height:1.2}}
+  .an-rec-strong-buy{{color:var(--up);border-color:var(--up);background:rgba(52,211,153,0.12)}}
+  .an-rec-buy{{color:var(--up);border-color:var(--up)}}
+  .an-rec-hold{{color:var(--accent);border-color:var(--accent)}}
+  .an-rec-sell{{color:var(--down);border-color:var(--down)}}
+  .an-rec-strong-sell{{color:var(--down);border-color:var(--down);background:rgba(248,113,113,0.12)}}
+  .an-rec-none{{color:var(--text-dim);border-color:var(--text-dim)}}
+  .an-name{{font-family:var(--font-ui);font-size:11px;color:var(--text-2);line-height:1.3;
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
+  .an-prices{{font-family:var(--font-mono);font-size:11.5px;color:var(--text-2);display:flex;
+    align-items:baseline;gap:6px}}
+  .an-cur{{color:var(--text-2)}}
+  .an-arrow{{color:var(--text-dim)}}
+  .an-tgt{{color:var(--text);font-weight:500}}
+  .an-upside{{font-family:var(--font-mono);font-size:15px;font-weight:600;letter-spacing:-0.01em;line-height:1.1}}
+  .an-upside.pos{{color:var(--up)}}
+  .an-upside.neg{{color:var(--down)}}
+  .an-foot{{font-family:var(--font-mono);font-size:9.5px;color:var(--text-dim);
+    text-transform:uppercase;letter-spacing:0.08em}}
+  @media (max-width:900px){{
+    .an-grid{{grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:8px}}
+  }}
+  .wl-head-row h3,.news-head h3{{
+    margin:0 0 4px;font-family:var(--font-display);font-size:18px;
+    font-weight:400;color:var(--text);letter-spacing:-0.01em;
+  }}
+  .wl-head-row h3 .muted,.news-head .muted{{color:var(--text-dim);font-size:14px;margin-left:4px}}
+  .wl-head-row p.muted{{margin:0 0 14px;font-family:var(--font-ui);font-size:12px;
+    color:var(--text-dim);line-height:1.5}}
+  .wl-head-row code{{font-family:var(--font-mono);font-size:11px;color:var(--text-2);
+    background:var(--surface-2);padding:1px 5px;border-radius:3px}}
+  .wl-grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:10px}}
+  .wl-card{{
+    background:var(--ink-soft);border:1px solid var(--border);border-radius:10px;
+    padding:12px 14px;cursor:pointer;transition:border-color 0.15s,transform 0.15s;
+    display:flex;flex-direction:column;gap:6px;
+  }}
+  .wl-card:hover{{border-color:var(--accent);transform:translateY(-1px)}}
+  .wl-head{{display:flex;justify-content:space-between;align-items:flex-start;gap:6px}}
+  .wl-tkr{{font-family:var(--font-mono);font-size:13px;font-weight:600;color:var(--text);line-height:1.1}}
+  .wl-ind{{font-family:var(--font-ui);font-size:10px;color:var(--text-dim);font-weight:400;
+    margin-top:3px;letter-spacing:0.02em;line-height:1.2}}
+  .wl-pct{{font-family:var(--font-mono);font-size:14px;font-weight:600;letter-spacing:-0.01em;line-height:1.1}}
+  .wl-pct.pos{{color:var(--up)}}
+  .wl-pct.neg{{color:var(--down)}}
+  .wl-name{{font-family:var(--font-ui);font-size:11px;color:var(--text-2);line-height:1.3;
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
+  .wl-price{{font-family:var(--font-mono);font-size:11.5px;color:var(--text-2);display:flex;
+    align-items:baseline;justify-content:space-between;gap:6px}}
+  .wl-latest{{color:var(--text);font-weight:500}}
+  .wl-gbp{{color:var(--text-dim);font-size:10.5px}}
+  .wl-spark{{height:48px;width:100%}}
+  .wl-spark.pos{{color:var(--up)}}
+  .wl-spark.neg{{color:var(--down)}}
+  .wl-spark .sparkline{{width:100%;height:100%;display:block}}
+  .wl-foot{{display:flex;justify-content:space-between;align-items:center;font-family:var(--font-mono);
+    font-size:9.5px;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.08em}}
+  .wl-note{{color:var(--text-2);font-family:var(--font-ui);text-transform:none;letter-spacing:0;
+    font-size:10.5px;text-align:right;max-width:60%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
+
+  /* News panel */
+  .news-head{{display:flex;justify-content:space-between;align-items:baseline;gap:10px;margin-bottom:10px}}
+  .news-stale{{font-family:var(--font-mono);font-size:10px;letter-spacing:0.04em;color:var(--text-dim)}}
+  .news-stale.news-live{{color:var(--up)}}
+  .news-stale.news-live::before{{content:"";display:inline-block;width:6px;height:6px;border-radius:50%;
+    background:var(--up);margin-right:6px;vertical-align:1px;
+    box-shadow:0 0 0 0 var(--up);animation:pulse 2.4s ease-out infinite}}
+  .news-list{{display:flex;flex-direction:column;gap:0;max-height:340px;overflow-y:auto}}
+  .news-row{{display:block;padding:10px 0;border-bottom:1px solid var(--border);
+    text-decoration:none;color:inherit;transition:background 0.12s}}
+  .news-row:last-child{{border-bottom:none}}
+  .news-row:hover{{background:rgba(245,158,11,0.04)}}
+  .news-title{{font-family:var(--font-ui);font-size:12.5px;color:var(--text);line-height:1.35;
+    font-weight:500}}
+  .news-row:hover .news-title{{color:var(--accent)}}
+  .news-meta{{font-family:var(--font-mono);font-size:10px;color:var(--text-dim);
+    margin-top:4px;letter-spacing:0.02em}}
+  .news-src{{color:var(--text-2)}}
+  .news-dot{{margin:0 6px;opacity:0.5}}
+  @media (max-width:900px){{
+    .wl-news-row{{grid-template-columns:1fr;gap:10px}}
+    .wl-grid{{grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:8px}}
+  }}
+
   .untracked{{margin:32px 0 8px;padding:18px 20px;border:1px solid var(--border);
     border-radius:12px;background:var(--surface);}}
   .untracked-head h3{{margin:0 0 4px;font-family:var(--font-display);font-size:18px;
@@ -1516,6 +2058,11 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     font-family:var(--font-mono);font-size:9px;background:transparent;color:var(--text-dim);
     padding:1px 5px;border-radius:4px;font-weight:600;letter-spacing:0.08em;
     border:1px solid var(--text-dim);
+  }}
+  .badge-watch{{
+    font-family:var(--font-mono);font-size:9px;background:transparent;color:var(--accent);
+    padding:1px 5px;border-radius:4px;font-weight:600;letter-spacing:0.08em;
+    border:1px solid var(--accent);
   }}
   .tkr-sub{{font-family:var(--font-ui);font-size:10.5px;color:var(--text-dim);font-weight:400;margin-top:2px;
     overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:200px}}
@@ -1703,6 +2250,11 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
 {contrib_html}
 
 {regret_html}
+
+<div class="wl-news-row">
+  {analyst_html}
+  {news_html}
+</div>
 
 <section class="panel active" id="panel-0">
   {render_toolbar(0, n_total)}
@@ -2023,16 +2575,22 @@ function openModal(ticker) {{
   const tickerEl = modal.querySelector('.modal-ticker');
   const ccyBadge = (d.currency && d.currency !== '{BASE_CCY}') ?
     ` <span class="badge-ccy">${{d.currency}}</span>` : '';
-  const weightBadge = (d.status === 'open') ?
-    ` <span class="badge-weight" title="${{d.shares_held}} units (1 unit per trade entry)">${{d.shares_held}} u</span>` :
-    ` <span class="badge-closed">CLOSED</span>`;
+  let weightBadge;
+  if (d.status === 'open') {{
+    weightBadge = ` <span class="badge-weight" title="${{d.shares_held}} units (1 unit per trade entry)">${{d.shares_held}} u</span>`;
+  }} else if (d.status === 'watch') {{
+    weightBadge = ' <span class="badge-watch" title="On watchlist, not held">WATCH</span>';
+  }} else {{
+    weightBadge = ' <span class="badge-closed">CLOSED</span>';
+  }}
   tickerEl.innerHTML = ticker + ccyBadge + weightBadge;
   modal.querySelector('.modal-name').textContent = d.name || ticker;
   modal.querySelector('.modal-industry').textContent = d.industry || d.sector || '';
   const pct = modal.querySelector('.modal-pct');
   pct.textContent = fmtPct(d.total, true);
   pct.className = 'modal-pct ' + (d.total >= 0 ? 'pos' : 'neg');
-  modal.querySelector('.modal-since').textContent = 'since ' + fmtDate(d.baseline_date);
+  const sinceLabel = (d.status === 'watch') ? 'last 12 months' : ('since ' + fmtDate(d.baseline_date));
+  modal.querySelector('.modal-since').textContent = sinceLabel;
   // Signal line
   const sigEl = modal.querySelector('#modal-signal');
   if (d.signal) {{
@@ -2218,6 +2776,66 @@ document.querySelectorAll('#ret-table tbody tr').forEach(row => {{
 document.querySelectorAll('.contrib-table tbody tr, .regret-table tbody tr').forEach(row => {{
   row.addEventListener('click', () => openModal(row.dataset.ticker));
 }});
+document.querySelectorAll('.wl-card, .an-card').forEach(card => {{
+  card.addEventListener('click', () => openModal(card.dataset.ticker));
+}});
+
+// ---- Live news refresh via Cloudflare Worker --------------------------
+// The static news box is rendered server-side at build time as a fallback.
+// If NEWS_WORKER_URL is set, fetch fresh items on page load and swap them in.
+// On any failure (Worker down, network blip, CORS issue), the static fallback
+// stays untouched — silent graceful degradation.
+const NEWS_WORKER_URL = {news_worker_url_js};
+
+async function refreshNewsFromWorker() {{
+  if (!NEWS_WORKER_URL) return;
+  try {{
+    const resp = await fetch(NEWS_WORKER_URL, {{cache: 'no-cache'}});
+    if (!resp.ok) return;
+    const data = await resp.json();
+    if (!data || !Array.isArray(data.items) || data.items.length === 0) return;
+    renderLiveNews(data.items, data.fetched_at);
+  }} catch (e) {{ /* keep fallback */ }}
+}}
+
+function renderLiveNews(items, fetchedAt) {{
+  const list = document.querySelector('.news-list');
+  if (!list) return;
+  list.innerHTML = items.map(it => {{
+    const when = relativeNewsTime(new Date(it.published));
+    return `<a class="news-row" href="${{escapeNewsHtml(it.link)}}" target="_blank" rel="noopener noreferrer">`
+      + `<div class="news-title">${{escapeNewsHtml(it.title)}}</div>`
+      + `<div class="news-meta"><span class="news-src">${{escapeNewsHtml(it.source)}}</span>`
+      + `<span class="news-dot">·</span><span class="news-when">${{escapeNewsHtml(when)}}</span></div>`
+      + `</a>`;
+  }}).join('');
+  const stale = document.querySelector('.news-stale');
+  if (stale && fetchedAt) {{
+    const t = new Date(fetchedAt);
+    const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    const pad = n => String(n).padStart(2,'0');
+    stale.textContent = `live · ${{pad(t.getUTCDate())}} ${{months[t.getUTCMonth()]}} ${{pad(t.getUTCHours())}}:${{pad(t.getUTCMinutes())}} UTC`;
+    stale.classList.add('news-live');
+  }}
+}}
+
+function relativeNewsTime(date) {{
+  const secs = Math.floor((Date.now() - date.getTime()) / 1000);
+  if (secs < 60) return 'just now';
+  if (secs < 3600) return `${{Math.floor(secs / 60)}}m ago`;
+  if (secs < 86400) return `${{Math.floor(secs / 3600)}}h ago`;
+  const days = Math.floor(secs / 86400);
+  if (days < 7) return `${{days}}d ago`;
+  return date.toLocaleDateString('en-GB', {{day: '2-digit', month: 'short'}});
+}}
+
+function escapeNewsHtml(s) {{
+  const d = document.createElement('div');
+  d.textContent = String(s == null ? '' : s);
+  return d.innerHTML;
+}}
+
+refreshNewsFromWorker();
 </script>
 
 </body>
@@ -2243,8 +2861,15 @@ def main() -> None:
     print(f"  {n_txns} transactions ({n_buys} buys, {n_sells} sells) across "
           f"{transactions.ticker.nunique()} tickers")
 
-    ticker_list = sorted(transactions.ticker.unique().tolist())
-    print(f"Pulling {len(ticker_list)} tickers from yfinance (native currencies)...")
+    watchlist = load_watchlist()
+    if not watchlist.empty:
+        print(f"Watchlist: {len(watchlist)} ticker(s) from {WATCHLIST_CSV.name}")
+
+    txn_tickers = set(transactions.ticker.unique().tolist())
+    watch_tickers = set(watchlist.ticker.tolist()) if not watchlist.empty else set()
+    ticker_list = sorted(txn_tickers | watch_tickers)
+    print(f"Pulling {len(ticker_list)} tickers from yfinance (native currencies)"
+          f" — {len(txn_tickers)} held + {len(watch_tickers - txn_tickers)} watch-only...")
     prices_native = download_prices(ticker_list)
     print(f"Got native prices: {prices_native.shape[0]} rows x {prices_native.shape[1]} tickers")
 
@@ -2311,8 +2936,19 @@ def main() -> None:
     sig_counts = signals.signal.value_counts()
     print(f"Signals: {dict(sig_counts.head(5))}")
 
+    # Analyst panel: candidates = closed positions (stocks previously held).
+    # Treats the panel as "should I buy back in?" rather than "what to add."
+    analyst_candidates = sorted(returns[returns.status == "closed"].index.tolist()) \
+        if not returns.empty else []
+    analyst_cache = load_analyst_cache()
+    analyst = fetch_analyst_data(analyst_candidates, analyst_cache) if analyst_candidates else analyst_cache
+
+    news_items = fetch_news()
+
     html = render_html(returns, prices, meta, basket, bench_series, contrib, transactions,
-                       signals, prices_native, returns_native, untracked=untracked)
+                       signals, prices_native, returns_native, untracked=untracked,
+                       watchlist=watchlist, news_items=news_items, analyst=analyst,
+                       analyst_candidates=analyst_candidates)
     OUT_HTML.parent.mkdir(parents=True, exist_ok=True)
     OUT_HTML.write_text(html, encoding="utf-8")
     print(f"Wrote {OUT_HTML} ({OUT_HTML.stat().st_size/1024:.1f} KB)")

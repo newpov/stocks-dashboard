@@ -1,11 +1,12 @@
-name: Weekly rebuild
+name: Scheduled rebuild
 
 # Triggers:
 #   - push to main (only when source files change; the bot's own docs/data
 #     commits use the default GITHUB_TOKEN and do NOT re-trigger workflows,
 #     so there's no infinite-loop risk here)
-#   - weekly Saturday 08:00 UTC cron (~09:00 London BST) catches new yfinance
-#     prices even if you didn't push anything that week
+#   - daily 08:00 UTC cron (~09:00 London BST) picks up the previous day's
+#     yfinance closes. News is refreshed live by the browser via the Cloudflare
+#     Worker (see worker/README.md), so no need to rebuild more often.
 #   - manual button via the Actions tab
 on:
   push:
@@ -14,9 +15,10 @@ on:
       - 'log.xlsx'
       - 'build.py'
       - 'requirements.txt'
+      - 'watchlist.csv'
       - '.github/workflows/**'
   schedule:
-    - cron: '0 8 * * 6'
+    - cron: '0 8 * * *'
   workflow_dispatch: {}
 
 permissions:
@@ -50,6 +52,6 @@ jobs:
           if git diff --staged --quiet; then
             echo "No changes to commit"
           else
-            git commit -m "Weekly rebuild $(date -u +'%Y-%m-%d')"
+            git commit -m "Scheduled rebuild $(date -u +'%Y-%m-%d %H:%M UTC')"
             git push
           fi
