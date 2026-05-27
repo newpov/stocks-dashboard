@@ -42,6 +42,12 @@ WATCHLIST_CSV = ROOT / "watchlist.csv"
 ANALYST_CACHE = ROOT / "data" / "analyst_cache.parquet"
 ANALYST_TTL_DAYS = 7    # refetch a ticker's analyst data when older than this
 
+# Universe — large-cap reference list for the industry outlook section.
+# Refreshed monthly (file-mtime TTL); daily builds reuse cached results.
+UNIVERSE_CSV = ROOT / "universe.csv"
+UNIVERSE_CACHE = ROOT / "data" / "universe_outlook_cache.parquet"
+UNIVERSE_TTL_DAYS = 30
+
 # How many candidates the analyst panel shows in total (the grid scrolls
 # internally past ~6 visible). Safety cap for very large closed-position lists.
 ANALYST_TOP_N = 50
@@ -352,6 +358,134 @@ def load_watchlist() -> pd.DataFrame:
     return df[["ticker", "note"]]
 
 
+def _cap_tier(market_cap) -> str:
+    """Bucket a market cap in USD into a tier string."""
+    if market_cap is None or pd.isna(market_cap) or market_cap <= 0:
+        return ""
+    mc = float(market_cap)
+    if mc >= 200e9: return "MEGA"
+    if mc >= 10e9:  return "LARGE"
+    if mc >= 2e9:   return "MID"
+    return "SMALL"
+
+
+def load_universe() -> list[str]:
+    """Read universe.csv (single column: ticker). Empty/missing → []."""
+    if not UNIVERSE_CSV.exists():
+        return []
+    df = pd.read_csv(UNIVERSE_CSV, dtype=str).fillna("")
+    if "ticker" not in df.columns:
+        return []
+    return (df["ticker"].str.strip().str.upper()
+            .replace("", pd.NA).dropna().drop_duplicates().tolist())
+
+
+def _universe_cache_is_fresh(ttl_days: int = UNIVERSE_TTL_DAYS) -> bool:
+    if not UNIVERSE_CACHE.exists():
+        return False
+    age_seconds = datetime.now(timezone.utc).timestamp() - UNIVERSE_CACHE.stat().st_mtime
+    return (age_seconds / 86400) < ttl_days
+
+
+def fetch_universe_outlook(universe: list[str], meta_cache: pd.DataFrame,
+                           ttl_days: int = UNIVERSE_TTL_DAYS) -> pd.DataFrame:
+    """Return per-ticker precomputed industry outlook data (ret_12m, target,
+    upside, rec, n_an), backed by a parquet cache with file-mtime TTL.
+
+    Daily builds reuse the cache; ~once a month the cache expires and we
+    refetch 12-month prices + analyst targets for the entire universe.
+    Self-contained: doesn't touch the main prices/analyst caches so portfolio
+    behaviour stays unaffected.
+    """
+    if not universe:
+        return pd.DataFrame()
+    if _universe_cache_is_fresh(ttl_days):
+        try:
+            df = pd.read_parquet(UNIVERSE_CACHE)
+            age = (datetime.now(timezone.utc).timestamp() - UNIVERSE_CACHE.stat().st_mtime) / 86400
+            print(f"Universe outlook: cache hit ({len(df)} tickers, {age:.0f}d old)")
+            return df
+        except Exception as e:
+            print(f"WARN universe cache read failed: {e}; refetching", file=sys.stderr)
+
+    print(f"Universe outlook: refreshing {len(universe)} tickers (this is a ~monthly fetch)...")
+    end = (datetime.now(timezone.utc) + timedelta(days=1)).strftime("%Y-%m-%d")
+    start = (datetime.now(timezone.utc) - timedelta(days=400)).strftime("%Y-%m-%d")
+
+    # 13-month price history — enough for a clean 12mo return without edge effects
+    try:
+        raw = yf.download(universe, start=start, end=end, auto_adjust=True,
+                          progress=False, group_by="ticker", threads=True)
+    except Exception as e:
+        print(f"WARN universe price fetch failed: {e}", file=sys.stderr)
+        return pd.DataFrame()
+
+    cutoff = pd.Timestamp.now() - pd.DateOffset(months=12)
+    rows: list[dict] = []
+    for tkr in universe:
+        try:
+            s = raw[tkr]["Close"].dropna()
+        except (KeyError, ValueError):
+            continue
+        if s.index.tz is not None:
+            s.index = s.index.tz_localize(None)
+        s = s[s.index >= cutoff]
+        if len(s) < 30:
+            continue
+        ret_12m = (float(s.iloc[-1]) / float(s.iloc[0]) - 1) * 100 if s.iloc[0] else 0.0
+        rows.append({"ticker": tkr, "ret_12m": ret_12m})
+
+    if not rows:
+        print("WARN universe outlook: no usable price series", file=sys.stderr)
+        return pd.DataFrame()
+
+    df = pd.DataFrame(rows).set_index("ticker")
+
+    # Industry classification — reuse meta cache, fetch only what's missing.
+    # Cached forever in data/meta.csv; subsequent universe refreshes are free.
+    missing_meta = [t for t in df.index if t not in meta_cache.index]
+    if missing_meta:
+        print(f"Universe outlook: fetching industry meta for {len(missing_meta)} new tickers")
+        meta_cache = fetch_meta(missing_meta, meta_cache)
+    df["industry"] = [
+        str(meta_cache.loc[t, "industry"] or meta_cache.loc[t, "sector"] or "")
+        if t in meta_cache.index else ""
+        for t in df.index
+    ]
+
+    # Analyst data — parallel fetch with the same fetch_analyst_data helper.
+    # We pass a fresh empty cache so all tickers are fetched in one batch;
+    # results are stored in the universe parquet (not the portfolio analyst
+    # cache) to keep the two pools cleanly separated.
+    print(f"Universe outlook: fetching analyst data for {len(df)} tickers...")
+    a = fetch_analyst_data(df.index.tolist(),
+                           pd.DataFrame(columns=["target_mean","target_high","target_low",
+                                                 "num_analysts","recommendation","rec_mean",
+                                                 "current_price","fetched_at"]).rename_axis("ticker"))
+    df["target_mean"]   = a.reindex(df.index)["target_mean"]
+    df["current_price"] = a.reindex(df.index)["current_price"]
+    df["recommendation"]= a.reindex(df.index)["recommendation"].fillna("")
+    df["num_analysts"]  = a.reindex(df.index)["num_analysts"]
+    df["market_cap"]    = a.reindex(df.index)["market_cap"]
+    # Upside %: (target / current - 1) * 100, when both are defined
+    df["upside"] = df.apply(
+        lambda r: ((r["target_mean"] / r["current_price"] - 1) * 100
+                   if pd.notna(r["target_mean"]) and pd.notna(r["current_price"])
+                   and r["target_mean"] > 0 and r["current_price"] > 0 else float("nan")),
+        axis=1,
+    )
+    # Market-cap tier — Mega >$200B, Large $10-200B, Mid $2-10B, Small <$2B.
+    df["cap_tier"] = df["market_cap"].apply(_cap_tier)
+
+    UNIVERSE_CACHE.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        df.to_parquet(UNIVERSE_CACHE)
+        print(f"Universe outlook: cached {len(df)} tickers to {UNIVERSE_CACHE.name}")
+    except Exception as e:
+        print(f"WARN couldn't cache universe outlook: {e}", file=sys.stderr)
+    return df
+
+
 def fetch_news(max_items: int = NEWS_MAX_ITEMS) -> list[dict]:
     """Pull recent headlines from a couple of free finance RSS feeds.
 
@@ -465,12 +599,15 @@ def fetch_meta(tickers: list[str], cache: pd.DataFrame) -> pd.DataFrame:
 
 
 def load_analyst_cache() -> pd.DataFrame:
+    cols = ["target_mean", "target_high", "target_low", "num_analysts",
+            "recommendation", "rec_mean", "current_price", "market_cap", "fetched_at"]
     if not ANALYST_CACHE.exists():
-        return pd.DataFrame(columns=[
-            "target_mean", "target_high", "target_low", "num_analysts",
-            "recommendation", "rec_mean", "current_price", "fetched_at",
-        ]).rename_axis("ticker")
+        return pd.DataFrame(columns=cols).rename_axis("ticker")
     df = pd.read_parquet(ANALYST_CACHE)
+    # Backward-compat: older caches lack market_cap. Pre-fill so downstream code
+    # can rely on the column existing.
+    if "market_cap" not in df.columns:
+        df["market_cap"] = float("nan")
     if "fetched_at" in df.columns:
         df["fetched_at"] = pd.to_datetime(df["fetched_at"], utc=True)
     return df
@@ -505,6 +642,7 @@ def fetch_analyst_data(tickers: list[str], cache: pd.DataFrame,
                 "recommendation": (info.get("recommendationKey") or "").lower(),
                 "rec_mean":     info.get("recommendationMean"),
                 "current_price": info.get("currentPrice"),
+                "market_cap":   info.get("marketCap"),
                 "fetched_at":   now,
             }
         except Exception as e:
@@ -512,7 +650,7 @@ def fetch_analyst_data(tickers: list[str], cache: pd.DataFrame,
             return t, {
                 "target_mean": None, "target_high": None, "target_low": None,
                 "num_analysts": None, "recommendation": "", "rec_mean": None,
-                "current_price": None, "fetched_at": now,
+                "current_price": None, "market_cap": None, "fetched_at": now,
             }
 
     rows = []
@@ -1001,7 +1139,7 @@ def _industry_label(meta: pd.DataFrame, tkr: str) -> str:
 
 
 def render_table(returns: pd.DataFrame, weekly: pd.DataFrame, meta: pd.DataFrame,
-                 signals: pd.DataFrame) -> str:
+                 signals: pd.DataFrame, analyst: pd.DataFrame | None = None) -> str:
     rows = []
     for tkr, r in returns.iterrows():
         if tkr in weekly.columns:
@@ -1058,12 +1196,49 @@ def render_table(returns: pd.DataFrame, weekly: pd.DataFrame, meta: pd.DataFrame
         else:
             post_exit_cell = '<td class="num post-exit dim dim-mobile" data-v="0">&mdash;</td>'
 
+        # Analyst cells — target, upside %, recommendation + analyst count.
+        # All three are em-dashed when the ticker has no analyst coverage
+        # (small caps, recent IPOs, some non-US tickers).
+        a_target_cell = '<td class="num t-target dim dim-mobile" data-v="0">&mdash;</td>'
+        a_upside_cell = '<td class="num t-upside dim dim-mobile" data-v="0">&mdash;</td>'
+        a_rec_cell    = '<td class="t-rec dim" data-v="">&mdash;</td>'
+        if analyst is not None and not analyst.empty and tkr in analyst.index:
+            a = analyst.loc[tkr]
+            target_native = a.get("target_mean")
+            cur_native = a.get("current_price")
+            if (target_native is not None and pd.notna(target_native) and target_native > 0
+                and cur_native is not None and pd.notna(cur_native) and cur_native > 0):
+                # Apply the same pence-to-major divisor used elsewhere so the
+                # display matches the rest of the row (also native ccy).
+                raw_ccy = str(meta.loc[tkr, "currency"]) if tkr in meta.index else "USD"
+                _, divisor = normalize_currency(raw_ccy)
+                t_major = float(target_native) / divisor
+                upside = (float(target_native) / float(cur_native) - 1) * 100
+                ccy_sym = CCY_SYMBOLS.get(ticker_currency(meta, tkr), "")
+                a_target_cell = (f'<td class="num t-target dim-mobile" data-v="{t_major:.4f}">'
+                                 f'{ccy_sym}{t_major:,.2f}</td>')
+                cls = "pos" if upside >= 0 else "neg"
+                a_upside_cell = (f'<td class="num t-upside {cls} dim-mobile" data-v="{upside:.4f}">'
+                                 f'{upside:+.1f}%</td>')
+            rec_raw = str(a.get("recommendation") or "")
+            n_an = int(a["num_analysts"]) if pd.notna(a.get("num_analysts")) else 0
+            if rec_raw and n_an > 0:
+                rec_label, rec_cls = _REC_LABELS.get(rec_raw, ("—", "an-rec-none"))
+                a_rec_cell = (f'<td class="t-rec" data-v="{_esc(rec_raw)}">'
+                              f'<span class="an-rec {rec_cls}">{rec_label}</span>'
+                              f'<div class="t-rec-count">{n_an}</div></td>')
+
+        sector = str(meta.loc[tkr, "sector"]).strip() if tkr in meta.index else ""
         rows.append(
-            f'<tr data-ticker="{tkr}" data-total="{r.total_pct:.4f}" data-weight="{r.weight:.4f}">'
+            f'<tr data-ticker="{tkr}" data-total="{r.total_pct:.4f}" data-weight="{r.weight:.4f}"'
+            f' data-sector="{_esc(sector)}">'
             f'<td class="t-ticker">'
             f'<div class="tkr-main">{tkr}{ccy_badge}{weight_badge}</div>'
             f'<div class="tkr-sub">{industry}</div>'
             f'</td>'
+            f'{a_target_cell}'
+            f'{a_upside_cell}'
+            f'{a_rec_cell}'
             f'{sig_cell}'
             f'<td class="t-spark">{spark}</td>'
             f'<td class="num" data-v="{r.latest:.4f}">{BASE_SYMBOL}{r.latest:,.2f}</td>'
@@ -1082,17 +1257,20 @@ def render_table(returns: pd.DataFrame, weekly: pd.DataFrame, meta: pd.DataFrame
   <thead>
     <tr>
       <th data-col="0" data-num="0">Ticker</th>
-      <th data-col="1" data-num="0">Signal</th>
+      <th data-col="1" data-num="1" class="num dim-mobile" title="Wall Street mean target price (native currency)">Target</th>
+      <th data-col="2" data-num="1" class="num dim-mobile" title="Implied upside from current price to mean target">Upside</th>
+      <th data-col="3" data-num="0" title="Analyst recommendation / number of analysts covering">Analyst</th>
+      <th data-col="4" data-num="0">Signal</th>
       <th>Trend</th>
-      <th data-col="3" data-num="1" class="num">Last</th>
-      <th data-col="4" data-num="1" class="num dim-mobile">Cost</th>
-      <th data-col="5" data-num="1" class="num dim-mobile">Purchased</th>
-      <th data-col="6" data-num="1" class="num">Since baseline</th>
-      <th data-col="7" data-num="1" class="num dim-mobile">1W</th>
-      <th data-col="8" data-num="1" class="num dim-mobile">1M</th>
-      <th data-col="9" data-num="1" class="num dim-mobile">3M</th>
-      <th data-col="10" data-num="1" class="num">YTD</th>
-      <th data-col="11" data-num="1" class="num dim-mobile" title="For closed positions: how the stock has moved since you sold. Positive = regret, negative = lucky escape.">Post-exit</th>
+      <th data-col="6" data-num="1" class="num">Last</th>
+      <th data-col="7" data-num="1" class="num dim-mobile">Cost</th>
+      <th data-col="8" data-num="1" class="num dim-mobile">Purchased</th>
+      <th data-col="9" data-num="1" class="num">Since baseline</th>
+      <th data-col="10" data-num="1" class="num dim-mobile">1W</th>
+      <th data-col="11" data-num="1" class="num dim-mobile">1M</th>
+      <th data-col="12" data-num="1" class="num dim-mobile">3M</th>
+      <th data-col="13" data-num="1" class="num">YTD</th>
+      <th data-col="14" data-num="1" class="num dim-mobile" title="For closed positions: how the stock has moved since you sold. Positive = regret, negative = lucky escape.">Post-exit</th>
     </tr>
   </thead>
   <tbody>{body}</tbody>
@@ -1621,6 +1799,218 @@ def render_analyst_signals(rows: list[dict], candidate_pool_size: int) -> str:
 </section>"""
 
 
+def build_industry_attribution(returns: pd.DataFrame, meta: pd.DataFrame,
+                                top_n: int = 12) -> tuple[list[dict], float]:
+    """Aggregate the user's OPEN positions by industry to show which industries
+    drive the basket return up or down.
+
+    Each row's "contribution to basket" is its cost-weighted return share —
+    (industry_cost / basket_cost) * industry_avg_return. Sum across all
+    industries equals the basket return (modulo tiny rounding from individual
+    weights). Returns (rows_sorted_by_contribution_desc, basket_avg_return).
+    """
+    if returns.empty:
+        return [], 0.0
+    open_pos = returns[returns.status == "open"].copy()
+    if open_pos.empty:
+        return [], 0.0
+    # Map ticker -> industry from meta. Tickers with no industry are bucketed
+    # as "Other" so basket attribution still sums to the basket total.
+    open_pos["industry"] = [
+        (str(meta.loc[t, "industry"] or meta.loc[t, "sector"] or "").strip()
+         if t in meta.index else "") or "Other"
+        for t in open_pos.index
+    ]
+    total_cost = float(open_pos["weight"].sum())
+    if total_cost <= 0:
+        return [], 0.0
+    # Basket-wide cost-weighted average return — anchor for "vs basket avg"
+    basket_avg = float((open_pos["weight"] * open_pos["total_pct"]).sum() / total_cost)
+    rows = []
+    for industry, g in open_pos.groupby("industry"):
+        ind_cost = float(g["weight"].sum())
+        if ind_cost <= 0:
+            continue
+        ind_avg = float((g["weight"] * g["total_pct"]).sum() / ind_cost)
+        contrib = (ind_cost / total_cost) * ind_avg   # pp contribution to basket
+        rows.append({
+            "industry": industry,
+            "n_holdings": int(len(g)),
+            "cost_basis": ind_cost,
+            "avg_return": ind_avg,
+            "contribution_pp": contrib,
+            "vs_basket": ind_avg - basket_avg,
+        })
+    rows.sort(key=lambda r: r["contribution_pp"], reverse=True)
+    return rows[:top_n], basket_avg
+
+
+def render_industry_attribution(rows: list[dict], basket_avg: float) -> str:
+    if not rows:
+        return ""
+    # Find max absolute contribution to scale the horizontal bars
+    max_abs = max((abs(r["contribution_pp"]) for r in rows), default=1.0) or 1.0
+    body = []
+    for r in rows:
+        ret_cls = "pos" if r["avg_return"] >= 0 else "neg"
+        contrib_cls = "pos" if r["contribution_pp"] >= 0 else "neg"
+        vs_cls = "pos" if r["vs_basket"] >= 0 else "neg"
+        # Bar: width % proportional to |contribution| / max_abs.
+        # Positive bars sit right of the zero axis (col 5); negative left.
+        bar_pct = abs(r["contribution_pp"]) / max_abs * 50  # max half-width 50%
+        if r["contribution_pp"] >= 0:
+            bar_style = f'left:50%;width:{bar_pct:.1f}%;background:var(--up);'
+        else:
+            bar_style = f'left:{50 - bar_pct:.1f}%;width:{bar_pct:.1f}%;background:var(--down);'
+        body.append(
+            f'<tr data-industry="{_esc(r["industry"])}">'
+            f'<td class="ia-industry">{_esc(r["industry"])}</td>'
+            f'<td class="num ia-n">{r["n_holdings"]}</td>'
+            f'<td class="num ia-cost">{BASE_SYMBOL}{r["cost_basis"]:,.0f}</td>'
+            f'<td class="num {ret_cls} ia-ret">{r["avg_return"]:+.1f}%</td>'
+            f'<td class="num {contrib_cls} ia-contrib">{r["contribution_pp"]:+.2f} pp</td>'
+            f'<td class="num {vs_cls} ia-vs">{r["vs_basket"]:+.1f} pp</td>'
+            f'<td class="ia-bar"><div class="ia-bar-axis"></div>'
+            f'<div class="ia-bar-fill" style="{bar_style}"></div></td>'
+            f'</tr>'
+        )
+    return f"""<section class="attribution-section">
+  <div class="ia-head-row">
+    <h3>Industry attribution <span class="muted">({len(rows)})</span></h3>
+    <p class="muted">Cost-weighted contribution to your basket return, grouped by industry —
+    open positions only. Basket weighted-avg return: <strong>{basket_avg:+.2f}%</strong>.
+    Bars show each industry's signed contribution to the basket; longer = bigger driver.</p>
+  </div>
+  <div class="ia-scroll">
+    <table class="ia-table">
+      <thead><tr>
+        <th>Industry</th>
+        <th class="num">Holdings</th>
+        <th class="num">Cost basis</th>
+        <th class="num">Avg return</th>
+        <th class="num">Contrib</th>
+        <th class="num">vs basket</th>
+        <th>Contribution bar</th>
+      </tr></thead>
+      <tbody>{''.join(body)}</tbody>
+    </table>
+  </div>
+</section>"""
+
+
+def build_industry_outlook(universe_outlook: pd.DataFrame | None,
+                           log_tickers: set[str] | None = None,
+                           min_holdings: int = 3,
+                           top_industries: int = 6, top_stocks_per: int = 3) -> list[dict]:
+    """Industry leaderboard built from the reference universe ONLY, with any
+    ticker the user already holds (open or closed) filtered out so the section
+    surfaces genuinely new ideas.
+
+    Aggregates by industry: avg 12-month return, top stocks by analyst price-
+    target upside. Requires min_holdings tickers per industry so a single
+    name can't dominate the ranking.
+    """
+    if universe_outlook is None or universe_outlook.empty:
+        return []
+    skip = log_tickers or set()
+    records: list[dict] = []
+    for tkr, row in universe_outlook.iterrows():
+        if tkr in skip:
+            continue
+        industry = str(row.get("industry") or "").strip()
+        if not industry:
+            continue
+        ret_12m = row.get("ret_12m")
+        if ret_12m is None or pd.isna(ret_12m):
+            continue
+        up_val = row.get("upside")
+        records.append({
+            "ticker": tkr, "industry": industry,
+            "ret_12m": float(ret_12m),
+            "upside": (None if up_val is None or pd.isna(up_val) else float(up_val)),
+            "rec": str(row.get("recommendation") or ""),
+            "n_an": int(row["num_analysts"]) if pd.notna(row.get("num_analysts")) else 0,
+            "cap_tier": str(row.get("cap_tier") or ""),
+        })
+    if not records:
+        return []
+    df = pd.DataFrame(records)
+    # Aggregate by industry — require min_holdings tickers per industry so a
+    # one-stock industry can't dominate the chart.
+    groups = []
+    for ind, g in df.groupby("industry"):
+        if len(g) < min_holdings:
+            continue
+        avg_ret = float(g["ret_12m"].mean())
+        # Top stocks per industry: prefer those with analyst upside, sort by
+        # upside; tiebreak with 12mo return so non-covered names still appear
+        # if there's room.
+        g_sorted = g.sort_values(
+            by=["upside", "ret_12m"], ascending=[False, False],
+            na_position="last",
+        ).head(top_stocks_per)
+        top = [{
+            "ticker": r.ticker,
+            "ret_12m": float(r.ret_12m),
+            "upside": (None if r.upside is None or pd.isna(r.upside) else float(r.upside)),
+            "rec": str(r.rec),
+            "n_an": int(r.n_an),
+            "cap_tier": str(getattr(r, "cap_tier", "") or ""),
+        } for r in g_sorted.itertuples(index=False)]
+        groups.append({
+            "industry": ind,
+            "n_holdings": int(len(g)),
+            "avg_ret_12m": avg_ret,
+            "top_stocks": top,
+        })
+    groups.sort(key=lambda x: x["avg_ret_12m"], reverse=True)
+    return groups[:top_industries]
+
+
+def render_industry_outlook(groups: list[dict], universe_size: int) -> str:
+    if not groups:
+        return ""
+    cards = []
+    for g in groups:
+        stock_rows = []
+        for s in g["top_stocks"]:
+            if s["upside"] is not None and s["rec"]:
+                rec_label, rec_cls = _REC_LABELS.get(s["rec"], ("—", "an-rec-none"))
+                up_cls = "pos" if s["upside"] >= 0 else "neg"
+                meta_html = (f'<span class="an-rec {rec_cls}">{rec_label}</span>'
+                             f'<span class="io-up {up_cls}">{s["upside"]:+.0f}% target</span>')
+            else:
+                meta_html = '<span class="io-no-cov">no analyst coverage</span>'
+            ret_cls = "pos" if s["ret_12m"] >= 0 else "neg"
+            tier = s.get("cap_tier", "")
+            tier_html = f'<span class="io-tier io-tier-{tier.lower()}">{tier}</span>' if tier else ""
+            stock_rows.append(
+                f'<div class="io-stock" data-ticker="{s["ticker"]}">'
+                f'<div class="io-tkr">{s["ticker"]}{tier_html}</div>'
+                f'<div class="io-ret {ret_cls}">{s["ret_12m"]:+.0f}%</div>'
+                f'<div class="io-meta">{meta_html}</div>'
+                f'</div>'
+            )
+        avg_cls = "pos" if g["avg_ret_12m"] >= 0 else "neg"
+        cards.append(
+            f'<div class="io-card">'
+            f'<div class="io-head">'
+            f'<div class="io-industry">{_esc(g["industry"])}</div>'
+            f'<div class="io-avg {avg_cls}">{g["avg_ret_12m"]:+.0f}% avg 12mo</div>'
+            f'</div>'
+            f'<div class="io-sub muted">{g["n_holdings"]} tracked stocks</div>'
+            f'<div class="io-stocks">{"".join(stock_rows)}</div>'
+            f'</div>'
+        )
+    return f"""<section class="industry-section">
+  <div class="io-head-row">
+    <h3>Industry outlook <span class="muted">({len(groups)})</span></h3>
+    <p class="muted">12-mo return leaders from <code>universe.csv</code> ({universe_size} stocks), excluding everything in <code>log.xlsx</code>. Refreshed monthly.</p>
+  </div>
+  <div class="io-grid">{''.join(cards)}</div>
+</section>"""
+
+
 def render_news(news_items: list[dict]) -> str:
     if not news_items:
         return """<section class="news-section">
@@ -1654,7 +2044,24 @@ def render_news(news_items: list[dict]) -> str:
 </section>"""
 
 
-def render_toolbar(panel_n: int, n: int) -> str:
+def render_toolbar(panel_n: int, n: int, returns: pd.DataFrame | None = None,
+                   meta: pd.DataFrame | None = None) -> str:
+    # Sector chips — derived from the GICS sectors actually present in returns.
+    # Empty sector falls into "Other" so users can still reach those.
+    sector_chips = ""
+    if returns is not None and meta is not None and not returns.empty:
+        sectors_seen: dict[str, int] = {}
+        for tkr in returns.index:
+            sec = (str(meta.loc[tkr, "sector"]).strip() if tkr in meta.index else "") or "Other"
+            sectors_seen[sec] = sectors_seen.get(sec, 0) + 1
+        ordered = sorted(sectors_seen.items(), key=lambda x: (-x[1], x[0]))
+        chip_html = ['<button class="chip chip-sm chip-sec active" data-sector="*">All sectors</button>']
+        for sec, count in ordered:
+            chip_html.append(
+                f'<button class="chip chip-sm chip-sec" data-sector="{_esc(sec)}">'
+                f'{_esc(sec)} <span class="chip-count">{count}</span></button>'
+            )
+        sector_chips = f'<div class="chips chips-sectors" role="tablist">{"".join(chip_html)}</div>'
     return f"""<div class="toolbar">
   <input class="search" placeholder="Filter by ticker..." aria-label="Filter by ticker" />
   <div class="chips" role="tablist">
@@ -1666,6 +2073,7 @@ def render_toolbar(panel_n: int, n: int) -> str:
     <button class="chip" data-filter="top10">Top 10</button>
     <button class="chip" data-filter="bottom10">Bottom 10</button>
   </div>
+  {sector_chips}
 </div>"""
 
 
@@ -1754,7 +2162,8 @@ def build_data_payload(returns: pd.DataFrame, prices: pd.DataFrame,
 
 
 def build_portfolio_payload(basket: pd.Series, bench: pd.Series,
-                            first_purchase: pd.Timestamp) -> dict:
+                            first_purchase: pd.Timestamp,
+                            fx: pd.DataFrame | None = None) -> dict:
     # Resample to weekly to keep JSON small (~3KB vs ~25KB daily)
     def _weekly(s):
         if s.empty:
@@ -1764,10 +2173,21 @@ def build_portfolio_payload(basket: pd.Series, bench: pd.Series,
 
     b_dates, b_values = _weekly(basket)
     s_dates, s_values = _weekly(bench)
+    # FX overlay: yfinance gives USDGBP=X (pounds per dollar, typical ~0.78).
+    # Invert to GBP/USD (dollars per pound, typical ~1.28) so the bar chart
+    # reads naturally: up bar = stronger GBP, down bar = weaker GBP.
+    fx_dates: list[str] = []
+    fx_values: list[float] = []
+    if fx is not None and not fx.empty and "USDGBP=X" in fx.columns:
+        fxs = fx["USDGBP=X"].dropna()
+        if not fxs.empty:
+            fxs = 1.0 / fxs   # invert to GBP/USD
+            fx_dates, fx_values = _weekly(fxs)
     return {
         "first_purchase": first_purchase.strftime("%Y-%m-%d"),
         "basket": {"dates": b_dates, "values": b_values},
-        "spy": {"dates": s_dates, "values": s_values},
+        "spy":    {"dates": s_dates, "values": s_values},
+        "fx":     {"dates": fx_dates, "values": fx_values, "pair": "GBP/USD"},
     }
 
 
@@ -1779,15 +2199,20 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
                 watchlist: pd.DataFrame | None = None,
                 news_items: list[dict] | None = None,
                 analyst: pd.DataFrame | None = None,
-                analyst_candidates: list[str] | None = None) -> str:
+                analyst_candidates: list[str] | None = None,
+                fx: pd.DataFrame | None = None,
+                universe_outlook: pd.DataFrame | None = None) -> str:
     weekly = prices.resample("W-FRI").last().ffill()
     defs_html = render_svg_defs()
-    table_html = render_table(returns, weekly, meta, signals)
+    table_html = render_table(returns, weekly, meta, signals,
+                              analyst=analyst if analyst is not None else None)
     detractors_html = render_detractors_strategy(
         contrib, returns, signals,
         analyst if analyst is not None else pd.DataFrame(),
         meta,
     )
+    attribution_rows, basket_avg = build_industry_attribution(returns, meta)
+    attribution_html = render_industry_attribution(attribution_rows, basket_avg)
     regret_html = render_regret_tracker(returns, meta)
     untracked_html = render_untracked(untracked) if untracked is not None else ""
     # Watchlist plumbing is preserved; the section is temporarily hidden — the
@@ -1798,6 +2223,14 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     analyst_rows = (build_analyst_payload(candidates, analyst, prices_native, meta, signals=signals)
                     if analyst is not None and not analyst.empty else [])
     analyst_html = render_analyst_signals(analyst_rows, len(candidates)) if (analyst_rows or candidates) else ""
+    # Industry outlook — universe-only, excluding everything in log.xlsx
+    log_tickers_set = set(transactions.ticker.unique().tolist()) if not transactions.empty else set()
+    industry_groups = build_industry_outlook(
+        universe_outlook,
+        log_tickers=log_tickers_set,
+    )
+    universe_count = (len(universe_outlook) if universe_outlook is not None else 0)
+    industry_html = render_industry_outlook(industry_groups, universe_count)
     news_html = render_news(news_items or [])
 
     latest_date = prices.index[-1].strftime("%d %b %Y")
@@ -1831,6 +2264,50 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
         best_contrib_pp = worst_contrib_pp = 0.0
         best_contrib_wt = worst_contrib_wt = 0.0
 
+    # --- Replacement stats (replace Basket return + vs SPY in the stat strip) ---
+    # 1. Win rate — share of closed positions that ended profitable
+    closed_positions = returns[returns.status == "closed"] if not returns.empty else returns.iloc[0:0]
+    n_closed_total = len(closed_positions)
+    n_wins = int((closed_positions["total_pct"] > 0).sum()) if n_closed_total else 0
+    win_rate = (n_wins / n_closed_total * 100) if n_closed_total else 0.0
+
+    # 2. Cost-weighted average analyst upside across open positions. Uses the
+    #    analyst cache directly (native ccy for both target and current_price,
+    #    so the ratio is currency-neutral).
+    open_positions = returns[returns.status == "open"] if not returns.empty else returns.iloc[0:0]
+    upside_sum = 0.0
+    upside_weight_sum = 0.0
+    n_open_covered = 0
+    if analyst is not None and not analyst.empty:
+        for tkr, r in open_positions.iterrows():
+            if tkr not in analyst.index:
+                continue
+            a = analyst.loc[tkr]
+            target = a.get("target_mean")
+            cur = a.get("current_price")
+            if (target is None or pd.isna(target) or target <= 0
+                or cur is None or pd.isna(cur) or cur <= 0):
+                continue
+            u = (float(target) / float(cur) - 1) * 100
+            w = float(r.weight) if r.weight else 1.0
+            upside_sum += u * w
+            upside_weight_sum += w
+            n_open_covered += 1
+    avg_upside = (upside_sum / upside_weight_sum) if upside_weight_sum > 0 else 0.0
+
+    # 3. Max drawdown on the basket NAV series. The basket values are already
+    #    % returns over baseline, so convert to multipliers, take cummax, and
+    #    measure each point's drop from that running peak.
+    max_drawdown = 0.0
+    max_drawdown_date_str = ""
+    if not basket.empty:
+        mult = 1 + basket / 100.0
+        running_peak = mult.cummax()
+        dd_series = (mult / running_peak - 1) * 100
+        max_drawdown = float(dd_series.min())
+        if max_drawdown < 0:
+            max_drawdown_date_str = pd.Timestamp(dd_series.idxmin()).strftime("%d %b %y")
+
     data_dict = build_data_payload(returns, prices, meta, contrib, signals,
                                    prices_native, returns_native)
     for tkr, entry in watchlist_payload.items():
@@ -1841,7 +2318,7 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     # and an unset URL becomes the literal `""` (falsy in the JS branch).
     news_worker_url_js = json.dumps(NEWS_WORKER_URL or "")
     portfolio_json = json.dumps(
-        build_portfolio_payload(basket, bench, first_purchase), separators=(",", ":")
+        build_portfolio_payload(basket, bench, first_purchase, fx=fx), separators=(",", ":")
     )
 
     return f"""<!DOCTYPE html>
@@ -1937,7 +2414,11 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
   .leg-swatch{{width:14px;height:3px;border-radius:1px}}
   .leg-swatch.basket{{background:var(--accent)}}
   .leg-swatch.spy{{background:var(--text-dim);height:1px;border-top:1px dashed var(--text-dim)}}
-  .hero-chart-svg-wrap{{position:relative;width:100%;height:320px}}
+  .leg-swatch.fx{{
+    background:linear-gradient(90deg,var(--up) 0%,var(--up) 30%,var(--down) 70%,var(--down) 100%);
+    height:8px;border-radius:1px;
+  }}
+  .hero-chart-svg-wrap{{position:relative;width:100%;height:380px}}
   .hero-chart-svg{{width:100%;height:100%;display:block}}
   .hero-tip{{
     position:absolute;background:var(--ink);border:1px solid var(--accent);border-radius:6px;
@@ -1951,7 +2432,7 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
   .hero-tip .tip-label{{color:var(--text-dim)}}
 
   /* Stats */
-  .stats{{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:14px}}
+  .stats{{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-bottom:14px}}
   .stat{{
     background:linear-gradient(180deg,var(--surface) 0%,var(--ink-soft) 100%);
     border:1px solid var(--border);border-radius:12px;padding:16px 20px;position:relative;overflow:hidden;
@@ -1960,10 +2441,11 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     background:linear-gradient(90deg,transparent,rgba(255,255,255,0.06),transparent)}}
   .stat-label{{font-size:10px;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.18em;font-weight:500}}
   .stat-value{{
-    font-family:var(--font-display);font-size:36px;font-weight:400;margin-top:6px;line-height:1;
+    font-family:var(--font-display);font-size:32px;font-weight:400;margin-top:6px;line-height:1;
     letter-spacing:-0.015em;font-variant-numeric:tabular-nums;
   }}
-  .stat-meta{{font-family:var(--font-mono);font-size:11px;color:var(--text-dim);margin-top:6px}}
+  .stat-meta{{font-family:var(--font-mono);font-size:10.5px;color:var(--text-dim);margin-top:6px;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
   .pos{{color:var(--up)}}
   .neg{{color:var(--down)}}
   .build-info{{margin-top:14px;font-family:var(--font-mono);font-size:11px;color:var(--text-dim)}}
@@ -2070,10 +2552,19 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
   /* Analyst signals + news side-by-side (watchlist shares the .wl-* classes,
      reactivated later by swapping render_watchlist back into the layout) */
   .wl-news-row{{display:grid;grid-template-columns:1.55fr 1fr;gap:14px;margin:28px 0 8px;align-items:start}}
+  /* Outlook + News at top — 50/50 split, both panels stretch to match heights */
+  .outlook-news-row{{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:28px 0 8px;align-items:stretch}}
+  /* Both panels cap at the same height; content overflows into internal scroll */
+  .outlook-news-row > section{{display:flex;flex-direction:column;min-height:520px;max-height:620px}}
+  .outlook-news-row .io-grid{{flex:1 1 auto;overflow-y:auto;min-height:0;max-height:none;
+    grid-template-columns:1fr;gap:10px;padding-right:4px}}
+  .outlook-news-row .news-list{{flex:1 1 auto;min-height:0;max-height:none;overflow-y:auto}}
   .watchlist-section,.news-section,.analyst-section{{
     background:linear-gradient(180deg,var(--surface) 0%,var(--ink-soft) 100%);
     border:1px solid var(--border);border-radius:12px;padding:18px 20px;
   }}
+  /* Full-width analyst section (re-entry ideas) below the main table */
+  section.analyst-section{{margin:22px 0 8px}}
 
   /* Analyst panel */
   .an-head-row h3{{margin:0 0 4px;font-family:var(--font-display);font-size:18px;
@@ -2166,6 +2657,93 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
   .wl-note{{color:var(--text-2);font-family:var(--font-ui);text-transform:none;letter-spacing:0;
     font-size:10.5px;text-align:right;max-width:60%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
 
+  /* Industry attribution (performance attribution of open positions) */
+  .attribution-section{{
+    background:linear-gradient(180deg,var(--surface) 0%,var(--ink-soft) 100%);
+    border:1px solid var(--border);border-radius:12px;padding:18px 20px;
+    margin:14px 0 8px;
+  }}
+  .ia-head-row h3{{margin:0 0 4px;font-family:var(--font-display);font-size:18px;
+    font-weight:400;color:var(--text);letter-spacing:-0.01em}}
+  .ia-head-row h3 .muted{{color:var(--text-dim);font-size:14px;margin-left:4px}}
+  .ia-head-row p.muted{{margin:0 0 14px;font-family:var(--font-ui);font-size:12px;
+    color:var(--text-dim);line-height:1.5}}
+  .ia-head-row strong{{color:var(--text);font-weight:500}}
+  .ia-scroll{{width:100%;overflow-x:auto}}
+  .ia-table{{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}}
+  .ia-table th{{text-align:left;padding:7px 10px;font-size:9.5px;color:var(--text-dim);
+    text-transform:uppercase;letter-spacing:0.14em;font-weight:600;border-bottom:1px solid var(--border)}}
+  .ia-table th.num{{text-align:right}}
+  .ia-table td{{padding:9px 10px;border-bottom:1px solid var(--border);font-size:12.5px;
+    color:var(--text-2)}}
+  .ia-table tbody tr:last-child td{{border-bottom:none}}
+  .ia-table tbody tr{{cursor:default;transition:background 0.12s}}
+  .ia-table tbody tr:hover{{background:var(--surface-2)}}
+  .ia-industry{{font-family:var(--font-ui);font-weight:500;color:var(--text);min-width:160px}}
+  .ia-table .num{{text-align:right;font-family:var(--font-mono);font-size:12px}}
+  .ia-table .num.pos{{color:var(--up);font-weight:500}}
+  .ia-table .num.neg{{color:var(--down);font-weight:500}}
+  /* Bar cell — relative wrapper; axis line at 50%; fill positioned by inline style */
+  .ia-bar{{position:relative;width:200px;min-width:200px;padding:9px 10px;height:30px;
+    background:linear-gradient(90deg,rgba(255,255,255,0.02) 0%,transparent 50%,rgba(255,255,255,0.02) 100%)}}
+  .ia-bar-axis{{position:absolute;top:4px;bottom:4px;left:50%;width:1px;background:var(--text-dim);opacity:0.4}}
+  .ia-bar-fill{{position:absolute;top:8px;bottom:8px;border-radius:2px;opacity:0.7}}
+  @media (max-width:900px){{
+    .ia-bar{{display:none}}
+    .ia-table th,.ia-table td{{padding:8px 6px;font-size:11.5px}}
+  }}
+
+  /* Industry outlook */
+  .industry-section{{
+    background:linear-gradient(180deg,var(--surface) 0%,var(--ink-soft) 100%);
+    border:1px solid var(--border);border-radius:12px;padding:18px 20px;
+    margin:14px 0 8px;
+  }}
+  .io-head-row h3{{margin:0 0 4px;font-family:var(--font-display);font-size:18px;
+    font-weight:400;color:var(--text);letter-spacing:-0.01em}}
+  .io-head-row h3 .muted{{color:var(--text-dim);font-size:14px;margin-left:4px}}
+  .io-head-row p.muted{{margin:0 0 14px;font-family:var(--font-ui);font-size:12px;
+    color:var(--text-dim);line-height:1.5}}
+  .io-head-row code{{font-family:var(--font-mono);font-size:11px;color:var(--text-2);
+    background:var(--surface-2);padding:1px 5px;border-radius:3px}}
+  .io-head-row strong{{color:var(--text-2);font-weight:500}}
+  .io-grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px}}
+  .io-card{{
+    background:var(--ink-soft);border:1px solid var(--border);border-radius:10px;
+    padding:14px 16px;display:flex;flex-direction:column;gap:8px;
+  }}
+  .io-head{{display:flex;justify-content:space-between;align-items:baseline;gap:8px}}
+  .io-industry{{font-family:var(--font-ui);font-size:13px;font-weight:600;color:var(--text);
+    line-height:1.2;letter-spacing:-0.005em}}
+  .io-avg{{font-family:var(--font-mono);font-size:13px;font-weight:600;letter-spacing:-0.01em}}
+  .io-avg.pos{{color:var(--up)}} .io-avg.neg{{color:var(--down)}}
+  .io-sub{{font-family:var(--font-mono);font-size:10px;color:var(--text-dim);
+    text-transform:uppercase;letter-spacing:0.08em;margin-bottom:4px}}
+  .io-stocks{{display:flex;flex-direction:column;gap:6px}}
+  .io-stock{{display:grid;grid-template-columns:auto auto 1fr;gap:10px;align-items:center;
+    padding:5px 0;border-top:1px solid var(--border);cursor:pointer;transition:opacity 0.15s}}
+  .io-stock:first-child{{border-top:none;padding-top:0}}
+  .io-stock:hover{{opacity:0.75}}
+  .io-tkr{{font-family:var(--font-mono);font-size:12px;font-weight:600;color:var(--text);
+    min-width:60px;display:flex;align-items:center;gap:6px}}
+  .io-tier{{font-family:var(--font-mono);font-size:8.5px;font-weight:600;letter-spacing:0.06em;
+    padding:1px 4px;border-radius:3px;border:1px solid;line-height:1.1}}
+  .io-tier-mega{{color:var(--accent);border-color:var(--accent)}}
+  .io-tier-large{{color:var(--text-2);border-color:var(--border)}}
+  .io-tier-mid{{color:var(--up);border-color:var(--up);background:rgba(52,211,153,0.06)}}
+  .io-tier-small{{color:var(--down);border-color:var(--down);background:rgba(248,113,113,0.06)}}
+  .io-ret{{font-family:var(--font-mono);font-size:11.5px;font-weight:500;text-align:right;
+    min-width:55px}}
+  .io-ret.pos{{color:var(--up)}} .io-ret.neg{{color:var(--down)}}
+  .io-meta{{display:flex;gap:8px;align-items:center;font-family:var(--font-mono);font-size:10.5px;
+    justify-content:flex-end}}
+  .io-meta .an-rec{{font-size:9px;padding:1px 5px}}
+  .io-up.pos{{color:var(--up)}} .io-up.neg{{color:var(--down)}}
+  .io-no-cov{{color:var(--text-dim);font-style:italic;font-size:10px}}
+  @media (max-width:900px){{
+    .io-grid{{grid-template-columns:1fr;gap:10px}}
+  }}
+
   /* News panel */
   .news-head{{display:flex;justify-content:space-between;align-items:baseline;gap:10px;margin-bottom:10px}}
   .news-chips{{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:8px}}
@@ -2197,6 +2775,8 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
   .news-dot{{margin:0 6px;opacity:0.5}}
   @media (max-width:900px){{
     .wl-news-row{{grid-template-columns:1fr;gap:10px}}
+    .outlook-news-row{{grid-template-columns:1fr;gap:10px}}
+    .outlook-news-row > section{{min-height:auto}}
     .wl-grid{{grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:8px}}
   }}
 
@@ -2243,6 +2823,11 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     cursor:pointer;transition:all 0.15s;letter-spacing:0.01em}}
   .chip:hover{{border-color:var(--text-dim);color:var(--text)}}
   .chip.active{{background:var(--accent);color:var(--ink);border-color:var(--accent);font-weight:600}}
+  .chips-sectors{{margin-top:8px;width:100%}}
+  .chip.chip-sm{{padding:5px 10px;font-size:10.5px;font-family:var(--font-mono);
+    letter-spacing:0.03em;text-transform:none}}
+  .chip-count{{color:var(--text-dim);font-weight:500;margin-left:4px;font-size:9.5px}}
+  .chip-sm.active .chip-count{{color:var(--ink);opacity:0.7}}
 
   /* Table — internal vertical scroll, no horizontal scroll at desktop sizes */
   .table-scroll{{width:100%;max-height:560px;overflow-y:auto;overflow-x:auto;
@@ -2270,6 +2855,14 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
   #ret-table td.dim{{color:var(--text-dim);font-weight:400}}
   #ret-table td.purchased{{font-size:11.5px;color:var(--text-2);letter-spacing:0.02em}}
   #ret-table td.t-signal{{font-family:var(--font-ui);min-width:110px;padding:7px 10px;line-height:1.2}}
+  /* Analyst columns — target / upside / rec, slotted between Ticker and Signal */
+  #ret-table td.t-target{{padding:7px 8px;min-width:70px;font-size:12px}}
+  #ret-table td.t-upside{{padding:7px 6px;min-width:55px;font-size:12px}}
+  #ret-table td.t-rec{{padding:7px 8px;min-width:95px;line-height:1.2}}
+  #ret-table td.t-rec .an-rec{{font-size:9px;padding:1px 5px;letter-spacing:0.05em}}
+  #ret-table td.t-rec-count,#ret-table .t-rec-count{{
+    font-family:var(--font-mono);font-size:9.5px;color:var(--text-dim);margin-top:3px;
+  }}
   #ret-table td.t-signal.dim{{font-family:var(--font-mono);text-align:left}}
   .sig-main{{font-weight:500;font-size:12px;letter-spacing:0.01em}}
   .sig-detail{{font-family:var(--font-mono);font-size:10px;color:var(--text-dim);margin-top:3px;font-weight:400;letter-spacing:-0.01em}}
@@ -2451,6 +3044,7 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
       <div class="hero-legend">
         <div class="leg"><span class="leg-swatch basket"></span>Basket</div>
         <div class="leg"><span class="leg-swatch spy"></span>SPY</div>
+        <div class="leg"><span class="leg-swatch fx"></span>GBP/USD</div>
       </div>
     </div>
     <div class="hero-chart-svg-wrap">
@@ -2461,14 +3055,19 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
 
   <div class="stats">
     <div class="stat">
-      <div class="stat-label">Basket return</div>
-      <div class="stat-value {_cls(basket_final)}">{basket_final:+.1f}%</div>
-      <div class="stat-meta">since {first_purchase_str}</div>
+      <div class="stat-label">Win rate</div>
+      <div class="stat-value {_cls(win_rate - 50)}">{win_rate:.0f}%</div>
+      <div class="stat-meta">{n_wins} of {n_closed_total} closed wins</div>
     </div>
     <div class="stat">
-      <div class="stat-label">vs SPY</div>
-      <div class="stat-value {_cls(vs_spy)}">{vs_spy:+.1f} pp</div>
-      <div class="stat-meta">SPY {spy_final:+.1f}% same period</div>
+      <div class="stat-label">Avg analyst upside</div>
+      <div class="stat-value {_cls(avg_upside)}">{avg_upside:+.1f}%</div>
+      <div class="stat-meta">{n_open_covered} of {n_open} open covered</div>
+    </div>
+    <div class="stat">
+      <div class="stat-label">Max drawdown</div>
+      <div class="stat-value neg">{max_drawdown:.1f}%</div>
+      <div class="stat-meta">{('trough: ' + max_drawdown_date_str) if max_drawdown_date_str else 'no drawdown yet'}</div>
     </div>
     <div class="stat">
       <div class="stat-label">Top contributor</div>
@@ -2487,17 +3086,21 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
   </div>
 </header>
 
-{detractors_html}
-
-<div class="wl-news-row">
-  {analyst_html}
+<div class="outlook-news-row">
+  {industry_html}
   {news_html}
 </div>
 
+{attribution_html}
+
 <section class="panel active" id="panel-0">
-  {render_toolbar(0, n_total)}
+  {render_toolbar(0, n_total, returns=returns, meta=meta)}
   {table_html}
 </section>
+
+{analyst_html}
+
+{detractors_html}
 
 {regret_html}
 
@@ -2583,6 +3186,7 @@ function renderHeroChart() {{
 
   const b = PORTFOLIO.basket;
   const s = PORTFOLIO.spy;
+  const fx = PORTFOLIO.fx || {{dates:[], values:[]}};
   if (!b.values.length) {{ svg.innerHTML = '<text x="50%" y="50%" fill="#6b7185" font-family="Geist Mono" font-size="12" text-anchor="middle">No basket data</text>'; return; }}
 
   // Combined min/max across both series
@@ -2591,8 +3195,14 @@ function renderHeroChart() {{
   const vmax = Math.max(...allVals);
   const span = (vmax - vmin) || 1;
   const padL = 48, padR = 56, padT = 18, padB = 32;
+  // FX band sits between the line chart and x-axis labels. Carved out of
+  // the inner height so the line chart shrinks slightly instead of overlapping.
+  const FX_H = fx.values.length ? 36 : 0;
+  const FX_GAP = fx.values.length ? 10 : 0;
   const innerW = W - padL - padR;
-  const innerH = H - padT - padB;
+  const innerH = H - padT - padB - FX_H - FX_GAP;
+  const fxTop = padT + innerH + FX_GAP;
+  const fxBaseY = fxTop + FX_H / 2;       // baseline = midline of FX band
 
   function buildPoints(series) {{
     if (!series.values.length) return {{xs:[], ys:[], dates:[], vals:[]}};
@@ -2642,9 +3252,10 @@ function renderHeroChart() {{
   ).join('');
   // Zero line
   html += `<line x1="${{padL}}" y1="${{zeroY.toFixed(1)}}" x2="${{padL + innerW}}" y2="${{zeroY.toFixed(1)}}" stroke="rgba(255,255,255,0.18)" stroke-width="0.8" stroke-dasharray="3 3"/>`;
-  // X labels
+  // X labels — positioned below the FX band (or below the line chart when no FX)
+  const xLabelY = padT + innerH + FX_GAP + FX_H + 16;
   html += xTicks.map(t =>
-    `<text x="${{t.x.toFixed(1)}}" y="${{(padT + innerH + 18).toFixed(1)}}" fill="#6b7185" font-size="10" font-family="Geist Mono, monospace" text-anchor="middle">${{fmtDate(t.date)}}</text>`
+    `<text x="${{t.x.toFixed(1)}}" y="${{xLabelY.toFixed(1)}}" fill="#6b7185" font-size="10" font-family="Geist Mono, monospace" text-anchor="middle">${{fmtDate(t.date)}}</text>`
   ).join('');
   // Basket area
   html += `<path d="${{areaD}}" fill="url(#grad-amber-lg)"/>`;
@@ -2659,6 +3270,43 @@ function renderHeroChart() {{
   html += `<text x="${{(padL + innerW + 6).toFixed(1)}}" y="${{(basket.ys[n-1] + 4).toFixed(1)}}" fill="${{basketColor}}" font-size="11" font-family="Geist Mono, monospace" font-weight="500">${{basketEnd >= 0 ? '+' : ''}}${{basketEnd.toFixed(1)}}%</text>`;
   if (spy.ys.length) {{
     html += `<text x="${{(padL + innerW + 6).toFixed(1)}}" y="${{(spy.ys[spy.ys.length-1] + 4).toFixed(1)}}" fill="${{spyColor}}" font-size="11" font-family="Geist Mono, monospace">${{spyEnd >= 0 ? '+' : ''}}${{spyEnd.toFixed(1)}}%</text>`;
+  }}
+
+  // FX bar band — weekly GBP/USD rate, centered on the baseline (first value).
+  // Up bar = stronger GBP, down bar = weaker GBP. Color follows --up / --down.
+  // Baseline + delta arrays declared at outer scope so the hover handler below
+  // can resolve the FX value at the hovered week index.
+  const fxBaseline = fx.values.length ? (fx.values[0] || 1) : 1;
+  const fxDeltas = fx.values.map(v => (v / fxBaseline - 1) * 100);
+  if (fx.values.length) {{
+    const fxMaxAbs = Math.max(0.5, ...fxDeltas.map(Math.abs));         // floor to avoid tiny bars
+    const fxMin = Math.min(...fx.values);
+    const fxMax = Math.max(...fx.values);
+    const fxN = fx.values.length;
+    const slotW = innerW / fxN;
+    const barW = Math.max(2, slotW * 0.55);
+    const fxXs = fx.values.map((_, i) => padL + ((fxN === 1 ? innerW/2 : (i/(fxN-1)) * innerW)));
+    const fxBars = fxDeltas.map((d, i) => {{
+      const half = (Math.abs(d) / fxMaxAbs) * (FX_H / 2 - 1);
+      const y = d >= 0 ? fxBaseY - half : fxBaseY;
+      const h = half;
+      const fill = d >= 0 ? '#34d399' : '#f87171';
+      return `<rect x="${{(fxXs[i] - barW/2).toFixed(1)}}" y="${{y.toFixed(1)}}" width="${{barW.toFixed(1)}}" height="${{h.toFixed(1)}}" fill="${{fill}}" opacity="0.55" data-i="${{i}}"/>`;
+    }}).join('');
+    // Baseline midline + label (shows the reference value the bars deviate from)
+    html += `<line x1="${{padL}}" y1="${{fxBaseY.toFixed(1)}}" x2="${{padL + innerW}}" y2="${{fxBaseY.toFixed(1)}}" stroke="rgba(255,255,255,0.10)" stroke-width="0.7"/>`;
+    html += fxBars;
+    // Left axis: label + the actual baseline rate in $/£ so bar magnitudes are interpretable
+    html += `<text x="${{padL - 8}}" y="${{(fxBaseY - 1).toFixed(1)}}" fill="#6b7185" font-size="9" font-family="Geist Mono, monospace" text-anchor="end">GBP/$</text>`;
+    html += `<text x="${{padL - 8}}" y="${{(fxBaseY + 9).toFixed(1)}}" fill="#6b7185" font-size="8.5" font-family="Geist Mono, monospace" text-anchor="end">ref $${{fxBaseline.toFixed(3)}}</text>`;
+    // Range labels at top/bottom of the FX strip — show $min and $max
+    html += `<text x="${{(padL + innerW + 6).toFixed(1)}}" y="${{(fxTop + 4).toFixed(1)}}" fill="#34d399" font-size="8.5" font-family="Geist Mono, monospace">$${{fxMax.toFixed(3)}}</text>`;
+    html += `<text x="${{(padL + innerW + 6).toFixed(1)}}" y="${{(fxTop + FX_H - 1).toFixed(1)}}" fill="#f87171" font-size="8.5" font-family="Geist Mono, monospace">$${{fxMin.toFixed(3)}}</text>`;
+    // Current value (slightly larger) at end of baseline
+    const fxEnd = fx.values[fx.values.length - 1];
+    const fxEndDelta = fxDeltas[fxDeltas.length - 1];
+    const fxColor = fxEndDelta >= 0 ? '#34d399' : '#f87171';
+    html += `<text x="${{(padL + innerW + 6).toFixed(1)}}" y="${{(fxBaseY + 3).toFixed(1)}}" fill="${{fxColor}}" font-size="10" font-family="Geist Mono, monospace" font-weight="500">$${{fxEnd.toFixed(3)}}</text>`;
   }}
 
   // Crosshair
@@ -2704,10 +3352,21 @@ function renderHeroChart() {{
     const tipY = (by / H) * rect.height;
     tip.style.left = tipX + 'px';
     tip.style.top = tipY + 'px';
+    // Match FX value at the same week index when possible. FX series may be
+    // shorter (no fx data for very first weeks); fall back to nearest index.
+    let fxAtVal = null, fxAtDelta = null;
+    if (fx.values.length) {{
+      const fxTarget = basket.dates[bestI];
+      let fxIdx = fx.dates.indexOf(fxTarget);
+      if (fxIdx < 0) fxIdx = Math.min(bestI, fx.values.length - 1);
+      fxAtVal = fx.values[fxIdx];
+      fxAtDelta = fxDeltas[fxIdx];
+    }}
     tip.innerHTML =
       `<div class="tip-date">${{fmtDate(basket.dates[bestI])}}</div>` +
       `<div class="tip-row"><span class="tip-label">Basket</span><span class="${{bv >= 0 ? 'pos' : 'neg'}}">${{bv >= 0 ? '+' : ''}}${{bv.toFixed(2)}}%</span></div>` +
-      (sv !== null ? `<div class="tip-row"><span class="tip-label">SPY</span><span class="${{sv >= 0 ? 'pos' : 'neg'}}">${{sv >= 0 ? '+' : ''}}${{sv.toFixed(2)}}%</span></div>` : '');
+      (sv !== null ? `<div class="tip-row"><span class="tip-label">SPY</span><span class="${{sv >= 0 ? 'pos' : 'neg'}}">${{sv >= 0 ? '+' : ''}}${{sv.toFixed(2)}}%</span></div>` : '') +
+      (fxAtVal !== null ? `<div class="tip-row"><span class="tip-label">GBP/USD</span><span class="${{fxAtDelta >= 0 ? 'pos' : 'neg'}}">$${{fxAtVal.toFixed(3)}} (${{fxAtDelta >= 0 ? '+' : ''}}${{fxAtDelta.toFixed(2)}}%)</span></div>` : '');
     tip.removeAttribute('hidden');
   }};
   svg.onmouseleave = () => {{
@@ -2751,7 +3410,7 @@ document.querySelectorAll('#ret-table th[data-col]').forEach(th => {{
     th.classList.add(sortState.asc ? 'sort-asc' : 'sort-desc');
   }});
 }});
-document.querySelector('#ret-table th[data-col="6"]')?.click();
+document.querySelector('#ret-table th[data-col="9"]')?.click();
 
 // ---- Filtering
 const TOTALS = Object.fromEntries(Object.entries(DATA).map(([t, d]) => [t, d.total]));
@@ -2759,8 +3418,12 @@ const WEIGHTS = Object.fromEntries(Object.entries(DATA).map(([t, d]) => [t, d.we
 
 function applyFilter(panel) {{
   const search = (panel.querySelector('.search')?.value || '').trim().toUpperCase();
-  const activeChip = panel.querySelector('.chip.active');
-  const mode = activeChip ? activeChip.dataset.filter : 'all';
+  // Status filter and sector filter live in two separate `.chips` rows so
+  // each axis has its own active chip. Read both.
+  const activeStatus = panel.querySelector('.chips:not(.chips-sectors) .chip.active');
+  const mode = activeStatus ? activeStatus.dataset.filter : 'all';
+  const activeSector = panel.querySelector('.chips-sectors .chip.active');
+  const sector = activeSector ? activeSector.dataset.sector : '*';
   const sorted = Object.entries(TOTALS).sort((a, b) => b[1] - a[1]);
   let allowed = null;
   if (mode === 'top10') allowed = new Set(sorted.slice(0, 10).map(([t]) => t));
@@ -2771,6 +3434,7 @@ function applyFilter(panel) {{
     const t = el.dataset.ticker;
     const total = parseFloat(el.dataset.total);
     const weight = parseFloat(el.dataset.weight) || 0;
+    const rowSector = el.dataset.sector || '';
     let show = true;
     if (search && !t.includes(search)) show = false;
     if (mode === 'basket' && weight <= 0) show = false;
@@ -2778,6 +3442,7 @@ function applyFilter(panel) {{
     if (mode === 'winners' && total < 0) show = false;
     if (mode === 'losers' && total >= 0) show = false;
     if (allowed && !allowed.has(t)) show = false;
+    if (sector !== '*' && rowSector !== sector) show = false;
     el.classList.toggle('hidden', !show);
   }});
 }}
@@ -2786,7 +3451,10 @@ document.querySelectorAll('.panel').forEach(panel => {{
   panel.querySelectorAll('.chip').forEach(chip => {{
     chip.addEventListener('click', (e) => {{
       e.stopPropagation();
-      panel.querySelectorAll('.chip').forEach(c => c.classList.remove('active'));
+      // Only deactivate siblings in the SAME chip row — preserves status filter
+      // when toggling sectors and vice versa.
+      const group = chip.closest('.chips');
+      group.querySelectorAll('.chip').forEach(c => c.classList.remove('active'));
       chip.classList.add('active');
       applyFilter(panel);
     }});
@@ -2797,6 +3465,10 @@ document.querySelectorAll('.panel').forEach(panel => {{
     s.addEventListener('click', (e) => e.stopPropagation());
   }}
 }});
+
+// Default to showing only Open positions — that's the actionable view for
+// most sessions. User can still click All to see closed too.
+document.querySelector('.chip[data-filter="basket"]')?.click();
 
 // ---- Modal
 const modal = document.getElementById('modal');
@@ -3016,6 +3688,9 @@ document.querySelectorAll('.contrib-table tbody tr, .regret-table tbody tr, .dt-
 }});
 document.querySelectorAll('.wl-card, .an-card').forEach(card => {{
   card.addEventListener('click', () => openModal(card.dataset.ticker));
+}});
+document.querySelectorAll('.io-stock').forEach(row => {{
+  row.addEventListener('click', () => openModal(row.dataset.ticker));
 }});
 
 // ---- Palette toggle ---------------------------------------------------
@@ -3239,19 +3914,36 @@ def main() -> None:
     sig_counts = signals.signal.value_counts()
     print(f"Signals: {dict(sig_counts.head(5))}")
 
-    # Analyst panel: candidates = closed positions (stocks previously held).
-    # Treats the panel as "should I buy back in?" rather than "what to add."
+    # Analyst data: fetched for every tracked ticker (open + closed) so the
+    # main table can surface target/upside/rec for all rows. The 7-day TTL
+    # means typical builds refresh nothing — only ~one batch fetch per week.
+    # `analyst_candidates` still drives the "Re-entry ideas" panel, which is
+    # closed-positions-only ("should I buy back in?").
+    all_fetch_tickers = sorted(returns.index.tolist()) if not returns.empty else []
     analyst_candidates = sorted(returns[returns.status == "closed"].index.tolist()) \
         if not returns.empty else []
     analyst_cache = load_analyst_cache()
-    analyst = fetch_analyst_data(analyst_candidates, analyst_cache) if analyst_candidates else analyst_cache
+    analyst = fetch_analyst_data(all_fetch_tickers, analyst_cache) if all_fetch_tickers else analyst_cache
+
+    # Industry outlook universe — loaded from universe.csv, cached with 30-day
+    # TTL so daily builds reuse and only ~once a month does this run a fresh
+    # yfinance batch for ~100 large-caps.
+    universe_tickers = load_universe()
+    if universe_tickers:
+        # Reuse the freshly-updated meta_cache so newly-fetched universe meta
+        # entries persist into the same meta.csv as the portfolio.
+        meta_cache_for_universe = load_meta_cache()
+        universe_outlook = fetch_universe_outlook(universe_tickers, meta_cache_for_universe)
+    else:
+        universe_outlook = pd.DataFrame()
 
     news_items = fetch_news()
 
     html = render_html(returns, prices, meta, basket, bench_series, contrib, transactions,
                        signals, prices_native, returns_native, untracked=untracked,
                        watchlist=watchlist, news_items=news_items, analyst=analyst,
-                       analyst_candidates=analyst_candidates)
+                       analyst_candidates=analyst_candidates, fx=fx,
+                       universe_outlook=universe_outlook)
     OUT_HTML.parent.mkdir(parents=True, exist_ok=True)
     OUT_HTML.write_text(html, encoding="utf-8")
     print(f"Wrote {OUT_HTML} ({OUT_HTML.stat().st_size/1024:.1f} KB)")
