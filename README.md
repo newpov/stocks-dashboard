@@ -10,6 +10,19 @@ public and reusable — fork it, point it at your own broker export, and you
 have your own dashboard for the cost of a free GitHub account and a few
 minutes of setup.
 
+> **Not financial advice.** This dashboard is a personal **benchmarking
+> exercise** — a tool the author built to track and reflect on their own
+> basket. The figures, technical signals, exit-strategy labels and re-entry
+> suggestions shown here are heuristics derived from public market data; they
+> are **not investment recommendations**. **Capital at risk:** past
+> performance does not predict future returns, and any stock shown here can
+> lose money. Do your own research, or speak to a licensed adviser, before
+> acting on anything you see on this page.
+
+> **Built with Claude Opus 4.7.** The code, design decisions, prose
+> commentary and this README were developed end-to-end in pair programming
+> with Anthropic's Claude Opus 4.7 model.
+
 ---
 
 ## Why this exists
@@ -180,13 +193,19 @@ The vertical order is deliberate — research → context → details → action
 4. **Re-entry ideas**: "of stocks I've held before, where do analysts see
    most upside" — buy candidates.
 5. **Exit strategy**: "of my current losers, which should I cut" — sell
-   candidates.
-6. **Regrets / Lucky escapes**: retrospective — did I sell too early or
+   candidates, with concrete 2× ATR suggested stops.
+6. **Basket diversification**: portfolio-level lens — pairwise correlations,
+   most-correlated pairs (concentration risk), and best diversifiers.
+7. **Regrets / Lucky escapes**: retrospective — did I sell too early or
    exit just in time.
 
 This ordering matches how the author actually reviews the portfolio: you
 read about the market first, look at how your sectors are doing, dig into
 specific positions, then decide what to buy or sell.
+
+This is only the **default**, though. Anyone can drag the sections into a
+different order or hide the ones they don't use — see
+[Customizable module layout](#customizable-module-layout).
 
 ---
 
@@ -229,6 +248,31 @@ doesn't drop the basket line — it just "joins" at its baseline. TWR is the
 industry standard for performance reporting because it isolates pure stock-
 selection skill from cash-flow timing.
 
+### Quant signals (modal sub-row)
+
+Clicking any row opens a modal whose lower half shows five per-stock technical
+metrics, refreshed every build:
+
+| Metric | What it tells you | How to read it in practice |
+|---|---|---|
+| **vs 200d** | Distance from the 200-day SMA in %. Above zero = price still riding the long-term trend; well below = trend has broken. | `+19%` (recent AAPL): comfortably above its long-term average, trend intact. `-69%` (SQQQ.L): trend decisively broken; only a mean-reversion bet, not a trend trade. |
+| **ATR 14d** | 14-day Wilder Average True Range, quoted in **GBP**, with the % of price beside it. Use it to size stops — a stop set ~2× ATR below entry usually sits outside normal noise. | `£4.13 · 1.8%` (recent AAPL): typical daily swing is ~£4, so a stop ~£8 below entry survives a normal-volatility day. A name reading `4.0%` is roughly twice as twitchy — give it more room, or take a smaller position. |
+| **RSI 14d** | Classic Wilder RSI. **≥ 70** flags overbought (red), **≤ 30** flags oversold (green). | `79` (recent AAPL): stretched — a pullback wouldn't be a surprise; not the ideal moment to add. `29` (recent WMT): washed out — watch for a bounce. `50` ≈ no momentum bias either way. |
+| **52w pos** | Where today's price sits between the 52-week low (0%) and high (100%). Near-high = breakout candidate; near-low = potential value or broken trend. | `100%` (recent AAPL): at the 52-week high — breakout territory, but no headroom left. `5%`: near the lows — either deep value or a broken trend; cross-check with **vs 200d** to tell which. `50%` = mid-range, no strong directional signal. |
+| **Volume** | Today's volume divided by the 63-day average. **≥ 1.0** = institutional support behind the move; **< 1.0** = thinly-traded, less trustworthy. | `1.3×` (recent AAPL): above-average participation — the day's price move is credible. `0.4×`: quiet, thin trading — any sharp move can fade quickly and shouldn't be treated as a real signal. |
+
+A common combined read: a stock at **52w pos ≈ 100%**, **RSI > 75**, on
+**Volume ≥ 1.5×** is a high-conviction breakout — but probably too late to
+chase. The same name with **Volume < 0.7×** is a suspect move likely to
+reverse. **RSI < 30** on a name still well **above its 200-day SMA** is the
+classic "buy-the-dip" setup; the same RSI on one **40% below 200d** is just
+a falling knife.
+
+Source data is the full OHLCV cached in `data/ohlcv_cache.parquet` (one
+yfinance batch per build, same lifecycle as the close-only cache). The
+close-only `prices_cache.parquet` is left untouched — everything else in the
+pipeline still reads its existing shape.
+
 ### Exit-strategy heuristic
 
 A 3×3 grid joining technical signal tone × analyst recommendation:
@@ -242,6 +286,62 @@ A 3×3 grid joining technical signal tone × analyst recommendation:
 Two divergent signals = high conviction. Two agreeing signals = act.
 **This is build-time analytics, not financial advice** — the user makes
 the actual call.
+
+Each detractor row also surfaces a **2× ATR suggested stop** sub-line below
+the action pill — e.g. `Stop £92.82 ($124.96) −2× ATR`. The GBP value is for
+dashboard consistency; the parenthetical native-currency value is what you'd
+actually type into the broker. A stop placed two ATRs below the current price
+typically sits outside normal daily noise — close enough to limit damage if
+the thesis breaks, wide enough not to be shaken out on a routine red day.
+
+**Worked example.** A recent MSTR row read `CUT LOSS` with
+`Stop £103.24 ($138.99) −2× ATR`. MSTR was trading around £146.40 with a
+14-day ATR of £21.58 — the stop sits ~13% below current price. That's the
+trade-off the heuristic makes concrete: if you'd accept a 13% drawdown
+before admitting the thesis is wrong, leave the position open and use £103
+as the hard line. If 13% feels too painful given your conviction, the
+`CUT LOSS` label is telling you to size down today rather than continuing
+to negotiate with yourself.
+
+### Re-entry idea cards — RSI context
+
+Each card in the **Re-entry ideas** module shows a small **RSI 14d pill**
+beside the technical-signal label, color-coded with the same convention as
+the modal: red for ≥70 (overbought — wait for a pullback), green for ≤30
+(oversold — potential mean-reversion entry), neutral otherwise. Combined
+with the upside %, this answers two questions at once: *how much room does
+Wall Street see, and is right now a sensible moment to act?*
+
+**Worked examples.**
+- **CRWD with RSI 84** (red pill): analysts may still flag double-digit
+  upside, but the stock is stretched right now — buying here often means
+  immediately sitting through a pullback. A patient re-entry waits for
+  RSI to cool back below 70.
+- **PNR with RSI 30** (green pill): washed out near oversold. Combined
+  with positive analyst upside, this is the textbook "buy the dip"
+  alignment — entering weakness, not chasing strength.
+- **ROP with RSI 43** (neutral): middling momentum tells you nothing
+  either way; trade the thesis (upside %, analyst rec) without weighting
+  the timing.
+
+### Basket diversification
+
+Computed from **6 months of native-currency daily returns** across every
+currently-open position. The module renders three summary panels plus a
+small histogram of the full pairwise-correlation distribution.
+
+| Panel | What it tells you | How to read it in practice |
+|---|---|---|
+| **Avg pairwise correlation** | Mean of every pair's daily-return correlation. The headline diversification score in one number, color-coded green below `+0.30`, red above `+0.60`. | `+0.20` (recent basket): well diversified — most pairs only weakly co-move. `+0.50` would mean every pair shares roughly half its move. **Above `+0.60`** = the basket is effectively one big bet wearing many tickers. |
+| **Most correlated — concentration risk** | Top 3 pairs ranked by correlation. Concentration warning: paying transaction costs to hold names that move as one. | `GLDW.L ↔ SGLN.L = 1.00` (recent): two physically-backed gold ETFs — literally the same trade. Consolidate into one. `AMAT ↔ LRCX = 0.88`: same semi-equipment sub-industry; high correlation is expected, but ask whether you'd be comfortable doubling the bigger one instead. |
+| **Best diversifiers — lowest avg ρ vs rest** | The three positions whose mean correlation with every other open name is closest to zero (or negative). These are doing real diversification work. | `ICSU.L = −0.13` (recent): a short-duration treasury / money-market ETF that moves slightly inverse to the rest. Sizing this up cuts basket drawdown more than sizing up any single equity. |
+| **Histogram** | The distribution of every pairwise correlation across eight 0.25-wide buckets between `−1.00` and `+1.00`. Hover a bar for the exact range and count. | A **right-skewed mound centred near `+0.10` to `+0.30`** (current shape) is the healthy pattern — most pairs only weakly relate. A tall bar in the `+0.75` to `+1.00` bucket = duplicated bets; a near-empty middle with a tall right-side cluster = a concentrated theme dressed in many tickers. |
+
+**Combined read.** The current basket shows avg `+0.20` (well diversified)
+*and* a histogram peaking in the `+0.00` to `+0.25` bucket — those agree.
+The dashboard still flags `GLDW.L ↔ SGLN.L = 1.00` as a concentration
+risk: a healthy basket overall doesn't mean every individual decision is
+optimal, and the panel surfaces the specific pair worth acting on.
 
 ### Multi-currency normalisation
 
@@ -258,6 +358,23 @@ The CSS uses semantic custom properties (`--ink`, `--surface`, `--text`,
 class on `<body>`, which redefines the variable values. The user can pick
 Default (dark amber), Soft Dark (lighter), Light (FT/NYT cream), or
 Bloomberg (terminal amber/black). Choice persists via `localStorage`.
+
+### Customizable module layout
+
+Every section below the hero is a self-contained **module**. An "Edit layout"
+button (top-right, beside the palette toggle) flips the page into edit mode,
+revealing a drag handle and a show/hide toggle on each module. Drag to reorder
+(powered by [SortableJS](https://sortablejs.github.io/Sortable/), vendored into
+`docs/vendor/` so there's no CDN dependency), untick to hide, "Reset" restores
+the default.
+
+Order and hidden state persist in `localStorage` (`stocks-dashboard-layout-v1`),
+so a customised layout survives rebuilds — `build.py` only ships the *default*
+order, and each visitor's overrides live in their own browser. Same
+client-side-state pattern as the palette toggle. If the author later adds a new
+section, it slots into its default position for everyone — including visitors
+who already customised — so nobody silently loses it. This is why people who
+clone the repo each get a layout they can tailor without touching `build.py`.
 
 ---
 
@@ -280,7 +397,8 @@ stocks-dashboard/
 │       └── build.yml                  ← daily 08:00 UTC cron + push triggers
 │
 ├── data/                              ← all caches (committed, reused by CI)
-│   ├── prices_cache.parquet           ← native-currency prices, all tickers
+│   ├── prices_cache.parquet           ← native-currency closes, all tickers
+│   ├── ohlcv_cache.parquet            ← full OHLCV (for ATR / Volume metrics)
 │   ├── benchmark_cache.parquet        ← SPY prices
 │   ├── fx_cache.parquet               ← FX pairs (USDGBP, EURGBP, etc.)
 │   ├── meta.csv                       ← sector / industry / name / currency
@@ -288,7 +406,9 @@ stocks-dashboard/
 │   └── universe_outlook_cache.parquet ← universe.csv precomputed, 30-day TTL
 │
 ├── docs/
-│   └── index.html                     ← generated dashboard (~1.2 MB)
+│   ├── index.html                     ← generated dashboard (~1.2 MB)
+│   └── vendor/
+│       └── Sortable.min.js            ← drag-reorder lib (vendored, no CDN)
 │
 └── worker/                            ← optional Cloudflare Worker
     ├── index.js                       ← RSS proxy + finance-keyword filter

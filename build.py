@@ -36,6 +36,7 @@ LOG_XLSX = ROOT / "log.xlsx"           # Trading 212-style real transaction log
 TICKERS_CSV = ROOT / "tickers.csv"  # legacy fallback
 OUT_HTML = ROOT / "docs" / "index.html"
 CACHE_PARQUET = ROOT / "data" / "prices_cache.parquet"
+OHLCV_CACHE = ROOT / "data" / "ohlcv_cache.parquet"  # full OHLCV for ATR / volume metrics
 BENCHMARK_CACHE = ROOT / "data" / "benchmark_cache.parquet"
 META_CSV = ROOT / "data" / "meta.csv"
 WATCHLIST_CSV = ROOT / "watchlist.csv"
@@ -287,19 +288,30 @@ def _txn_price(txn_date: pd.Timestamp, ticker_prices: pd.Series) -> float:
     return float(sub.iloc[-1])
 
 
-def download_prices(tickers: list[str]) -> pd.DataFrame:
+_OHLCV_FIELDS = ["Open", "High", "Low", "Close", "Volume"]
+
+
+def download_ohlcv(tickers: list[str]) -> pd.DataFrame:
+    """Single yfinance batch returning full OHLCV in NATIVE currency.
+
+    Output: wide DataFrame with MultiIndex columns ``(ticker, field)`` where
+    ``field`` is one of Open/High/Low/Close/Volume. Used both as the source for
+    close-only consumers (via :func:`download_prices`) and as the input for the
+    quant-metric layer (ATR + volume ratio) that needs the High/Low/Volume
+    columns yfinance returns alongside Close.
+    """
     end = (datetime.now(timezone.utc) + timedelta(days=1)).strftime("%Y-%m-%d")
     data = yf.download(
         tickers, start=START_DATE, end=end,
         auto_adjust=True, progress=False, group_by="ticker", threads=True,
     )
-    closes: dict[str, pd.Series] = {}
+    frames: dict[str, pd.DataFrame] = {}
     failed: list[str] = []
     for t in tickers:
         try:
-            s = data[t]["Close"]
-            if s.notna().any():
-                closes[t] = s
+            sub = data[t][_OHLCV_FIELDS].copy()
+            if sub["Close"].notna().any():
+                frames[t] = sub
             else:
                 failed.append(t)
         except (KeyError, ValueError):
@@ -307,18 +319,32 @@ def download_prices(tickers: list[str]) -> pd.DataFrame:
 
     for t in failed:
         try:
-            s = yf.Ticker(t).history(start=START_DATE, end=end, auto_adjust=True)["Close"]
-            if s.notna().any():
-                s.index = s.index.tz_localize(None) if s.index.tz is not None else s.index
-                closes[t] = s
+            df1 = yf.Ticker(t).history(start=START_DATE, end=end, auto_adjust=True)
+            df1 = df1[_OHLCV_FIELDS]
+            if df1["Close"].notna().any():
+                if df1.index.tz is not None:
+                    df1.index = df1.index.tz_localize(None)
+                frames[t] = df1
                 print(f"RETRY OK: {t}", file=sys.stderr)
         except Exception as e:
             print(f"WARN retry failed for {t}: {e}", file=sys.stderr)
 
-    df = pd.DataFrame(closes).sort_index()
-    if df.index.tz is not None:
-        df.index = df.index.tz_localize(None)
-    return df
+    if not frames:
+        return pd.DataFrame()
+    out = pd.concat(frames, axis=1)  # MultiIndex columns: (ticker, field)
+    if out.index.tz is not None:
+        out.index = out.index.tz_localize(None)
+    return out.sort_index()
+
+
+def download_prices(tickers: list[str]) -> pd.DataFrame:
+    """Close-only wide DataFrame (date × ticker). Thin wrapper over
+    :func:`download_ohlcv` so the legacy contract used by every downstream
+    consumer stays unchanged."""
+    ohlcv = download_ohlcv(tickers)
+    if ohlcv.empty:
+        return pd.DataFrame()
+    return ohlcv.xs("Close", axis=1, level=1).copy()
 
 
 def download_benchmark() -> pd.Series:
@@ -1027,6 +1053,145 @@ def compute_signals(prices: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows).set_index("ticker")
 
 
+# --------------------------------------------------------------------------
+# Quant signals (modal "Quant signals" sub-row)
+# --------------------------------------------------------------------------
+# Surface five per-stock metrics derived from full OHLCV history:
+#   - sma200_dist_pct : distance from 200-day SMA (long-term trend health)
+#   - atr14_*         : 14-day Wilder ATR (stop-loss sizing)
+#   - rsi14           : 14-day Wilder RSI (overbought / oversold)
+#   - range52w_pct    : where today's price sits in the 52-week range
+#   - vol_ratio       : today's volume vs 63-day average (move confirmation)
+# All NaN-safe — partial history (e.g. brand-new IPOs without 200 days) yields
+# NaN and renders as a dim em-dash in the modal.
+
+
+def _wilder_atr_last(high: pd.Series, low: pd.Series,
+                     close: pd.Series, period: int = 14) -> float:
+    """Last value of the 14-day Wilder ATR. NaN if insufficient history."""
+    df = pd.concat({"h": high, "l": low, "c": close}, axis=1).dropna()
+    if len(df) < period + 1:
+        return float("nan")
+    prev_close = df["c"].shift(1)
+    tr = pd.concat([
+        (df["h"] - df["l"]).abs(),
+        (df["h"] - prev_close).abs(),
+        (df["l"] - prev_close).abs(),
+    ], axis=1).max(axis=1)
+    # Wilder smoothing == EMA with alpha = 1/period.
+    atr = tr.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
+    return float(atr.iloc[-1]) if not atr.empty else float("nan")
+
+
+def _wilder_rsi_last(close: pd.Series, period: int = 14) -> float:
+    """Last value of the 14-day Wilder RSI (0-100). NaN if insufficient history."""
+    c = close.dropna()
+    if len(c) < period + 1:
+        return float("nan")
+    delta = c.diff()
+    gains = delta.clip(lower=0)
+    losses = (-delta).clip(lower=0)
+    avg_gain = gains.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
+    avg_loss = losses.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
+    rs = avg_gain / avg_loss.replace(0, float("nan"))
+    rsi = 100 - (100 / (1 + rs))
+    return float(rsi.iloc[-1]) if not rsi.empty and pd.notna(rsi.iloc[-1]) else float("nan")
+
+
+def compute_quant_metrics(ohlcv_native: pd.DataFrame, fx: pd.DataFrame,
+                          meta: pd.DataFrame) -> pd.DataFrame:
+    """Per-ticker quant metrics derived from native-currency OHLCV.
+
+    Returns a DataFrame indexed by ticker with columns:
+        sma200_dist_pct, atr14_native, atr14_gbp, atr14_pct,
+        rsi14, range52w_pct, vol_ratio
+    NaN where the underlying window can't be filled (e.g. <200 days history,
+    or no FX rate available to convert ATR into base currency).
+    """
+    if ohlcv_native is None or ohlcv_native.empty:
+        return pd.DataFrame()
+
+    # MultiIndex columns: gather every unique ticker.
+    tickers = sorted({t for (t, _) in ohlcv_native.columns})
+
+    # Latest FX rate per currency-pair series, e.g. 'USDGBP=X' -> 0.78.
+    fx_last: dict[str, float] = {}
+    if fx is not None and not fx.empty:
+        for col in fx.columns:
+            s = fx[col].dropna()
+            if not s.empty:
+                fx_last[col] = float(s.iloc[-1])
+
+    rows = []
+    for t in tickers:
+        try:
+            close = ohlcv_native[(t, "Close")].dropna()
+            high = ohlcv_native[(t, "High")]
+            low = ohlcv_native[(t, "Low")]
+            volume = ohlcv_native[(t, "Volume")].dropna()
+        except KeyError:
+            continue
+        if close.empty:
+            continue
+        last_close = float(close.iloc[-1])
+
+        # --- 200-day SMA distance ---------------------------------------
+        sma200_dist = float("nan")
+        if len(close) >= 200 and last_close == last_close:
+            sma200 = float(close.tail(200).mean())
+            if sma200 > 0:
+                sma200_dist = (last_close / sma200 - 1) * 100
+
+        # --- 52-week range position -------------------------------------
+        range52w = float("nan")
+        if len(close) >= 60:  # at least a few months of data
+            window = close.tail(252)
+            hi = float(window.max())
+            lo = float(window.min())
+            if hi > lo:
+                range52w = (last_close - lo) / (hi - lo) * 100
+
+        # --- ATR (Wilder, 14d) ------------------------------------------
+        atr_native = _wilder_atr_last(high, low, close, period=14)
+        atr_pct = float("nan")
+        atr_gbp = float("nan")
+        if atr_native == atr_native and last_close > 0:
+            atr_pct = (atr_native / last_close) * 100
+            raw_ccy = str(meta.loc[t, "currency"]) if t in meta.index else "USD"
+            ccy, divisor = normalize_currency(raw_ccy)
+            atr_in_major = atr_native / divisor if divisor else atr_native
+            if ccy == BASE_CCY:
+                atr_gbp = atr_in_major
+            else:
+                fx_key = f"{ccy}{BASE_CCY}=X"
+                if fx_key in fx_last:
+                    atr_gbp = atr_in_major * fx_last[fx_key]
+
+        # --- RSI (Wilder, 14d) ------------------------------------------
+        rsi14 = _wilder_rsi_last(close, period=14)
+
+        # --- Volume ratio (today vs 63-day mean) ------------------------
+        vol_ratio = float("nan")
+        if len(volume) >= 5:
+            last_vol = float(volume.iloc[-1])
+            avg_vol = float(volume.tail(63).mean())
+            if avg_vol > 0:
+                vol_ratio = last_vol / avg_vol
+
+        rows.append({
+            "ticker": t,
+            "sma200_dist_pct": sma200_dist,
+            "atr14_native": atr_native,
+            "atr14_gbp": atr_gbp,
+            "atr14_pct": atr_pct,
+            "rsi14": rsi14,
+            "range52w_pct": range52w,
+            "vol_ratio": vol_ratio,
+        })
+
+    return pd.DataFrame(rows).set_index("ticker") if rows else pd.DataFrame()
+
+
 def compute_contributors(returns_df: pd.DataFrame) -> pd.DataFrame:
     """Contribution in percentage points to the current weighted-basket return."""
     in_basket = returns_df[returns_df.weight > 0].copy()
@@ -1036,6 +1201,89 @@ def compute_contributors(returns_df: pd.DataFrame) -> pd.DataFrame:
     else:
         in_basket["contribution_pp"] = (in_basket.weight * in_basket.total_pct) / total_w
     return in_basket.sort_values("contribution_pp", ascending=False)
+
+
+# --------------------------------------------------------------------------
+# Basket diversification (pairwise correlations of open positions)
+# --------------------------------------------------------------------------
+# A portfolio-level lens nothing else in the dashboard covers: are the open
+# positions independent bets or expressions of the same trade? Lower average
+# pairwise correlation = more diversified; higher = redundant exposure.
+#
+# Correlations are computed on **native-currency daily returns** (FX would
+# add a spurious common factor across all non-GBP names). 6-month lookback
+# is the equity-research default — long enough to be stable, short enough
+# to reflect the current regime.
+
+_DIV_HIST_EDGES = [-1.0, -0.75, -0.5, -0.25, 0.0, 0.25, 0.5, 0.75, 1.0]
+
+
+def compute_basket_correlation(returns: pd.DataFrame, prices_native: pd.DataFrame,
+                               lookback_days: int = 126,
+                               min_periods: int = 30) -> dict | None:
+    """Pairwise correlation summary across currently-open positions.
+
+    Returns ``None`` when fewer than two open positions have usable history.
+    Otherwise a dict containing:
+        ``n_positions``, ``n_pairs``, ``lookback_days``,
+        ``avg_corr`` (mean of upper-triangle pairwise correlations),
+        ``most_correlated``  (list of {a, b, corr}: top 3 pairs by correlation),
+        ``best_diversifiers`` (list of {ticker, avg_corr}: lowest mean
+                               correlation with every other open position),
+        ``histogram`` (list of {min, max, count} buckets).
+    """
+    if returns.empty or prices_native.empty:
+        return None
+    open_tickers = sorted(returns[returns.status == "open"].index.tolist())
+    available = [t for t in open_tickers if t in prices_native.columns]
+    if len(available) < 2:
+        return None
+    sub = prices_native[available].tail(lookback_days)
+    daily_ret = sub.pct_change().dropna(how="all")
+    if daily_ret.empty:
+        return None
+    # Pandas .corr() does pairwise NaN handling for free; min_periods guards
+    # against tiny-overlap noise (e.g. a position only ~10 days old).
+    corr = daily_ret.corr(min_periods=min_periods)
+
+    # Upper triangle: every unique unordered pair, no self-correlations.
+    pairs: list[tuple[str, str, float]] = []
+    cols = corr.columns.tolist()
+    for i in range(len(cols)):
+        for j in range(i + 1, len(cols)):
+            v = corr.iat[i, j]
+            if pd.notna(v):
+                pairs.append((cols[i], cols[j], float(v)))
+    if not pairs:
+        return None
+
+    avg_corr = sum(p[2] for p in pairs) / len(pairs)
+    most_correlated = sorted(pairs, key=lambda p: p[2], reverse=True)[:3]
+
+    # Best diversifiers: per-ticker mean of its (non-self) correlations.
+    div_scores: list[tuple[str, float]] = []
+    for t in corr.index:
+        row = corr.loc[t].drop(t).dropna()
+        if not row.empty:
+            div_scores.append((t, float(row.mean())))
+    best_diversifiers = sorted(div_scores, key=lambda x: x[1])[:3]
+
+    # Histogram (8 buckets of width 0.25, spanning [-1, 1]).
+    vals = np.array([p[2] for p in pairs], dtype=float)
+    counts, _ = np.histogram(vals, bins=_DIV_HIST_EDGES)
+    histogram = [
+        {"min": _DIV_HIST_EDGES[i], "max": _DIV_HIST_EDGES[i + 1], "count": int(counts[i])}
+        for i in range(len(counts))
+    ]
+    return {
+        "n_positions": len(available),
+        "n_pairs": len(pairs),
+        "lookback_days": lookback_days,
+        "avg_corr": float(avg_corr),
+        "most_correlated": [{"a": a, "b": b, "corr": c} for (a, b, c) in most_correlated],
+        "best_diversifiers": [{"ticker": t, "avg_corr": v} for (t, v) in best_diversifiers],
+        "histogram": histogram,
+    }
 
 
 # --------------------------------------------------------------------------
@@ -1397,9 +1645,17 @@ def _exit_action(signal_tone: str, analyst_rec: str) -> tuple[str, str]:
 
 def render_detractors_strategy(contrib: pd.DataFrame, returns: pd.DataFrame,
                                signals: pd.DataFrame, analyst: pd.DataFrame,
-                               meta: pd.DataFrame, n: int = 8) -> str:
+                               meta: pd.DataFrame, n: int = 8,
+                               quant_metrics: pd.DataFrame | None = None,
+                               prices: pd.DataFrame | None = None,
+                               prices_native: pd.DataFrame | None = None) -> str:
     """Full-width 'Top detractors' panel with technical signal + analyst rec +
-    suggested action. Only open positions — you can't exit a closed one."""
+    suggested action. Only open positions — you can't exit a closed one.
+
+    When ``quant_metrics`` is provided, each row also gets a concrete
+    **2× ATR suggested stop** sub-line beneath the action pill — in base
+    currency, with the broker-aligned native value in parentheses for
+    non-GBP names."""
     if contrib.empty or returns.empty:
         return ""
     # Bottom by contribution (most negative first). Filter to open: closed
@@ -1436,6 +1692,36 @@ def render_detractors_strategy(contrib: pd.DataFrame, returns: pd.DataFrame,
         upside_str = f"{upside:+.0f}%" if upside is not None else "—"
         # Suggested action
         action_label, action_tone = _exit_action(sig_tone, rec_raw)
+        # Suggested 2× ATR stop (base currency + native parenthetical for non-GBP).
+        # NaN-safe: any missing component → no stop line rendered for that row.
+        stop_html = ""
+        if quant_metrics is not None and tkr in quant_metrics.index \
+                and prices is not None and tkr in prices.columns:
+            q = quant_metrics.loc[tkr]
+            atr_gbp = q.get("atr14_gbp", float("nan"))
+            atr_native = q.get("atr14_native", float("nan"))
+            close_gbp_series = prices[tkr].dropna()
+            if pd.notna(atr_gbp) and not close_gbp_series.empty:
+                last_gbp = float(close_gbp_series.iloc[-1])
+                stop_gbp = last_gbp - 2.0 * float(atr_gbp)
+                stop_gbp_str = f"{BASE_SYMBOL}{stop_gbp:,.2f}"
+                native_str = ""
+                ccy = ticker_currency(meta, tkr)
+                if ccy != BASE_CCY and pd.notna(atr_native) \
+                        and prices_native is not None and tkr in prices_native.columns:
+                    close_native_series = prices_native[tkr].dropna()
+                    if not close_native_series.empty:
+                        last_native = float(close_native_series.iloc[-1])
+                        stop_native = last_native - 2.0 * float(atr_native)
+                        sym = CCY_SYMBOLS.get(ccy, ccy + " ")
+                        native_str = f' <span class="dt-action-stop-native">({sym}{stop_native:,.2f})</span>'
+                stop_html = (
+                    f'<div class="dt-action-stop">'
+                    f'<span class="dt-action-stop-label">Stop</span> '
+                    f'{stop_gbp_str}{native_str} '
+                    f'<span class="dt-action-stop-meta">&minus;2&times; ATR</span>'
+                    f'</div>'
+                )
         rows.append(
             f'<tr data-ticker="{tkr}">'
             f'<td class="dt-tkr">{tkr}<div class="dt-ind">{ind}</div></td>'
@@ -1448,7 +1734,7 @@ def render_detractors_strategy(contrib: pd.DataFrame, returns: pd.DataFrame,
             f'</td>'
             f'<td class="dt-rec"><span class="an-rec {rec_cls}">{rec_label}</span>'
             f'<div class="dt-upside">{upside_str} target</div></td>'
-            f'<td class="dt-action"><span class="dt-action-pill dt-action-{action_tone}">{action_label}</span></td>'
+            f'<td class="dt-action"><span class="dt-action-pill dt-action-{action_tone}">{action_label}</span>{stop_html}</td>'
             f'</tr>'
         )
     body = "".join(rows)
@@ -1687,7 +1973,8 @@ def render_watchlist(watchlist_payload: dict, meta: pd.DataFrame) -> str:
 def build_analyst_payload(candidates: list[str], analyst: pd.DataFrame,
                           prices_native: pd.DataFrame, meta: pd.DataFrame,
                           signals: pd.DataFrame | None = None,
-                          top_n: int = ANALYST_TOP_N) -> list[dict]:
+                          top_n: int = ANALYST_TOP_N,
+                          quant_metrics: pd.DataFrame | None = None) -> list[dict]:
     """For each candidate ticker with a usable analyst target, compute upside
     using the latest native close, attach the technical signal (so the card can
     surface analyst/technical agreement or conflict), sort by upside desc, return top N."""
@@ -1722,6 +2009,12 @@ def build_analyst_payload(candidates: list[str], analyst: pd.DataFrame,
             sig_tone = str(sig_row.tone)
         else:
             sig_label, sig_tone = "—", "neutral"
+        # Current RSI (re-entry context: "is this a good moment to buy back in?")
+        rsi14 = None
+        if quant_metrics is not None and tkr in quant_metrics.index:
+            v = quant_metrics.loc[tkr, "rsi14"]
+            if pd.notna(v):
+                rsi14 = float(v)
         rows.append({
             "ticker": tkr,
             "name": str(meta.loc[tkr, "name"]) if tkr in meta.index else tkr,
@@ -1735,6 +2028,7 @@ def build_analyst_payload(candidates: list[str], analyst: pd.DataFrame,
             "recommendation": rec,
             "signal": sig_label,
             "signal_tone": sig_tone,
+            "rsi14": rsi14,
         })
     rows.sort(key=lambda x: x["upside_pct"], reverse=True)
     return rows[:top_n]
@@ -1764,6 +2058,23 @@ def render_analyst_signals(rows: list[dict], candidate_pool_size: int) -> str:
         cur = f"{ccy_sym}{d['current']:,.2f}"
         sig_tone = d.get("signal_tone", "neutral")
         sig_label = d.get("signal", "—")
+        # RSI pill — always shown when available. Color follows the same
+        # convention as the modal: red ≥70 (overbought), green ≤30 (oversold),
+        # dim otherwise. "—" when no RSI yet (typically <15 days of history).
+        rsi = d.get("rsi14")
+        if rsi is None:
+            rsi_html = '<span class="an-rsi an-rsi-dim" title="No RSI">RSI &mdash;</span>'
+        else:
+            if rsi >= 70:
+                rsi_cls = "an-rsi-hot"
+                rsi_title = "Overbought (RSI ≥ 70) — pullback risk"
+            elif rsi <= 30:
+                rsi_cls = "an-rsi-cold"
+                rsi_title = "Oversold (RSI ≤ 30) — potential bounce"
+            else:
+                rsi_cls = "an-rsi-neutral"
+                rsi_title = "Neutral momentum (30 < RSI < 70)"
+            rsi_html = f'<span class="an-rsi {rsi_cls}" title="{rsi_title}">RSI {rsi:.0f}</span>'
         cards.append(
             f'<div class="an-card" data-ticker="{d["ticker"]}">'
             f'  <div class="an-head">'
@@ -1775,7 +2086,8 @@ def render_analyst_signals(rows: list[dict], candidate_pool_size: int) -> str:
             f'    <span class="an-dot">·</span>'
             f'    <span class="an-upside {upside_cls}">{d["upside_pct"]:+.1f}% upside</span></div>'
             f'  <div class="an-signal sig-{sig_tone}">'
-            f'    <span class="an-signal-dot"></span>{_esc(sig_label)}</div>'
+            f'    <span class="an-signal-dot"></span><span class="an-signal-label">{_esc(sig_label)}</span>'
+            f'    {rsi_html}</div>'
             f'  <div class="an-foot">{d["num_analysts"]} analysts</div>'
             f'</div>'
         )
@@ -1894,6 +2206,102 @@ def render_industry_attribution(rows: list[dict], basket_avg: float) -> str:
       </tr></thead>
       <tbody>{''.join(body)}</tbody>
     </table>
+  </div>
+</section>"""
+
+
+def render_basket_diversification(data: dict | None, meta: pd.DataFrame) -> str:
+    """Three-panel + histogram view of pairwise correlation across open positions.
+
+    Headline = mean of every pair's daily-return correlation; two side panels
+    list the three most-correlated pairs (concentration risk) and the three
+    most-independent positions (best diversifiers). A small bar chart shows
+    the full distribution.
+    """
+    if not data:
+        return ""
+    avg = data["avg_corr"]
+    # Color the headline: low avg = well diversified (green), high = concentrated (red).
+    if avg < 0.30:
+        avg_cls, avg_meta = "pos", "well diversified"
+    elif avg > 0.60:
+        avg_cls, avg_meta = "neg", "highly correlated"
+    else:
+        avg_cls, avg_meta = "", "moderately diversified"
+
+    def _ind(t: str) -> str:
+        return _industry_label(meta, t)
+
+    most_rows = []
+    for p in data["most_correlated"]:
+        sec_a, sec_b = _ind(p["a"]), _ind(p["b"])
+        sub = sec_a if sec_a == sec_b else f"{sec_a} / {sec_b}"
+        most_rows.append(
+            f'<li class="div-row">'
+            f'<div class="div-pair">'
+            f'<span class="div-pair-syms">{p["a"]} &harr; {p["b"]}</span>'
+            f'<div class="div-pair-sub">{_esc(sub)}</div>'
+            f'</div>'
+            f'<span class="div-val div-val-hot">{p["corr"]:.2f}</span>'
+            f'</li>'
+        )
+
+    div_rows = []
+    for d in data["best_diversifiers"]:
+        sec = _ind(d["ticker"])
+        name = str(meta.loc[d["ticker"], "name"]) if d["ticker"] in meta.index else d["ticker"]
+        sub = f"{name} &middot; {_esc(sec)}" if sec else _esc(name)
+        div_rows.append(
+            f'<li class="div-row">'
+            f'<div class="div-pair">'
+            f'<span class="div-pair-syms">{d["ticker"]}</span>'
+            f'<div class="div-pair-sub">{sub}</div>'
+            f'</div>'
+            f'<span class="div-val div-val-cool">{d["avg_corr"]:+.2f}</span>'
+            f'</li>'
+        )
+
+    # Histogram: each bar's height = % of the tallest. Empty buckets get a
+    # minimum 2% sliver so the x-axis stays anchored visually.
+    max_count = max((h["count"] for h in data["histogram"]), default=1) or 1
+    bar_html_parts: list[str] = []
+    xlabel_html_parts: list[str] = []
+    for h in data["histogram"]:
+        ratio = h["count"] / max_count
+        height_pct = ratio * 100 if h["count"] > 0 else 2
+        mid = (h["min"] + h["max"]) / 2
+        tooltip = f'{h["min"]:+.2f} to {h["max"]:+.2f}: {h["count"]} pair' + ("s" if h["count"] != 1 else "")
+        bar_html_parts.append(
+            f'<div class="div-hist-bar" style="height:{height_pct:.1f}%" title="{tooltip}"></div>'
+        )
+        xlabel_html_parts.append(f'<span>{mid:+.2f}</span>')
+
+    return f"""<section class="div-section">
+  <div class="div-head">
+    <h3>Basket diversification <span class="muted">({data["n_positions"]} open positions &middot; 6-month window)</span></h3>
+    <p class="muted">How independent are the bets? Lower pairwise correlations
+    = more diversification benefit; higher = redundant exposure. Computed on
+    {data["n_pairs"]:,} unique pairs of native-currency daily returns.</p>
+  </div>
+  <div class="div-grid">
+    <div class="div-card div-card-headline">
+      <div class="div-label">Avg pairwise correlation</div>
+      <div class="div-headline {avg_cls}">{avg:+.2f}</div>
+      <div class="div-meta">{avg_meta}</div>
+    </div>
+    <div class="div-card">
+      <div class="div-label">Most correlated &mdash; concentration risk</div>
+      <ul class="div-list">{''.join(most_rows)}</ul>
+    </div>
+    <div class="div-card">
+      <div class="div-label">Best diversifiers &mdash; lowest avg &rho; vs rest</div>
+      <ul class="div-list">{''.join(div_rows)}</ul>
+    </div>
+  </div>
+  <div class="div-histogram">
+    <div class="div-hist-label">Distribution of pairwise correlations &mdash; {data["n_pairs"]:,} pairs</div>
+    <div class="div-hist-bars">{''.join(bar_html_parts)}</div>
+    <div class="div-hist-xlabels">{''.join(xlabel_html_parts)}</div>
   </div>
 </section>"""
 
@@ -2081,7 +2489,8 @@ def build_data_payload(returns: pd.DataFrame, prices: pd.DataFrame,
                        meta: pd.DataFrame, contrib: pd.DataFrame,
                        signals: pd.DataFrame,
                        prices_native: pd.DataFrame,
-                       returns_native: pd.DataFrame) -> dict:
+                       returns_native: pd.DataFrame,
+                       quant_metrics: pd.DataFrame | None = None) -> dict:
     daily = prices.ffill()
     contrib_lookup = contrib["contribution_pp"].to_dict() if not contrib.empty else {}
     payload = {}
@@ -2158,6 +2567,16 @@ def build_data_payload(returns: pd.DataFrame, prices: pd.DataFrame,
             "dates": [d.strftime("%Y-%m-%d") for d in s_weekly.index],
             "prices": [round(float(p), 4) for p in s_weekly.tolist()],
         }
+        if quant_metrics is not None and tkr in quant_metrics.index:
+            q = quant_metrics.loc[tkr]
+            payload[tkr]["quant"] = {
+                "sma200_dist_pct": _safe(q.sma200_dist_pct),
+                "atr14_gbp": _safe(q.atr14_gbp),
+                "atr14_pct": _safe(q.atr14_pct),
+                "rsi14": _safe(q.rsi14),
+                "range52w_pct": _safe(q.range52w_pct),
+                "vol_ratio": _safe(q.vol_ratio),
+            }
     return payload
 
 
@@ -2201,7 +2620,8 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
                 analyst: pd.DataFrame | None = None,
                 analyst_candidates: list[str] | None = None,
                 fx: pd.DataFrame | None = None,
-                universe_outlook: pd.DataFrame | None = None) -> str:
+                universe_outlook: pd.DataFrame | None = None,
+                quant_metrics: pd.DataFrame | None = None) -> str:
     weekly = prices.resample("W-FRI").last().ffill()
     defs_html = render_svg_defs()
     table_html = render_table(returns, weekly, meta, signals,
@@ -2210,6 +2630,9 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
         contrib, returns, signals,
         analyst if analyst is not None else pd.DataFrame(),
         meta,
+        quant_metrics=quant_metrics,
+        prices=prices,
+        prices_native=prices_native,
     )
     attribution_rows, basket_avg = build_industry_attribution(returns, meta)
     attribution_html = render_industry_attribution(attribution_rows, basket_avg)
@@ -2220,7 +2643,8 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     watchlist_payload = (build_watchlist_payload(watchlist, prices, prices_native, meta)
                          if watchlist is not None and not watchlist.empty else {})
     candidates = analyst_candidates or []
-    analyst_rows = (build_analyst_payload(candidates, analyst, prices_native, meta, signals=signals)
+    analyst_rows = (build_analyst_payload(candidates, analyst, prices_native, meta,
+                                          signals=signals, quant_metrics=quant_metrics)
                     if analyst is not None and not analyst.empty else [])
     analyst_html = render_analyst_signals(analyst_rows, len(candidates)) if (analyst_rows or candidates) else ""
     # Industry outlook — universe-only, excluding everything in log.xlsx
@@ -2232,6 +2656,14 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     universe_count = (len(universe_outlook) if universe_outlook is not None else 0)
     industry_html = render_industry_outlook(industry_groups, universe_count)
     news_html = render_news(news_items or [])
+
+    # Basket diversification — 6-month pairwise correlation summary across
+    # open positions. Returns None (and renders nothing) if fewer than 2
+    # open positions or insufficient overlapping history.
+    diversification_data = compute_basket_correlation(returns, prices_native,
+                                                       lookback_days=126)
+    diversification_html = render_basket_diversification(diversification_data, meta) \
+        if diversification_data else ""
 
     latest_date = prices.index[-1].strftime("%d %b %Y")
     built = datetime.now(timezone.utc).strftime("%d %b %Y &middot; %H:%M UTC")
@@ -2309,7 +2741,8 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
             max_drawdown_date_str = pd.Timestamp(dd_series.idxmin()).strftime("%d %b %y")
 
     data_dict = build_data_payload(returns, prices, meta, contrib, signals,
-                                   prices_native, returns_native)
+                                   prices_native, returns_native,
+                                   quant_metrics=quant_metrics)
     for tkr, entry in watchlist_payload.items():
         if tkr not in data_dict:
             data_dict[tkr] = entry
@@ -2320,6 +2753,41 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     portfolio_json = json.dumps(
         build_portfolio_payload(basket, bench, first_purchase, fx=fx), separators=(",", ":")
     )
+
+    # ---- Customizable module stack -----------------------------------------
+    # Each top-level content section is wrapped as a draggable/hideable
+    # "module". Order + visibility are persisted client-side (localStorage) by
+    # setupLayout() in the page script, so the order defined here is only the
+    # default that ships to anyone who clones the repo. Empty sections (e.g.
+    # the analyst panel when there are no candidates) are dropped so we never
+    # wrap a blank module.
+    toolbar_html = render_toolbar(0, n_total, returns=returns, meta=meta)
+    holdings_html = f'<section class="panel active" id="panel-0">{toolbar_html}{table_html}</section>'
+    _module_defs = [
+        ("outlook", "Industry outlook", industry_html),
+        ("news", "News", news_html),
+        ("attribution", "Industry attribution", attribution_html),
+        ("holdings", "Holdings", holdings_html),
+        ("analyst", "Re-entry ideas", analyst_html),
+        ("detractors", "Exit strategy", detractors_html),
+        ("diversification", "Basket diversification", diversification_html),
+        ("regret", "Regret tracker", regret_html),
+    ]
+    _modules = [(mid, label, html) for (mid, label, html) in _module_defs if html and html.strip()]
+
+    def _wrap_module(mid: str, label: str, inner: str) -> str:
+        return (
+            f'<div class="module" data-module="{mid}">'
+            f'<div class="module-bar">'
+            f'<span class="module-grip" aria-hidden="true">⋮⋮</span>'
+            f'<span class="module-name">{label}</span>'
+            f'<label class="module-vis"><input type="checkbox" class="module-vis-cb" checked>'
+            f'<span class="module-vis-txt">Shown</span></label>'
+            f'</div>{inner}</div>'
+        )
+
+    default_order_csv = ",".join(mid for (mid, _, _) in _modules)
+    module_stack_html = "\n".join(_wrap_module(mid, label, html) for (mid, label, html) in _modules)
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -2359,8 +2827,20 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     --up:#00ff66; --down:#ff3030; --accent:#ffb800;
   }}
   /* Palette toggle pill cluster (top-right of header) */
-  .palette-toggle{{
-    position:absolute;top:18px;right:28px;display:flex;gap:4px;
+  /* Top-right control cluster: layout editor + palette toggle */
+  .topbar{{
+    position:absolute;top:18px;right:28px;z-index:30;
+    display:flex;gap:8px;align-items:center;
+  }}
+  .layout-toggle,.layout-reset{{
+    background:var(--surface);border:1px solid var(--border);color:var(--text-dim);
+    padding:4px 9px;border-radius:5px;cursor:pointer;font-family:var(--font-mono);
+    font-size:10px;letter-spacing:0.06em;text-transform:uppercase;transition:all 0.15s;
+  }}
+  .layout-toggle:hover,.layout-reset:hover{{color:var(--text);border-color:var(--text-dim)}}
+  .layout-toggle.active{{background:var(--accent);color:var(--ink);
+    border-color:var(--accent);font-weight:600}}
+  .palette-toggle{{display:flex;gap:4px;
     font-family:var(--font-mono);font-size:10px;letter-spacing:0.06em;
   }}
   .palette-toggle button{{
@@ -2372,8 +2852,56 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
   .palette-toggle button.active{{background:var(--accent);color:var(--ink);
     border-color:var(--accent);font-weight:600}}
   .container{{position:relative}}
+
+  /* ---- Customizable module layout ---- */
+  /* 2-col grid so a registered "pair" (outlook + news) can sit side-by-side
+     *only when* both are visible and adjacent in the current order. Everything
+     else spans full width via `grid-column: 1 / -1`. The .module-paired class
+     is applied by setupLayout() in JS after every layout change (load, drag,
+     hide-toggle, reset), so reordering or hiding one of the pair gracefully
+     unpairs them back to full-width. */
+  #module-stack{{display:grid;grid-template-columns:repeat(2,1fr);
+    gap:26px;margin-top:28px;align-items:stretch}}
+  #module-stack > .module{{grid-column:1 / -1}}
+  #module-stack > .module.module-paired{{grid-column:span 1;
+    display:flex;flex-direction:column;min-height:520px;max-height:620px}}
+  #module-stack > .module.module-paired > section{{flex:1 1 auto;
+    display:flex;flex-direction:column;overflow:hidden;min-height:0}}
+  #module-stack > .module.module-paired .io-grid{{flex:1 1 auto;
+    overflow-y:auto;min-height:0;max-height:none;grid-template-columns:1fr}}
+  #module-stack > .module.module-paired .news-list{{flex:1 1 auto;
+    min-height:0;max-height:none;overflow-y:auto}}
+  #module-stack > .module > section{{margin:0}}
+  .module-bar{{display:none}}
+  body.edit-mode .module-bar{{
+    display:flex;align-items:center;gap:10px;margin-bottom:10px;padding:7px 12px;
+    background:var(--surface);border:1px dashed var(--border);border-radius:7px;
+    font-family:var(--font-mono);font-size:11px;
+  }}
+  .module-grip{{cursor:grab;color:var(--text-dim);font-size:13px;line-height:1;
+    letter-spacing:-2px;user-select:none}}
+  body.edit-mode .module-grip:active{{cursor:grabbing}}
+  .module-name{{font-weight:600;color:var(--text);text-transform:uppercase;letter-spacing:0.06em}}
+  .module-vis{{margin-left:auto;display:flex;align-items:center;gap:6px;
+    color:var(--text-dim);cursor:pointer;user-select:none}}
+  .module-vis input{{cursor:pointer;accent-color:var(--accent)}}
+  body.edit-mode .module{{outline:1px solid var(--border);outline-offset:6px;border-radius:4px}}
+  .module-ghost{{opacity:.35}}
+  .module-chosen .module-bar{{border-style:solid;border-color:var(--accent)}}
+  /* Hidden modules vanish in normal view; in edit mode they stay visible but
+     dimmed and inert so they can be toggled back on. */
+  .module[data-hidden="true"]{{display:none}}
+  body.edit-mode .module[data-hidden="true"]{{display:block;opacity:.45}}
+  body.edit-mode .module[data-hidden="true"] > section{{pointer-events:none}}
+  /* News list keeps an internal scroll cap now that it's full-width. */
+  .module[data-module="news"] .news-list{{max-height:360px;overflow-y:auto}}
+
   @media (max-width:700px){{
-    .palette-toggle{{position:static;justify-content:flex-end;margin:8px 0 -8px}}
+    .topbar{{position:static;justify-content:flex-end;margin:8px 0 -8px;flex-wrap:wrap}}
+    /* Collapse the module grid to a single column on narrow screens — pairs
+       become full-width stacked, matching the legacy mobile behavior. */
+    #module-stack{{grid-template-columns:1fr}}
+    #module-stack > .module.module-paired{{grid-column:1 / -1;min-height:auto;max-height:none}}
   }}
   *{{box-sizing:border-box}}
   html,body{{margin:0;padding:0}}
@@ -2518,6 +3046,13 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
   .dt-action-pos{{color:var(--up);border-color:var(--up);background:rgba(52,211,153,0.08)}}
   .dt-action-neutral{{color:var(--accent);border-color:var(--accent);background:rgba(245,158,11,0.08)}}
   .dt-action-neg{{color:var(--down);border-color:var(--down);background:rgba(248,113,113,0.10)}}
+  /* 2× ATR suggested stop, sub-line under the action pill */
+  .dt-action-stop{{font-family:var(--font-mono);font-size:10.5px;color:var(--text-2);
+    margin-top:5px;line-height:1.3;letter-spacing:0.02em}}
+  .dt-action-stop-label{{color:var(--text-dim);text-transform:uppercase;font-size:9px;
+    letter-spacing:0.12em;font-weight:600;margin-right:2px}}
+  .dt-action-stop-native{{color:var(--text-dim)}}
+  .dt-action-stop-meta{{color:var(--text-dim);font-size:9.5px;margin-left:4px}}
   @media (max-width:900px){{
     .dt-table th,.dt-table td{{padding:8px 6px;font-size:11.5px}}
   }}
@@ -2614,6 +3149,17 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
   .an-signal.sig-pos{{color:var(--up)}} .an-signal.sig-pos .an-signal-dot{{background:var(--up)}}
   .an-signal.sig-neg{{color:var(--down)}} .an-signal.sig-neg .an-signal-dot{{background:var(--down)}}
   .an-signal.sig-neutral{{color:var(--accent)}} .an-signal.sig-neutral .an-signal-dot{{background:var(--accent)}}
+  /* Signal-row label is the flex middle child; let it ellipsis if a long signal
+     name would otherwise push the RSI pill off the card. */
+  .an-signal-label{{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
+  /* RSI chip, right-aligned within the signal row */
+  .an-rsi{{margin-left:auto;font-family:var(--font-mono);font-size:9.5px;font-weight:600;
+    letter-spacing:0.04em;padding:2px 6px;border-radius:4px;
+    border:1px solid var(--border);background:var(--ink-soft);flex-shrink:0}}
+  .an-rsi-hot{{color:var(--down);border-color:var(--down);background:rgba(248,113,113,0.10)}}
+  .an-rsi-cold{{color:var(--up);border-color:var(--up);background:rgba(52,211,153,0.10)}}
+  .an-rsi-neutral{{color:var(--text-2);border-color:var(--border)}}
+  .an-rsi-dim{{color:var(--text-dim);border-color:var(--border);background:transparent}}
   .an-foot{{font-family:var(--font-mono);font-size:9.5px;color:var(--text-dim);
     text-transform:uppercase;letter-spacing:0.08em}}
   @media (max-width:900px){{
@@ -2691,6 +3237,54 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
   @media (max-width:900px){{
     .ia-bar{{display:none}}
     .ia-table th,.ia-table td{{padding:8px 6px;font-size:11.5px}}
+  }}
+
+  /* Basket diversification — pairwise-correlation portfolio lens */
+  .div-section{{
+    background:linear-gradient(180deg,var(--surface) 0%,var(--ink-soft) 100%);
+    border:1px solid var(--border);border-radius:12px;padding:18px 20px;
+  }}
+  .div-head h3{{margin:0 0 4px;font-family:var(--font-display);font-size:18px;
+    font-weight:400;color:var(--text);letter-spacing:-0.01em}}
+  .div-head h3 .muted{{color:var(--text-dim);font-size:14px;margin-left:4px}}
+  .div-head p.muted{{margin:0 0 14px;font-family:var(--font-ui);font-size:12px;
+    color:var(--text-dim);line-height:1.5}}
+  .div-grid{{display:grid;grid-template-columns:1fr 1.4fr 1.4fr;gap:12px;margin-bottom:16px}}
+  .div-card{{background:var(--ink-soft);border:1px solid var(--border);border-radius:10px;
+    padding:14px 16px;display:flex;flex-direction:column;gap:8px}}
+  .div-card-headline{{justify-content:center;align-items:flex-start}}
+  .div-label{{font-family:var(--font-mono);font-size:9.5px;color:var(--text-dim);
+    text-transform:uppercase;letter-spacing:0.14em;font-weight:600}}
+  .div-headline{{font-family:var(--font-display);font-size:42px;font-weight:400;
+    letter-spacing:-0.02em;color:var(--text);line-height:1}}
+  .div-headline.pos{{color:var(--up)}}
+  .div-headline.neg{{color:var(--down)}}
+  .div-meta{{font-family:var(--font-mono);font-size:10px;color:var(--text-dim);
+    letter-spacing:0.04em;text-transform:uppercase}}
+  .div-list{{list-style:none;padding:0;margin:0;display:flex;flex-direction:column;gap:8px}}
+  .div-row{{display:flex;justify-content:space-between;align-items:flex-start;gap:10px}}
+  .div-pair{{flex:1 1 auto;min-width:0}}
+  .div-pair-syms{{font-family:var(--font-mono);font-size:13px;font-weight:600;
+    color:var(--text);letter-spacing:-0.01em}}
+  .div-pair-sub{{font-family:var(--font-ui);font-size:10.5px;color:var(--text-dim);
+    line-height:1.3;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
+  .div-val{{font-family:var(--font-mono);font-size:14px;font-weight:600;
+    letter-spacing:-0.01em;flex-shrink:0}}
+  .div-val-hot{{color:var(--down)}}
+  .div-val-cool{{color:var(--up)}}
+  .div-histogram{{padding-top:14px;border-top:1px solid var(--border)}}
+  .div-hist-label{{font-family:var(--font-mono);font-size:9.5px;color:var(--text-dim);
+    text-transform:uppercase;letter-spacing:0.14em;font-weight:600;margin-bottom:10px}}
+  .div-hist-bars{{display:flex;align-items:flex-end;gap:6px;height:80px}}
+  .div-hist-bar{{flex:1 1 0;background:var(--accent);border-radius:2px 2px 0 0;
+    min-height:2px;transition:opacity .15s;cursor:default}}
+  .div-hist-bar:hover{{opacity:.75}}
+  .div-hist-xlabels{{display:flex;gap:6px;margin-top:4px}}
+  .div-hist-xlabels span{{flex:1 1 0;text-align:center;font-family:var(--font-mono);
+    font-size:9px;color:var(--text-dim)}}
+  @media (max-width:900px){{
+    .div-grid{{grid-template-columns:1fr;gap:10px}}
+    .div-headline{{font-size:36px}}
   }}
 
   /* Industry outlook */
@@ -2963,6 +3557,17 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
   .modal-stat-val{{font-family:var(--font-mono);font-size:14px;font-weight:500;color:var(--text)}}
   .modal-stat-val.pos{{color:var(--up)}}
   .modal-stat-val.neg{{color:var(--down)}}
+  .modal-stat-val.warn{{color:var(--accent)}}
+  .modal-stat-val.dim{{color:var(--text-dim)}}
+  .modal-stat-meta{{font-family:var(--font-ui);font-size:10px;color:var(--text-dim);
+    margin-top:2px;line-height:1.2;letter-spacing:0.02em}}
+  /* "Quant signals" sub-row: SMA200 distance / ATR / RSI / 52w position / Volume */
+  .modal-quant-head{{font-family:var(--font-mono);font-size:9.5px;color:var(--text-dim);
+    text-transform:uppercase;letter-spacing:0.16em;font-weight:600;
+    margin:6px 0 8px;padding-left:2px;display:flex;align-items:center;gap:10px}}
+  .modal-quant-head::after{{content:"";flex:1;height:1px;background:var(--border);opacity:0.6}}
+  .modal-quant-stats{{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-bottom:22px;
+    padding:14px;background:var(--ink-soft);border:1px solid var(--border);border-radius:10px}}
   .modal-chart-wrap{{position:relative;width:100%;height:340px;background:var(--ink-soft);border:1px solid var(--border);border-radius:10px;padding:16px}}
   .modal-chart{{width:100%;height:100%;display:block}}
   .modal-tip{{position:absolute;background:var(--ink);border:1px solid var(--accent);border-radius:6px;
@@ -3015,6 +3620,7 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     .modal-signal{{flex-wrap:wrap;padding:10px 12px;font-size:11.5px;gap:8px}}
     .modal-signal-detail{{margin-left:0;width:100%;font-size:10.5px}}
     .modal-stats{{grid-template-columns:repeat(3,1fr);gap:10px;padding:12px}}
+    .modal-quant-stats{{grid-template-columns:repeat(3,1fr);gap:10px;padding:12px}}
     .modal-stat-val{{font-size:13px}}
     .modal-chart-wrap{{height:240px;padding:10px}}
   }}
@@ -3024,11 +3630,17 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
 {defs_html}
 <div class="container">
 
-<div class="palette-toggle" role="tablist" aria-label="Color palette">
-  <button data-palette="default" aria-pressed="true">Default</button>
-  <button data-palette="softdark">Soft Dark</button>
-  <button data-palette="light">Light</button>
-  <button data-palette="bloomberg">Amber</button>
+<div class="topbar">
+  <button class="layout-toggle" id="edit-layout-btn" type="button" aria-pressed="false"
+          title="Reorder or hide sections; saved in your browser">Edit layout</button>
+  <button class="layout-reset" id="reset-layout-btn" type="button" hidden
+          title="Restore the default order and show all sections">Reset</button>
+  <div class="palette-toggle" role="tablist" aria-label="Color palette">
+    <button data-palette="default" aria-pressed="true">Default</button>
+    <button data-palette="softdark">Soft Dark</button>
+    <button data-palette="light">Light</button>
+    <button data-palette="bloomberg">Amber</button>
+  </div>
 </div>
 
 <header>
@@ -3086,23 +3698,9 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
   </div>
 </header>
 
-<div class="outlook-news-row">
-  {industry_html}
-  {news_html}
+<div id="module-stack" data-default-order="{default_order_csv}">
+{module_stack_html}
 </div>
-
-{attribution_html}
-
-<section class="panel active" id="panel-0">
-  {render_toolbar(0, n_total, returns=returns, meta=meta)}
-  {table_html}
-</section>
-
-{analyst_html}
-
-{detractors_html}
-
-{regret_html}
 
 <footer>Built locally &middot; data via yfinance &middot; TWR basket vs SPY &middot; click any row for the full chart</footer>
 
@@ -3146,6 +3744,24 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
       <div class="modal-stat"><div class="modal-stat-label">3M</div><div class="modal-stat-val" data-key="m3"></div></div>
       <div class="modal-stat"><div class="modal-stat-label">YTD</div><div class="modal-stat-val" data-key="ytd"></div></div>
     </div>
+    <div class="modal-quant-head">Quant signals</div>
+    <div class="modal-quant-stats">
+      <div class="modal-stat"><div class="modal-stat-label">vs 200d</div>
+        <div class="modal-stat-val" data-qkey="sma200_dist_pct"></div>
+        <div class="modal-stat-meta" data-qmeta="sma200_dist_pct"></div></div>
+      <div class="modal-stat"><div class="modal-stat-label">ATR 14d</div>
+        <div class="modal-stat-val" data-qkey="atr14_gbp"></div>
+        <div class="modal-stat-meta" data-qmeta="atr14_gbp"></div></div>
+      <div class="modal-stat"><div class="modal-stat-label">RSI 14d</div>
+        <div class="modal-stat-val" data-qkey="rsi14"></div>
+        <div class="modal-stat-meta" data-qmeta="rsi14"></div></div>
+      <div class="modal-stat"><div class="modal-stat-label">52w pos</div>
+        <div class="modal-stat-val" data-qkey="range52w_pct"></div>
+        <div class="modal-stat-meta" data-qmeta="range52w_pct"></div></div>
+      <div class="modal-stat"><div class="modal-stat-label">Volume</div>
+        <div class="modal-stat-val" data-qkey="vol_ratio"></div>
+        <div class="modal-stat-meta" data-qmeta="vol_ratio"></div></div>
+    </div>
     <div class="modal-chart-wrap">
       <svg class="modal-chart" preserveAspectRatio="none"></svg>
       <div class="modal-tip" hidden></div>
@@ -3153,6 +3769,7 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
   </div>
 </div>
 
+<script src="vendor/Sortable.min.js"></script>
 <script>
 const DATA = {data_json};
 const PORTFOLIO = {portfolio_json};
@@ -3535,13 +4152,62 @@ function openModal(ticker) {{
     m3: fmtPct(d.m3, true),
     ytd: fmtPct(d.ytd, true),
   }};
-  modal.querySelectorAll('.modal-stat-val').forEach(el => {{
+  modal.querySelectorAll('.modal-stat-val[data-key]').forEach(el => {{
     const k = el.dataset.key;
     el.textContent = vals[k];
     el.className = 'modal-stat-val';
     if (k.match(/^(w1|m1|m3|ytd)$/) && d[k] !== null && d[k] !== undefined && !Number.isNaN(d[k])) {{
       el.classList.add(d[k] >= 0 ? 'pos' : 'neg');
     }}
+  }});
+  // ---- Quant signals sub-row -----------------------------------------
+  // SMA200 distance / ATR / RSI / 52w position / Volume. Falls back to
+  // dim "—" when a metric couldn't be computed (e.g. <200 days history,
+  // or no FX rate to convert ATR into base currency).
+  const q = d.quant || {{}};
+  const isNum = (v) => v !== null && v !== undefined && !Number.isNaN(v);
+  const sma = isNum(q.sma200_dist_pct)
+    ? ((q.sma200_dist_pct >= 0 ? '+' : '') + q.sma200_dist_pct.toFixed(1) + '%') : '—';
+  const atr = isNum(q.atr14_gbp) ? ('{BASE_SYMBOL}' + q.atr14_gbp.toFixed(2)) : '—';
+  const atrMeta = isNum(q.atr14_pct) ? (q.atr14_pct.toFixed(1) + '% of price') : '';
+  const rsi = isNum(q.rsi14) ? q.rsi14.toFixed(0) : '—';
+  const rsiMeta = isNum(q.rsi14)
+    ? (q.rsi14 >= 70 ? 'overbought' : q.rsi14 <= 30 ? 'oversold' : 'neutral') : '';
+  const rng = isNum(q.range52w_pct) ? (q.range52w_pct.toFixed(0) + '%') : '—';
+  const rngMeta = isNum(q.range52w_pct)
+    ? (q.range52w_pct >= 75 ? 'near high' : q.range52w_pct <= 25 ? 'near low' : 'mid-range') : '';
+  const vol = isNum(q.vol_ratio) ? (q.vol_ratio.toFixed(1) + '×') : '—';
+  const volMeta = isNum(q.vol_ratio) ? (q.vol_ratio >= 1.0 ? 'above avg' : 'below avg') : '';
+  const qMap = {{
+    sma200_dist_pct: {{ val: sma, meta: '' }},
+    atr14_gbp:       {{ val: atr, meta: atrMeta }},
+    rsi14:           {{ val: rsi, meta: rsiMeta }},
+    range52w_pct:    {{ val: rng, meta: rngMeta }},
+    vol_ratio:       {{ val: vol, meta: volMeta }},
+  }};
+  modal.querySelectorAll('[data-qkey]').forEach(el => {{
+    const k = el.dataset.qkey;
+    const entry = qMap[k];
+    if (!entry) return;
+    el.textContent = entry.val;
+    el.className = 'modal-stat-val';
+    const v = q[k];
+    if (!isNum(v)) {{ el.classList.add('dim'); return; }}
+    if (k === 'sma200_dist_pct') el.classList.add(v >= 0 ? 'pos' : 'neg');
+    else if (k === 'rsi14') {{
+      if (v >= 70) el.classList.add('neg');
+      else if (v <= 30) el.classList.add('pos');
+    }} else if (k === 'range52w_pct') {{
+      if (v >= 75) el.classList.add('pos');
+      else if (v <= 25) el.classList.add('neg');
+    }} else if (k === 'vol_ratio') {{
+      el.classList.add(v >= 1.0 ? 'pos' : 'neg');
+    }}
+    // atr14_gbp stays neutral — it's a magnitude, not a direction.
+  }});
+  modal.querySelectorAll('[data-qmeta]').forEach(el => {{
+    const k = el.dataset.qmeta;
+    el.textContent = (qMap[k] && qMap[k].meta) || '';
   }});
   modal.removeAttribute('hidden');
   document.body.classList.add('modal-open');
@@ -3714,6 +4380,137 @@ document.querySelectorAll('.io-stock').forEach(row => {{
   buttons.forEach(b => b.addEventListener('click', () => apply(b.dataset.palette)));
 }})();
 
+// ---- Customizable module layout ---------------------------------------
+// Sections below the hero are wrapped as draggable/hideable "modules".
+// Order + hidden state persist in localStorage so each visitor's layout
+// survives rebuilds (build.py only ships the default order). A new section
+// the author adds later slots into its default position automatically, so
+// people who cloned + customized never silently lose newly-shipped sections.
+(function setupLayout() {{
+  const KEY = 'stocks-dashboard-layout-v1';
+  const stack = document.getElementById('module-stack');
+  if (!stack) return;
+  const editBtn = document.getElementById('edit-layout-btn');
+  const resetBtn = document.getElementById('reset-layout-btn');
+  const defaultOrder = (stack.dataset.defaultOrder || '').split(',').filter(Boolean);
+
+  const mods = () => Array.from(stack.querySelectorAll(':scope > .module'));
+  const modById = (id) => stack.querySelector(':scope > .module[data-module="' + id + '"]');
+
+  // Modules that should pair side-by-side when they're adjacent and both
+  // visible. Re-derived from the live DOM after every layout change so the
+  // pairing is a pure function of the current order + hidden state — no
+  // separate persistence needed.
+  const PAIR_MEMBERS = ['outlook', 'news'];
+  function applyPairing() {{
+    stack.querySelectorAll('.module-paired').forEach(el => el.classList.remove('module-paired'));
+    const a = modById(PAIR_MEMBERS[0]);
+    const b = modById(PAIR_MEMBERS[1]);
+    if (!a || !b) return;
+    if (a.dataset.hidden === 'true' || b.dataset.hidden === 'true') return;
+    const children = Array.from(stack.children);
+    const aIdx = children.indexOf(a);
+    const bIdx = children.indexOf(b);
+    if (aIdx < 0 || bIdx < 0) return;
+    if (Math.abs(aIdx - bIdx) === 1) {{
+      a.classList.add('module-paired');
+      b.classList.add('module-paired');
+    }}
+  }}
+
+  function load() {{
+    try {{
+      const s = JSON.parse(localStorage.getItem(KEY) || 'null');
+      if (!s || !Array.isArray(s.order)) return null;
+      return {{ order: s.order, hidden: Array.isArray(s.hidden) ? s.hidden : [] }};
+    }} catch (e) {{ return null; }}
+  }}
+  function save() {{
+    const order = mods().map(el => el.dataset.module);
+    const hidden = mods().filter(el => el.dataset.hidden === 'true').map(el => el.dataset.module);
+    try {{ localStorage.setItem(KEY, JSON.stringify({{ order, hidden }})); }} catch (e) {{}}
+  }}
+
+  function applyOrder(savedOrder) {{
+    const present = new Set(mods().map(el => el.dataset.module));
+    const result = savedOrder.filter(id => present.has(id));
+    const placed = new Set(result);
+    // Slot any module missing from the saved order (newly shipped) into the
+    // position it occupies in the default order.
+    defaultOrder.forEach(id => {{
+      if (!present.has(id) || placed.has(id)) return;
+      const di = defaultOrder.indexOf(id);
+      let after = null;
+      for (let i = di - 1; i >= 0; i--) {{
+        if (placed.has(defaultOrder[i])) {{ after = defaultOrder[i]; break; }}
+      }}
+      if (after === null) result.unshift(id);
+      else result.splice(result.indexOf(after) + 1, 0, id);
+      placed.add(id);
+    }});
+    result.forEach(id => {{ const el = modById(id); if (el) stack.appendChild(el); }});
+  }}
+  function applyHidden(hiddenArr) {{
+    const h = new Set(hiddenArr);
+    mods().forEach(el => {{
+      const hide = h.has(el.dataset.module);
+      el.dataset.hidden = hide ? 'true' : 'false';
+      const cb = el.querySelector('.module-vis-cb');
+      if (cb) cb.checked = !hide;
+      const txt = el.querySelector('.module-vis-txt');
+      if (txt) txt.textContent = hide ? 'Hidden' : 'Shown';
+    }});
+  }}
+
+  const state = load();
+  if (state) {{ applyOrder(state.order); applyHidden(state.hidden); }}
+  else {{ applyHidden([]); }}
+  applyPairing();
+
+  let sortable = null;
+  function enterEdit() {{
+    document.body.classList.add('edit-mode');
+    if (editBtn) {{ editBtn.textContent = 'Done'; editBtn.classList.add('active'); editBtn.setAttribute('aria-pressed', 'true'); }}
+    if (resetBtn) resetBtn.hidden = false;
+    if (window.Sortable && !sortable) {{
+      sortable = window.Sortable.create(stack, {{
+        handle: '.module-grip', draggable: '.module', animation: 150,
+        ghostClass: 'module-ghost', chosenClass: 'module-chosen',
+        onEnd: () => {{ save(); applyPairing(); }},
+      }});
+    }}
+  }}
+  function exitEdit() {{
+    document.body.classList.remove('edit-mode');
+    if (editBtn) {{ editBtn.textContent = 'Edit layout'; editBtn.classList.remove('active'); editBtn.setAttribute('aria-pressed', 'false'); }}
+    if (resetBtn) resetBtn.hidden = true;
+    if (sortable) {{ sortable.destroy(); sortable = null; }}
+  }}
+  if (editBtn) editBtn.addEventListener('click', () => {{
+    if (document.body.classList.contains('edit-mode')) exitEdit(); else enterEdit();
+  }});
+
+  stack.addEventListener('change', (e) => {{
+    const cb = e.target.closest && e.target.closest('.module-vis-cb');
+    if (!cb) return;
+    const mod = cb.closest('.module');
+    if (!mod) return;
+    const hide = !cb.checked;
+    mod.dataset.hidden = hide ? 'true' : 'false';
+    const txt = mod.querySelector('.module-vis-txt');
+    if (txt) txt.textContent = hide ? 'Hidden' : 'Shown';
+    save();
+    applyPairing();
+  }});
+
+  if (resetBtn) resetBtn.addEventListener('click', () => {{
+    try {{ localStorage.removeItem(KEY); }} catch (e) {{}}
+    defaultOrder.forEach(id => {{ const el = modById(id); if (el) stack.appendChild(el); }});
+    applyHidden([]);
+    applyPairing();
+  }});
+}})();
+
 // ---- Live news refresh via Cloudflare Worker --------------------------
 // The static news box is rendered server-side at build time as a fallback.
 // If NEWS_WORKER_URL is set, fetch fresh items on page load and swap them in.
@@ -3848,7 +4645,13 @@ def main() -> None:
     ticker_list = sorted(txn_tickers | watch_tickers)
     print(f"Pulling {len(ticker_list)} tickers from yfinance (native currencies)"
           f" — {len(txn_tickers)} held + {len(watch_tickers - txn_tickers)} watch-only...")
-    prices_native = download_prices(ticker_list)
+    # One yfinance batch returns full OHLCV; we cache it for ATR/Volume metrics
+    # and derive the close-only frame the rest of the pipeline already consumes.
+    ohlcv_native = download_ohlcv(ticker_list)
+    if ohlcv_native.empty:
+        prices_native = pd.DataFrame()
+    else:
+        prices_native = ohlcv_native.xs("Close", axis=1, level=1).copy()
     print(f"Got native prices: {prices_native.shape[0]} rows x {prices_native.shape[1]} tickers")
 
     print(f"Pulling benchmark {BENCHMARK}...")
@@ -3857,6 +4660,12 @@ def main() -> None:
     CACHE_PARQUET.parent.mkdir(parents=True, exist_ok=True)
     try:
         prices_native.to_parquet(CACHE_PARQUET)
+        if not ohlcv_native.empty:
+            try:
+                ohlcv_native.to_parquet(OHLCV_CACHE)
+                print(f"Cached OHLCV to {OHLCV_CACHE}")
+            except Exception as e:
+                print(f"WARN couldn't cache OHLCV: {e}", file=sys.stderr)
         if not bench_native.empty:
             bench_native.to_frame().to_parquet(BENCHMARK_CACHE)
         print(f"Cached native prices to {CACHE_PARQUET}")
@@ -3914,6 +4723,14 @@ def main() -> None:
     sig_counts = signals.signal.value_counts()
     print(f"Signals: {dict(sig_counts.head(5))}")
 
+    # Quant signals (modal sub-row): 200d distance / ATR / RSI / 52w pos / Volume.
+    # Derived from native OHLCV so ATR uses real H/L; ATR is then converted to
+    # GBP using the same FX series the rest of the dashboard already uses.
+    quant_metrics = compute_quant_metrics(ohlcv_native, fx, meta) \
+        if not ohlcv_native.empty else pd.DataFrame()
+    if not quant_metrics.empty:
+        print(f"Quant metrics: {len(quant_metrics)} tickers (SMA200 / ATR / RSI / 52w / Volume)")
+
     # Analyst data: fetched for every tracked ticker (open + closed) so the
     # main table can surface target/upside/rec for all rows. The 7-day TTL
     # means typical builds refresh nothing — only ~one batch fetch per week.
@@ -3943,7 +4760,8 @@ def main() -> None:
                        signals, prices_native, returns_native, untracked=untracked,
                        watchlist=watchlist, news_items=news_items, analyst=analyst,
                        analyst_candidates=analyst_candidates, fx=fx,
-                       universe_outlook=universe_outlook)
+                       universe_outlook=universe_outlook,
+                       quant_metrics=quant_metrics)
     OUT_HTML.parent.mkdir(parents=True, exist_ok=True)
     OUT_HTML.write_text(html, encoding="utf-8")
     print(f"Wrote {OUT_HTML} ({OUT_HTML.stat().st_size/1024:.1f} KB)")
