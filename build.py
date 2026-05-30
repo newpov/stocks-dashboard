@@ -20,6 +20,7 @@ Override industry labels by editing data/meta.csv after first run.
 """
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -35,6 +36,8 @@ TRANSACTIONS_CSV = ROOT / "transactions.csv"
 LOG_XLSX = ROOT / "log.xlsx"           # Trading 212-style real transaction log
 TICKERS_CSV = ROOT / "tickers.csv"  # legacy fallback
 OUT_HTML = ROOT / "docs" / "index.html"
+DEMO_OUT_HTML = ROOT / "demo.html"   # standalone self-contained demo at repo root
+SORTABLE_VENDOR = ROOT / "docs" / "vendor" / "Sortable.min.js"
 CACHE_PARQUET = ROOT / "data" / "prices_cache.parquet"
 OHLCV_CACHE = ROOT / "data" / "ohlcv_cache.parquet"  # full OHLCV for ATR / volume metrics
 BENCHMARK_CACHE = ROOT / "data" / "benchmark_cache.parquet"
@@ -42,6 +45,9 @@ META_CSV = ROOT / "data" / "meta.csv"
 WATCHLIST_CSV = ROOT / "watchlist.csv"
 ANALYST_CACHE = ROOT / "data" / "analyst_cache.parquet"
 ANALYST_TTL_DAYS = 7    # refetch a ticker's analyst data when older than this
+TICKER_NEWS_CACHE = ROOT / "data" / "ticker_news_cache.parquet"
+TICKER_NEWS_TTL_DAYS = 7   # same 7-day cadence as analyst data
+TICKER_NEWS_TOP_N = 5      # items stored per ticker
 
 # Universe — large-cap reference list for the industry outlook section.
 # Refreshed monthly (file-mtime TTL); daily builds reuse cached results.
@@ -698,6 +704,130 @@ def fetch_analyst_data(tickers: list[str], cache: pd.DataFrame,
         print(f"  cached analyst data to {ANALYST_CACHE}", flush=True)
     except Exception as e:
         print(f"WARN couldn't cache analyst data: {e}", file=sys.stderr)
+    return combined
+
+
+# --------------------------------------------------------------------------
+# Per-ticker news cache (modal "Recent news" section)
+# --------------------------------------------------------------------------
+# yfinance exposes per-ticker news via `Ticker(t).news`. Same 7-day TTL as
+# the analyst cache so most builds reuse the parquet and only ~1 build/week
+# does a fresh fetch across all tracked tickers.
+
+
+def load_ticker_news_cache() -> pd.DataFrame:
+    cols = ["items_json", "fetched_at"]
+    if not TICKER_NEWS_CACHE.exists():
+        return pd.DataFrame(columns=cols).rename_axis("ticker")
+    df = pd.read_parquet(TICKER_NEWS_CACHE)
+    if "fetched_at" in df.columns:
+        df["fetched_at"] = pd.to_datetime(df["fetched_at"], utc=True)
+    return df
+
+
+def _parse_yf_news_item(raw) -> dict | None:
+    """Normalize a single yfinance news item into ``{title, link, publisher,
+    published}``. yfinance changed its news shape between releases:
+
+    - **Old (flat):** ``{title, publisher, link, providerPublishTime}``
+    - **New (nested under "content"):** ``{content: {title, provider:
+      {displayName}, canonicalUrl: {url}, pubDate}}``
+
+    Returns ``None`` if the item lacks a title or link.
+    """
+    if not isinstance(raw, dict):
+        return None
+    content = raw.get("content")
+    if isinstance(content, dict):
+        title = content.get("title")
+        publisher = ((content.get("provider") or {}).get("displayName") or "").strip()
+        link = None
+        canonical = content.get("canonicalUrl")
+        if isinstance(canonical, dict):
+            link = canonical.get("url")
+        if not link:
+            click = content.get("clickThroughUrl")
+            if isinstance(click, dict):
+                link = click.get("url")
+        published_raw = content.get("pubDate") or content.get("displayTime")
+    else:
+        title = raw.get("title")
+        publisher = (raw.get("publisher") or "").strip()
+        link = raw.get("link")
+        ts = raw.get("providerPublishTime")
+        if isinstance(ts, (int, float)):
+            try:
+                published_raw = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+            except (ValueError, OSError, OverflowError):
+                published_raw = None
+        else:
+            published_raw = ts
+    if not title or not link:
+        return None
+    return {
+        "title":     str(title).strip(),
+        "link":      str(link),
+        "publisher": publisher,
+        "published": str(published_raw) if published_raw else "",
+    }
+
+
+def fetch_ticker_news(tickers: list[str], cache: pd.DataFrame,
+                      ttl_days: int = TICKER_NEWS_TTL_DAYS,
+                      top_n: int = TICKER_NEWS_TOP_N) -> pd.DataFrame:
+    """Per-ticker yfinance news with the same parquet-cache + per-row
+    ``fetched_at`` TTL pattern as the analyst cache. Returns updated cache."""
+    now = pd.Timestamp.now(tz="UTC")
+    stale_cutoff = now - pd.Timedelta(days=ttl_days)
+    to_fetch: list[str] = []
+    for t in tickers:
+        if t not in cache.index:
+            to_fetch.append(t)
+        elif pd.isna(cache.loc[t, "fetched_at"]) or cache.loc[t, "fetched_at"] < stale_cutoff:
+            to_fetch.append(t)
+    if not to_fetch:
+        return cache
+    print(f"Fetching ticker news for {len(to_fetch)} ticker(s) "
+          f"(parallel x4, TTL {ttl_days}d, top {top_n}/ticker)...", flush=True)
+
+    def one(t: str):
+        try:
+            raw_items = yf.Ticker(t).news or []
+            parsed: list[dict] = []
+            # Parse a few extra in case some items lack title/link; stop at top_n.
+            for it in raw_items[: top_n * 2]:
+                p = _parse_yf_news_item(it)
+                if p:
+                    parsed.append(p)
+                if len(parsed) >= top_n:
+                    break
+            return t, {
+                "items_json": json.dumps(parsed, separators=(",", ":"), ensure_ascii=False),
+                "fetched_at": now,
+            }
+        except Exception as e:
+            print(f"  news fail {t}: {e}", file=sys.stderr)
+            return t, {"items_json": "[]", "fetched_at": now}
+
+    rows = []
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        futures = {ex.submit(one, t): t for t in to_fetch}
+        for i, fut in enumerate(as_completed(futures), 1):
+            t, data = fut.result()
+            rows.append({"ticker": t, **data})
+            if i % 30 == 0 or i == len(to_fetch):
+                print(f"  news: {i}/{len(to_fetch)}", flush=True)
+
+    new_df = pd.DataFrame(rows).set_index("ticker")
+    combined = (pd.concat([cache.drop(index=[t for t in to_fetch if t in cache.index]), new_df])
+                if not cache.empty else new_df)
+    combined = combined[~combined.index.duplicated(keep="last")].sort_index()
+    TICKER_NEWS_CACHE.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        combined.to_parquet(TICKER_NEWS_CACHE)
+        print(f"  cached ticker news to {TICKER_NEWS_CACHE}", flush=True)
+    except Exception as e:
+        print(f"WARN couldn't cache ticker news: {e}", file=sys.stderr)
     return combined
 
 
@@ -2490,7 +2620,8 @@ def build_data_payload(returns: pd.DataFrame, prices: pd.DataFrame,
                        signals: pd.DataFrame,
                        prices_native: pd.DataFrame,
                        returns_native: pd.DataFrame,
-                       quant_metrics: pd.DataFrame | None = None) -> dict:
+                       quant_metrics: pd.DataFrame | None = None,
+                       ticker_news: pd.DataFrame | None = None) -> dict:
     daily = prices.ffill()
     contrib_lookup = contrib["contribution_pp"].to_dict() if not contrib.empty else {}
     payload = {}
@@ -2577,6 +2708,16 @@ def build_data_payload(returns: pd.DataFrame, prices: pd.DataFrame,
                 "range52w_pct": _safe(q.range52w_pct),
                 "vol_ratio": _safe(q.vol_ratio),
             }
+        # Per-ticker recent news (top 5). Stored JSON-encoded in the cache;
+        # decode once here, surface as a clean list in the payload.
+        if ticker_news is not None and tkr in ticker_news.index:
+            raw_json = ticker_news.loc[tkr, "items_json"]
+            try:
+                items = json.loads(raw_json) if isinstance(raw_json, str) and raw_json else []
+            except (TypeError, ValueError):
+                items = []
+            if items:
+                payload[tkr]["news"] = items
     return payload
 
 
@@ -2621,7 +2762,10 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
                 analyst_candidates: list[str] | None = None,
                 fx: pd.DataFrame | None = None,
                 universe_outlook: pd.DataFrame | None = None,
-                quant_metrics: pd.DataFrame | None = None) -> str:
+                quant_metrics: pd.DataFrame | None = None,
+                ticker_news: pd.DataFrame | None = None,
+                demo_mode: bool = False,
+                sortable_inline_js: str | None = None) -> str:
     weekly = prices.resample("W-FRI").last().ffill()
     defs_html = render_svg_defs()
     table_html = render_table(returns, weekly, meta, signals,
@@ -2742,7 +2886,8 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
 
     data_dict = build_data_payload(returns, prices, meta, contrib, signals,
                                    prices_native, returns_native,
-                                   quant_metrics=quant_metrics)
+                                   quant_metrics=quant_metrics,
+                                   ticker_news=ticker_news)
     for tkr, entry in watchlist_payload.items():
         if tkr not in data_dict:
             data_dict[tkr] = entry
@@ -2789,6 +2934,25 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     default_order_csv = ",".join(mid for (mid, _, _) in _modules)
     module_stack_html = "\n".join(_wrap_module(mid, label, html) for (mid, label, html) in _modules)
 
+    # Top-of-page banner shown only on the public/demo build (when log.xlsx
+    # isn't present). Makes "this is sample data" unmissable for visitors.
+    demo_banner_html = (
+        '<div class="demo-banner">'
+        '<span class="demo-banner-tag">DEMO MODE</span>'
+        '<span class="demo-banner-text">This is a sample portfolio for illustration &mdash; not real holdings. '
+        '<a href="https://github.com/newpov/stocks-dashboard" target="_blank" rel="noopener noreferrer">'
+        'Fork the repo</a> to run it with your own broker export.</span>'
+        '</div>'
+    ) if demo_mode else ''
+
+    # SortableJS: either reference the vendored file (normal docs/index.html
+    # build, served alongside docs/vendor/) or inline the whole library
+    # (standalone demo.html — file:// users have no vendor/ adjacent).
+    if sortable_inline_js:
+        sortable_script_tag = f'<script>{sortable_inline_js}</script>'
+    else:
+        sortable_script_tag = '<script src="vendor/Sortable.min.js"></script>'
+
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -2827,6 +2991,29 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     --up:#00ff66; --down:#ff3030; --accent:#ffb800;
   }}
   /* Palette toggle pill cluster (top-right of header) */
+  /* Demo-mode banner: rendered above everything on public builds (log.xlsx
+     absent → CI auto-falls-through to transactions.csv). Stays sticky to the
+     top of the viewport so it's visible even while scrolling deep modules. */
+  .demo-banner{{
+    position:sticky;top:0;z-index:60;
+    background:linear-gradient(180deg, #f59e0b 0%, #d97706 100%);
+    color:#1a1a24;padding:9px 18px;
+    font-family:var(--font-mono);font-size:11.5px;line-height:1.4;
+    text-align:center;letter-spacing:0.02em;
+    border-bottom:1px solid rgba(0,0,0,0.25);
+    box-shadow:0 2px 8px rgba(0,0,0,0.25);
+  }}
+  .demo-banner-tag{{font-weight:700;letter-spacing:0.12em;margin-right:10px;
+    padding:1.5px 7px;background:rgba(26,26,36,0.18);border-radius:3px;
+    font-size:10.5px;text-transform:uppercase}}
+  .demo-banner-text{{font-weight:500}}
+  .demo-banner a{{color:inherit;text-decoration:underline;font-weight:600}}
+  .demo-banner a:hover{{text-decoration:none}}
+  @media (max-width:700px){{
+    .demo-banner{{padding:8px 12px;font-size:10.5px}}
+    .demo-banner-tag{{display:block;margin:0 0 4px 0}}
+  }}
+
   /* Top-right control cluster: layout editor + palette toggle */
   .topbar{{
     position:absolute;top:18px;right:28px;z-index:30;
@@ -3568,6 +3755,30 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
   .modal-quant-head::after{{content:"";flex:1;height:1px;background:var(--border);opacity:0.6}}
   .modal-quant-stats{{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-bottom:22px;
     padding:14px;background:var(--ink-soft);border:1px solid var(--border);border-radius:10px}}
+  /* Per-ticker "Recent news" — fed from the 7-day TTL cache in build.py */
+  .modal-news{{margin-bottom:22px}}
+  .modal-news[hidden]{{display:none}}
+  .modal-news-head{{font-family:var(--font-mono);font-size:9.5px;color:var(--text-dim);
+    text-transform:uppercase;letter-spacing:0.16em;font-weight:600;
+    margin:6px 0 8px;padding-left:2px;display:flex;align-items:center;gap:10px}}
+  .modal-news-head::after{{content:"";flex:1;height:1px;background:var(--border);opacity:0.6}}
+  .modal-news-staleness{{order:3;flex:none;color:var(--text-dim);
+    font-size:9px;letter-spacing:0.06em;text-transform:none}}
+  .modal-news-list{{display:flex;flex-direction:column;gap:1px;
+    background:var(--ink-soft);border:1px solid var(--border);border-radius:10px;overflow:hidden}}
+  .modal-news-row{{display:flex;flex-direction:column;gap:3px;padding:10px 14px;
+    text-decoration:none;color:inherit;border-top:1px solid var(--border);transition:background 0.12s}}
+  .modal-news-row:first-child{{border-top:none}}
+  .modal-news-row:hover{{background:var(--surface-2)}}
+  .modal-news-title{{font-family:var(--font-ui);font-size:13px;line-height:1.35;color:var(--text);
+    font-weight:500}}
+  .modal-news-meta{{font-family:var(--font-mono);font-size:10px;color:var(--text-dim);
+    display:flex;align-items:center;gap:8px;letter-spacing:0.02em}}
+  .modal-news-pub{{color:var(--text-2)}}
+  .modal-news-dot{{color:var(--text-dim);opacity:0.6}}
+  .modal-news-when{{color:var(--text-dim)}}
+  .modal-news-empty{{padding:14px;font-family:var(--font-ui);font-size:12px;
+    color:var(--text-dim);font-style:italic;text-align:center}}
   .modal-chart-wrap{{position:relative;width:100%;height:340px;background:var(--ink-soft);border:1px solid var(--border);border-radius:10px;padding:16px}}
   .modal-chart{{width:100%;height:100%;display:block}}
   .modal-tip{{position:absolute;background:var(--ink);border:1px solid var(--accent);border-radius:6px;
@@ -3627,6 +3838,7 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
 </style>
 </head>
 <body>
+{demo_banner_html}
 {defs_html}
 <div class="container">
 
@@ -3762,6 +3974,10 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
         <div class="modal-stat-val" data-qkey="vol_ratio"></div>
         <div class="modal-stat-meta" data-qmeta="vol_ratio"></div></div>
     </div>
+    <div class="modal-news" id="modal-news" hidden>
+      <div class="modal-news-head">Recent news <span class="modal-news-staleness"></span></div>
+      <div class="modal-news-list"></div>
+    </div>
     <div class="modal-chart-wrap">
       <svg class="modal-chart" preserveAspectRatio="none"></svg>
       <div class="modal-tip" hidden></div>
@@ -3769,7 +3985,7 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
   </div>
 </div>
 
-<script src="vendor/Sortable.min.js"></script>
+{sortable_script_tag}
 <script>
 const DATA = {data_json};
 const PORTFOLIO = {portfolio_json};
@@ -3855,27 +4071,90 @@ function renderHeroChart() {{
   const spyEnd = spy.vals.length ? spy.vals[spy.vals.length - 1] : 0;
   const basketColor = '#f59e0b';
   const spyColor = '#6b7185';
+  const greenFill = 'rgba(52,211,153,0.22)';   // outperforming SPY
+  const redFill = 'rgba(248,113,113,0.22)';    // underperforming SPY
+  const lossWashFill = 'rgba(248,113,113,0.09)'; // subtle below-zero wash
 
-  // Area fill for basket
-  const areaD = `M ${{basket.xs[0].toFixed(1)}},${{(padT + innerH).toFixed(1)}} ` +
-                basket.xs.map((x, i) => `L ${{x.toFixed(1)}},${{basket.ys[i].toFixed(1)}}`).join(' ') +
-                ` L ${{basket.xs[n-1].toFixed(1)}},${{(padT + innerH).toFixed(1)}} Z`;
+  // Vs-SPY area segments: between basket and SPY lines, painted green when
+  // basket is above SPY and red when below. Crossovers are split exactly via
+  // linear interpolation on the difference so the segment edges land on the
+  // true crossing point, not the nearest weekly tick.
+  // Align SPY's x grid to basket's so dates line up exactly. buildPoints
+  // spreads each series across innerW based on its OWN length, so a 84-point
+  // SPY ended ~1% offset from an 85-point basket even though their dates
+  // matched 1:1. Re-mapping SPY's xs to basket's positions at matching dates
+  // fixes that — both the rendered SPY polyline and the vs-SPY area edge now
+  // sit on a single consistent x grid.
+  if (spy.dates && spy.dates.length && spy.dates.length <= basket.dates.length) {{
+    const remapped = spy.dates.map(d => {{
+      const idx = basket.dates.indexOf(d);
+      return idx >= 0 ? basket.xs[idx] : NaN;
+    }});
+    if (remapped.every(v => !Number.isNaN(v))) spy.xs = remapped;
+  }}
+
+  // Vs-SPY area segments: between basket and SPY lines, painted green when
+  // basket > SPY and red when below. Iterate over the overlapping date range
+  // (SPY can start a week later than basket since the benchmark series begins
+  // from first-trading-day-after-first-purchase).
+  const vsSpySegments = [];
+  const startInBasket = spy.dates && spy.dates.length ? basket.dates.indexOf(spy.dates[0]) : -1;
+  if (startInBasket >= 0) {{
+    const m = Math.min(basket.vals.length - startInBasket, spy.vals.length);
+    for (let k = 0; k < m - 1; k++) {{
+      const bi = startInBasket + k, bi2 = startInBasket + k + 1;
+      const x1 = basket.xs[bi], x2 = basket.xs[bi2];
+      const by1 = basket.ys[bi], by2 = basket.ys[bi2];
+      const sy1 = spy.ys[k], sy2 = spy.ys[k + 1];
+      const d1 = basket.vals[bi] - spy.vals[k];
+      const d2 = basket.vals[bi2] - spy.vals[k + 1];
+      if (d1 === 0 && d2 === 0) continue;
+      if ((d1 >= 0) === (d2 >= 0)) {{
+        const color = (d1 + d2) >= 0 ? greenFill : redFill;
+        vsSpySegments.push({{
+          pts: [[x1, by1], [x2, by2], [x2, sy2], [x1, sy1]],
+          color,
+        }});
+      }} else {{
+        const t = d1 / (d1 - d2);
+        const crossX = x1 + t * (x2 - x1);
+        const crossY = by1 + t * (by2 - by1);
+        vsSpySegments.push({{
+          pts: [[x1, by1], [crossX, crossY], [x1, sy1]],
+          color: d1 >= 0 ? greenFill : redFill,
+        }});
+        vsSpySegments.push({{
+          pts: [[crossX, crossY], [x2, by2], [x2, sy2]],
+          color: d2 >= 0 ? greenFill : redFill,
+        }});
+      }}
+    }}
+  }}
 
   let html = '';
-  // Y grid
+  // Y grid (with axis labels)
   html += yTicks.map(t =>
     `<line x1="${{padL}}" y1="${{t.y.toFixed(1)}}" x2="${{padL + innerW}}" y2="${{t.y.toFixed(1)}}" stroke="rgba(255,255,255,0.04)" stroke-width="1"/>` +
     `<text x="${{padL - 8}}" y="${{(t.y + 3.5).toFixed(1)}}" fill="#6b7185" font-size="10" font-family="Geist Mono, monospace" text-anchor="end">${{t.v >= 0 ? '+' : ''}}${{t.v.toFixed(0)}}%</text>`
   ).join('');
-  // Zero line
-  html += `<line x1="${{padL}}" y1="${{zeroY.toFixed(1)}}" x2="${{padL + innerW}}" y2="${{zeroY.toFixed(1)}}" stroke="rgba(255,255,255,0.18)" stroke-width="0.8" stroke-dasharray="3 3"/>`;
+  // Loss-zone wash: subtle red rectangle from the zero line down to the chart
+  // floor so "below baseline" reads at a glance, even before reading any number.
+  const chartBottom = padT + innerH;
+  if (zeroY < chartBottom) {{
+    html += `<rect x="${{padL}}" y="${{zeroY.toFixed(1)}}" width="${{innerW.toFixed(1)}}" height="${{(chartBottom - zeroY).toFixed(1)}}" fill="${{lossWashFill}}"/>`;
+  }}
+  // Vs-SPY area segments (paint *before* the zero line + lines so they stay crisp).
+  html += vsSpySegments.map(seg =>
+    `<polygon points="${{seg.pts.map(p => p[0].toFixed(1) + ',' + p[1].toFixed(1)).join(' ')}}" fill="${{seg.color}}"/>`
+  ).join('');
+  // Zero line — bumped from 0.18 to 0.34 alpha + 1.2 stroke so it's clearly
+  // the "Oct '24 baseline" reference, not just another gridline.
+  html += `<line x1="${{padL}}" y1="${{zeroY.toFixed(1)}}" x2="${{padL + innerW}}" y2="${{zeroY.toFixed(1)}}" stroke="rgba(255,255,255,0.34)" stroke-width="1.2" stroke-dasharray="4 3"/>`;
   // X labels — positioned below the FX band (or below the line chart when no FX)
   const xLabelY = padT + innerH + FX_GAP + FX_H + 16;
   html += xTicks.map(t =>
     `<text x="${{t.x.toFixed(1)}}" y="${{xLabelY.toFixed(1)}}" fill="#6b7185" font-size="10" font-family="Geist Mono, monospace" text-anchor="middle">${{fmtDate(t.date)}}</text>`
   ).join('');
-  // Basket area
-  html += `<path d="${{areaD}}" fill="url(#grad-amber-lg)"/>`;
   // SPY line (dashed)
   if (spy.xs.length) {{
     html += `<polyline points="${{spyPL}}" fill="none" stroke="${{spyColor}}" stroke-width="1.4" stroke-dasharray="4 3" stroke-linejoin="round"/>`;
@@ -3883,10 +4162,18 @@ function renderHeroChart() {{
   // Basket line
   html += `<polyline points="${{basketPL}}" fill="none" stroke="${{basketColor}}" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"/>`;
 
-  // End labels
+  // End labels (basket + SPY) + vs-SPY delta badge
   html += `<text x="${{(padL + innerW + 6).toFixed(1)}}" y="${{(basket.ys[n-1] + 4).toFixed(1)}}" fill="${{basketColor}}" font-size="11" font-family="Geist Mono, monospace" font-weight="500">${{basketEnd >= 0 ? '+' : ''}}${{basketEnd.toFixed(1)}}%</text>`;
   if (spy.ys.length) {{
     html += `<text x="${{(padL + innerW + 6).toFixed(1)}}" y="${{(spy.ys[spy.ys.length-1] + 4).toFixed(1)}}" fill="${{spyColor}}" font-size="11" font-family="Geist Mono, monospace">${{spyEnd >= 0 ? '+' : ''}}${{spyEnd.toFixed(1)}}%</text>`;
+    // Vs-SPY delta in percentage points, positioned BELOW both end labels
+    // (use the max y = the lower of the two lines, plus 14px offset).
+    const vsDelta = basketEnd - spyEnd;
+    const vsColor = vsDelta >= 0 ? '#34d399' : '#f87171';
+    const vsY = Math.max(basket.ys[n-1], spy.ys[spy.ys.length-1]) + 16;
+    // Δ is the "delta" — implies "basket minus SPY" without spelling it out.
+    // Keeps the badge within the chart's right padding (~50px).
+    html += `<text x="${{(padL + innerW + 6).toFixed(1)}}" y="${{vsY.toFixed(1)}}" fill="${{vsColor}}" font-size="10.5" font-family="Geist Mono, monospace" font-weight="600">&#916; ${{vsDelta >= 0 ? '+' : ''}}${{vsDelta.toFixed(1)}}pp</text>`;
   }}
 
   // FX bar band — weekly GBP/USD rate, centered on the baseline (first value).
@@ -4209,6 +4496,35 @@ function openModal(ticker) {{
     const k = el.dataset.qmeta;
     el.textContent = (qMap[k] && qMap[k].meta) || '';
   }});
+  // ---- Per-ticker recent news ----------------------------------------
+  // Shown only when the build-time cache had items for this ticker. Empty
+  // section is hidden entirely so the modal doesn't carry a dead row.
+  const newsBox = document.getElementById('modal-news');
+  const newsList = newsBox.querySelector('.modal-news-list');
+  const newsStale = newsBox.querySelector('.modal-news-staleness');
+  const items = Array.isArray(d.news) ? d.news : [];
+  if (items.length) {{
+    newsList.innerHTML = items.map(it => {{
+      const safeTitle = escapeNewsHtml(it.title || '');
+      const safeLink = escapeNewsHtml(it.link || '#');
+      const safePub = escapeNewsHtml(it.publisher || '');
+      const when = it.published ? relativeNewsTime(new Date(it.published)) : '';
+      const safeWhen = escapeNewsHtml(when);
+      return `<a class="modal-news-row" href="${{safeLink}}" target="_blank" rel="noopener noreferrer">`
+        + `<div class="modal-news-title">${{safeTitle}}</div>`
+        + `<div class="modal-news-meta">`
+        + (safePub ? `<span class="modal-news-pub">${{safePub}}</span>` : '')
+        + (safePub && safeWhen ? `<span class="modal-news-dot">&middot;</span>` : '')
+        + (safeWhen ? `<span class="modal-news-when">${{safeWhen}}</span>` : '')
+        + `</div></a>`;
+    }}).join('');
+    newsStale.textContent = 'cached weekly';
+    newsBox.removeAttribute('hidden');
+  }} else {{
+    newsList.innerHTML = '';
+    newsStale.textContent = '';
+    newsBox.setAttribute('hidden', '');
+  }}
   modal.removeAttribute('hidden');
   document.body.classList.add('modal-open');
   requestAnimationFrame(() => renderBigChart(ticker));
@@ -4618,9 +4934,14 @@ refreshNewsFromWorker();
 """
 
 
-def main() -> None:
-    # Prefer the real broker log if present; fall back to the demo CSV otherwise.
-    if LOG_XLSX.exists():
+def main(demo: bool = False) -> None:
+    # --demo forces the public-facing sample build: never reads log.xlsx (even
+    # if present), writes to repo-root demo.html, and inlines SortableJS so
+    # the resulting file is fully self-contained (works opened from disk via
+    # file://, no relative-path dependencies). Without the flag, the build
+    # behaves as before: log.xlsx → docs/index.html with real data; absent →
+    # transactions.csv fallback also into docs/index.html.
+    if not demo and LOG_XLSX.exists():
         print(f"Loading transactions from {LOG_XLSX}")
         transactions, untracked = load_transactions_from_log()
         if not untracked.empty:
@@ -4742,6 +5063,12 @@ def main() -> None:
     analyst_cache = load_analyst_cache()
     analyst = fetch_analyst_data(all_fetch_tickers, analyst_cache) if all_fetch_tickers else analyst_cache
 
+    # Per-ticker news: same 7-day TTL pattern as analyst cache. Most builds
+    # reuse the parquet; a fresh fetch happens roughly once per week per ticker.
+    ticker_news_cache = load_ticker_news_cache()
+    ticker_news = (fetch_ticker_news(all_fetch_tickers, ticker_news_cache)
+                   if all_fetch_tickers else ticker_news_cache)
+
     # Industry outlook universe — loaded from universe.csv, cached with 30-day
     # TTL so daily builds reuse and only ~once a month does this run a fresh
     # yfinance batch for ~100 large-caps.
@@ -4756,16 +5083,37 @@ def main() -> None:
 
     news_items = fetch_news()
 
+    # In demo mode we inline SortableJS so the standalone demo.html works when
+    # opened directly from disk (no vendor/ adjacent). Real builds keep the
+    # external <script src="vendor/Sortable.min.js"> reference.
+    sortable_inline_js: str | None = None
+    if demo and SORTABLE_VENDOR.exists():
+        sortable_inline_js = SORTABLE_VENDOR.read_text(encoding="utf-8")
+
     html = render_html(returns, prices, meta, basket, bench_series, contrib, transactions,
                        signals, prices_native, returns_native, untracked=untracked,
                        watchlist=watchlist, news_items=news_items, analyst=analyst,
                        analyst_candidates=analyst_candidates, fx=fx,
                        universe_outlook=universe_outlook,
-                       quant_metrics=quant_metrics)
-    OUT_HTML.parent.mkdir(parents=True, exist_ok=True)
-    OUT_HTML.write_text(html, encoding="utf-8")
-    print(f"Wrote {OUT_HTML} ({OUT_HTML.stat().st_size/1024:.1f} KB)")
+                       quant_metrics=quant_metrics,
+                       ticker_news=ticker_news,
+                       demo_mode=demo or not LOG_XLSX.exists(),
+                       sortable_inline_js=sortable_inline_js)
+
+    out_path = DEMO_OUT_HTML if demo else OUT_HTML
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(html, encoding="utf-8")
+    print(f"Wrote {out_path} ({out_path.stat().st_size/1024:.1f} KB)")
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(
+        description="Build the stocks dashboard. Default writes docs/index.html "
+                    "using log.xlsx if present; --demo writes a self-contained "
+                    "demo.html using transactions.csv only."
+    )
+    parser.add_argument("--demo", action="store_true",
+                        help="Force the standalone demo build (repo-root "
+                             "demo.html, transactions.csv, inlined SortableJS).")
+    args = parser.parse_args()
+    main(demo=args.demo)
