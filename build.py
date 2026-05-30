@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -297,7 +298,7 @@ def _txn_price(txn_date: pd.Timestamp, ticker_prices: pd.Series) -> float:
 _OHLCV_FIELDS = ["Open", "High", "Low", "Close", "Volume"]
 
 
-def download_ohlcv(tickers: list[str]) -> pd.DataFrame:
+def download_ohlcv(tickers: list[str]) -> tuple[pd.DataFrame, set[str], int]:
     """Single yfinance batch returning full OHLCV in NATIVE currency.
 
     Output: wide DataFrame with MultiIndex columns ``(ticker, field)`` where
@@ -305,6 +306,10 @@ def download_ohlcv(tickers: list[str]) -> pd.DataFrame:
     close-only consumers (via :func:`download_prices`) and as the input for the
     quant-metric layer (ATR + volume ratio) that needs the High/Low/Volume
     columns yfinance returns alongside Close.
+
+    Returns a 3-tuple: (frame, failed_after_retry, retries_recovered) so the
+    build-health footer can surface which tickers ended up missing and how
+    many were rescued by the per-ticker retry path.
     """
     end = (datetime.now(timezone.utc) + timedelta(days=1)).strftime("%Y-%m-%d")
     data = yf.download(
@@ -312,18 +317,19 @@ def download_ohlcv(tickers: list[str]) -> pd.DataFrame:
         auto_adjust=True, progress=False, group_by="ticker", threads=True,
     )
     frames: dict[str, pd.DataFrame] = {}
-    failed: list[str] = []
+    failed_initial: list[str] = []
     for t in tickers:
         try:
             sub = data[t][_OHLCV_FIELDS].copy()
             if sub["Close"].notna().any():
                 frames[t] = sub
             else:
-                failed.append(t)
+                failed_initial.append(t)
         except (KeyError, ValueError):
-            failed.append(t)
+            failed_initial.append(t)
 
-    for t in failed:
+    retries_recovered = 0
+    for t in failed_initial:
         try:
             df1 = yf.Ticker(t).history(start=START_DATE, end=end, auto_adjust=True)
             df1 = df1[_OHLCV_FIELDS]
@@ -331,23 +337,25 @@ def download_ohlcv(tickers: list[str]) -> pd.DataFrame:
                 if df1.index.tz is not None:
                     df1.index = df1.index.tz_localize(None)
                 frames[t] = df1
+                retries_recovered += 1
                 print(f"RETRY OK: {t}", file=sys.stderr)
         except Exception as e:
             print(f"WARN retry failed for {t}: {e}", file=sys.stderr)
 
+    still_failed = {t for t in failed_initial if t not in frames}
     if not frames:
-        return pd.DataFrame()
+        return pd.DataFrame(), still_failed, retries_recovered
     out = pd.concat(frames, axis=1)  # MultiIndex columns: (ticker, field)
     if out.index.tz is not None:
         out.index = out.index.tz_localize(None)
-    return out.sort_index()
+    return out.sort_index(), still_failed, retries_recovered
 
 
 def download_prices(tickers: list[str]) -> pd.DataFrame:
     """Close-only wide DataFrame (date × ticker). Thin wrapper over
     :func:`download_ohlcv` so the legacy contract used by every downstream
     consumer stays unchanged."""
-    ohlcv = download_ohlcv(tickers)
+    ohlcv, _failed, _retries = download_ohlcv(tickers)
     if ohlcv.empty:
         return pd.DataFrame()
     return ohlcv.xs("Close", axis=1, level=1).copy()
@@ -478,7 +486,7 @@ def fetch_universe_outlook(universe: list[str], meta_cache: pd.DataFrame,
     missing_meta = [t for t in df.index if t not in meta_cache.index]
     if missing_meta:
         print(f"Universe outlook: fetching industry meta for {len(missing_meta)} new tickers")
-        meta_cache = fetch_meta(missing_meta, meta_cache)
+        meta_cache, _ = fetch_meta(missing_meta, meta_cache)
     df["industry"] = [
         str(meta_cache.loc[t, "industry"] or meta_cache.loc[t, "sector"] or "")
         if t in meta_cache.index else ""
@@ -490,10 +498,10 @@ def fetch_universe_outlook(universe: list[str], meta_cache: pd.DataFrame,
     # results are stored in the universe parquet (not the portfolio analyst
     # cache) to keep the two pools cleanly separated.
     print(f"Universe outlook: fetching analyst data for {len(df)} tickers...")
-    a = fetch_analyst_data(df.index.tolist(),
-                           pd.DataFrame(columns=["target_mean","target_high","target_low",
-                                                 "num_analysts","recommendation","rec_mean",
-                                                 "current_price","fetched_at"]).rename_axis("ticker"))
+    a, _ = fetch_analyst_data(df.index.tolist(),
+                              pd.DataFrame(columns=["target_mean","target_high","target_low",
+                                                    "num_analysts","recommendation","rec_mean",
+                                                    "current_price","fetched_at"]).rename_axis("ticker"))
     df["target_mean"]   = a.reindex(df.index)["target_mean"]
     df["current_price"] = a.reindex(df.index)["current_price"]
     df["recommendation"]= a.reindex(df.index)["recommendation"].fillna("")
@@ -585,7 +593,7 @@ def load_meta_cache() -> pd.DataFrame:
     return pd.DataFrame(columns=["sector", "industry", "name", "currency"]).rename_axis("ticker")
 
 
-def fetch_meta(tickers: list[str], cache: pd.DataFrame) -> pd.DataFrame:
+def fetch_meta(tickers: list[str], cache: pd.DataFrame) -> tuple[pd.DataFrame, set[str]]:
     # A ticker needs re-fetching if it's not in cache OR if currency is missing
     # (the latter handles upgrading old caches that pre-date the currency column)
     missing = []
@@ -595,7 +603,7 @@ def fetch_meta(tickers: list[str], cache: pd.DataFrame) -> pd.DataFrame:
         elif not str(cache.loc[t, "currency"] or "").strip():
             missing.append(t)
     if not missing:
-        return cache
+        return cache, set()
     print(f"Fetching metadata for {len(missing)} ticker(s) (parallel x4)...", flush=True)
 
     def one(t: str):
@@ -606,17 +614,20 @@ def fetch_meta(tickers: list[str], cache: pd.DataFrame) -> pd.DataFrame:
                 "industry": (info.get("industry") or "").strip(),
                 "name": (info.get("shortName") or info.get("longName") or t).strip(),
                 "currency": (info.get("currency") or "USD").strip(),
-            }
+            }, None
         except Exception as e:
             print(f"  meta fail {t}: {e}", file=sys.stderr)
-            return t, {"sector": "", "industry": "", "name": t, "currency": "USD"}
+            return t, {"sector": "", "industry": "", "name": t, "currency": "USD"}, str(e)
 
     rows = []
+    failed: set[str] = set()
     with ThreadPoolExecutor(max_workers=4) as ex:
         futures = {ex.submit(one, t): t for t in missing}
         for i, fut in enumerate(as_completed(futures), 1):
-            t, meta = fut.result()
+            t, meta, err = fut.result()
             rows.append({"ticker": t, **meta})
+            if err is not None:
+                failed.add(t)
             if i % 10 == 0 or i == len(missing):
                 print(f"  meta: {i}/{len(missing)}", flush=True)
 
@@ -627,7 +638,7 @@ def fetch_meta(tickers: list[str], cache: pd.DataFrame) -> pd.DataFrame:
     META_CSV.parent.mkdir(parents=True, exist_ok=True)
     combined.to_csv(META_CSV)
     print(f"  cached metadata to {META_CSV}", flush=True)
-    return combined
+    return combined, failed
 
 
 def load_analyst_cache() -> pd.DataFrame:
@@ -646,7 +657,7 @@ def load_analyst_cache() -> pd.DataFrame:
 
 
 def fetch_analyst_data(tickers: list[str], cache: pd.DataFrame,
-                       ttl_days: int = ANALYST_TTL_DAYS) -> pd.DataFrame:
+                       ttl_days: int = ANALYST_TTL_DAYS) -> tuple[pd.DataFrame, set[str]]:
     """For each ticker, return Wall-Street consensus (target prices, rating,
     analyst count). Cache to parquet with a per-row fetched_at; refetch only
     when missing or older than ttl_days. yfinance .info is slow + flaky, so
@@ -660,7 +671,7 @@ def fetch_analyst_data(tickers: list[str], cache: pd.DataFrame,
         elif pd.isna(cache.loc[t, "fetched_at"]) or cache.loc[t, "fetched_at"] < stale_cutoff:
             to_fetch.append(t)
     if not to_fetch:
-        return cache
+        return cache, set()
     print(f"Fetching analyst data for {len(to_fetch)} ticker(s) (parallel x4, TTL {ttl_days}d)...", flush=True)
 
     def one(t: str):
@@ -676,21 +687,24 @@ def fetch_analyst_data(tickers: list[str], cache: pd.DataFrame,
                 "current_price": info.get("currentPrice"),
                 "market_cap":   info.get("marketCap"),
                 "fetched_at":   now,
-            }
+            }, None
         except Exception as e:
             print(f"  analyst fail {t}: {e}", file=sys.stderr)
             return t, {
                 "target_mean": None, "target_high": None, "target_low": None,
                 "num_analysts": None, "recommendation": "", "rec_mean": None,
                 "current_price": None, "market_cap": None, "fetched_at": now,
-            }
+            }, str(e)
 
     rows = []
+    failed: set[str] = set()
     with ThreadPoolExecutor(max_workers=4) as ex:
         futures = {ex.submit(one, t): t for t in to_fetch}
         for i, fut in enumerate(as_completed(futures), 1):
-            t, data = fut.result()
+            t, data, err = fut.result()
             rows.append({"ticker": t, **data})
+            if err is not None:
+                failed.add(t)
             if i % 20 == 0 or i == len(to_fetch):
                 print(f"  analyst: {i}/{len(to_fetch)}", flush=True)
 
@@ -704,7 +718,7 @@ def fetch_analyst_data(tickers: list[str], cache: pd.DataFrame,
         print(f"  cached analyst data to {ANALYST_CACHE}", flush=True)
     except Exception as e:
         print(f"WARN couldn't cache analyst data: {e}", file=sys.stderr)
-    return combined
+    return combined, failed
 
 
 # --------------------------------------------------------------------------
@@ -774,9 +788,9 @@ def _parse_yf_news_item(raw) -> dict | None:
 
 def fetch_ticker_news(tickers: list[str], cache: pd.DataFrame,
                       ttl_days: int = TICKER_NEWS_TTL_DAYS,
-                      top_n: int = TICKER_NEWS_TOP_N) -> pd.DataFrame:
+                      top_n: int = TICKER_NEWS_TOP_N) -> tuple[pd.DataFrame, set[str]]:
     """Per-ticker yfinance news with the same parquet-cache + per-row
-    ``fetched_at`` TTL pattern as the analyst cache. Returns updated cache."""
+    ``fetched_at`` TTL pattern as the analyst cache. Returns (cache, failed)."""
     now = pd.Timestamp.now(tz="UTC")
     stale_cutoff = now - pd.Timedelta(days=ttl_days)
     to_fetch: list[str] = []
@@ -786,7 +800,7 @@ def fetch_ticker_news(tickers: list[str], cache: pd.DataFrame,
         elif pd.isna(cache.loc[t, "fetched_at"]) or cache.loc[t, "fetched_at"] < stale_cutoff:
             to_fetch.append(t)
     if not to_fetch:
-        return cache
+        return cache, set()
     print(f"Fetching ticker news for {len(to_fetch)} ticker(s) "
           f"(parallel x4, TTL {ttl_days}d, top {top_n}/ticker)...", flush=True)
 
@@ -804,17 +818,20 @@ def fetch_ticker_news(tickers: list[str], cache: pd.DataFrame,
             return t, {
                 "items_json": json.dumps(parsed, separators=(",", ":"), ensure_ascii=False),
                 "fetched_at": now,
-            }
+            }, None
         except Exception as e:
             print(f"  news fail {t}: {e}", file=sys.stderr)
-            return t, {"items_json": "[]", "fetched_at": now}
+            return t, {"items_json": "[]", "fetched_at": now}, str(e)
 
     rows = []
+    failed: set[str] = set()
     with ThreadPoolExecutor(max_workers=4) as ex:
         futures = {ex.submit(one, t): t for t in to_fetch}
         for i, fut in enumerate(as_completed(futures), 1):
-            t, data = fut.result()
+            t, data, err = fut.result()
             rows.append({"ticker": t, **data})
+            if err is not None:
+                failed.add(t)
             if i % 30 == 0 or i == len(to_fetch):
                 print(f"  news: {i}/{len(to_fetch)}", flush=True)
 
@@ -828,7 +845,7 @@ def fetch_ticker_news(tickers: list[str], cache: pd.DataFrame,
         print(f"  cached ticker news to {TICKER_NEWS_CACHE}", flush=True)
     except Exception as e:
         print(f"WARN couldn't cache ticker news: {e}", file=sys.stderr)
-    return combined
+    return combined, failed
 
 
 def normalize_currency(raw_ccy: str) -> tuple[str, float]:
@@ -2765,7 +2782,8 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
                 quant_metrics: pd.DataFrame | None = None,
                 ticker_news: pd.DataFrame | None = None,
                 demo_mode: bool = False,
-                sortable_inline_js: str | None = None) -> str:
+                sortable_inline_js: str | None = None,
+                build_health: dict | None = None) -> str:
     weekly = prices.resample("W-FRI").last().ffill()
     defs_html = render_svg_defs()
     table_html = render_table(returns, weekly, meta, signals,
@@ -2952,6 +2970,30 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
         sortable_script_tag = f'<script>{sortable_inline_js}</script>'
     else:
         sortable_script_tag = '<script src="vendor/Sortable.min.js"></script>'
+
+    # Build-health footer: surfaces silent yfinance failures (e.g. delisted
+    # tickers returning 404) that the build keeps going through but would
+    # otherwise only appear in stderr.
+    if build_health:
+        bh_ok      = build_health.get("succeeded", 0)
+        bh_total   = build_health.get("attempted", 0)
+        bh_failed  = build_health.get("failed", []) or []
+        bh_retries = build_health.get("retries_recovered", 0)
+        bh_seconds = build_health.get("build_seconds", 0)
+        bh_status_cls = "bh-fail" if bh_failed else "bh-ok"
+        bh_failed_html = (
+            f' &middot; <span class="bh-fail">failed: {", ".join(bh_failed)}</span>'
+            if bh_failed else ""
+        )
+        bh_retry_html = f" &middot; {bh_retries} retry-recovered" if bh_retries else ""
+        build_health_html = (
+            f'<div class="build-health">'
+            f'Build: <span class="{bh_status_cls}">{bh_ok}/{bh_total}</span> tickers'
+            f"{bh_retry_html} &middot; {bh_seconds}s{bh_failed_html}"
+            f'</div>'
+        )
+    else:
+        build_health_html = ""
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -3164,6 +3206,11 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
   .pos{{color:var(--up)}}
   .neg{{color:var(--down)}}
   .build-info{{margin-top:14px;font-family:var(--font-mono);font-size:11px;color:var(--text-dim)}}
+  .build-health{{font-family:var(--font-mono);font-size:10px;letter-spacing:0.02em;
+    color:var(--text-dim);text-align:right;padding:8px 16px;border-top:1px solid var(--border);
+    margin-top:24px}}
+  .build-health .bh-fail{{color:var(--down)}}
+  .build-health .bh-ok{{color:var(--up)}}
   .build-info .live{{
     display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--up);
     margin-right:8px;box-shadow:0 0 0 0 var(--up);animation:pulse 2.4s ease-out infinite;vertical-align:1px;
@@ -3915,6 +3962,7 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
 </div>
 
 <footer>Built locally &middot; data via yfinance &middot; TWR basket vs SPY &middot; click any row for the full chart</footer>
+{build_health_html}
 
 </div>
 
@@ -4941,6 +4989,7 @@ def main(demo: bool = False) -> None:
     # file://, no relative-path dependencies). Without the flag, the build
     # behaves as before: log.xlsx → docs/index.html with real data; absent →
     # transactions.csv fallback also into docs/index.html.
+    t0 = time.time()
     if not demo and LOG_XLSX.exists():
         print(f"Loading transactions from {LOG_XLSX}")
         transactions, untracked = load_transactions_from_log()
@@ -4968,7 +5017,7 @@ def main(demo: bool = False) -> None:
           f" — {len(txn_tickers)} held + {len(watch_tickers - txn_tickers)} watch-only...")
     # One yfinance batch returns full OHLCV; we cache it for ATR/Volume metrics
     # and derive the close-only frame the rest of the pipeline already consumes.
-    ohlcv_native = download_ohlcv(ticker_list)
+    ohlcv_native, ohlcv_failed, retries_recovered = download_ohlcv(ticker_list)
     if ohlcv_native.empty:
         prices_native = pd.DataFrame()
     else:
@@ -4994,7 +5043,7 @@ def main(demo: bool = False) -> None:
         prices_native.to_csv(CACHE_PARQUET.with_suffix(".csv"))
 
     meta_cache = load_meta_cache()
-    meta = fetch_meta(list(prices_native.columns), meta_cache)
+    meta, meta_failed = fetch_meta(list(prices_native.columns), meta_cache)
 
     # Determine which FX pairs we need (every distinct non-base currency in the
     # universe + the benchmark currency).
@@ -5061,13 +5110,18 @@ def main(demo: bool = False) -> None:
     analyst_candidates = sorted(returns[returns.status == "closed"].index.tolist()) \
         if not returns.empty else []
     analyst_cache = load_analyst_cache()
-    analyst = fetch_analyst_data(all_fetch_tickers, analyst_cache) if all_fetch_tickers else analyst_cache
+    if all_fetch_tickers:
+        analyst, analyst_failed = fetch_analyst_data(all_fetch_tickers, analyst_cache)
+    else:
+        analyst, analyst_failed = analyst_cache, set()
 
     # Per-ticker news: same 7-day TTL pattern as analyst cache. Most builds
     # reuse the parquet; a fresh fetch happens roughly once per week per ticker.
     ticker_news_cache = load_ticker_news_cache()
-    ticker_news = (fetch_ticker_news(all_fetch_tickers, ticker_news_cache)
-                   if all_fetch_tickers else ticker_news_cache)
+    if all_fetch_tickers:
+        ticker_news, news_failed = fetch_ticker_news(all_fetch_tickers, ticker_news_cache)
+    else:
+        ticker_news, news_failed = ticker_news_cache, set()
 
     # Industry outlook universe — loaded from universe.csv, cached with 30-day
     # TTL so daily builds reuse and only ~once a month does this run a fresh
@@ -5090,6 +5144,23 @@ def main(demo: bool = False) -> None:
     if demo and SORTABLE_VENDOR.exists():
         sortable_inline_js = SORTABLE_VENDOR.read_text(encoding="utf-8")
 
+    # Build-health: union of every fetcher's failed-ticker set so the footer
+    # surfaces silent yfinance failures that would otherwise hide in stderr.
+    # "attempted" is the held+watch universe (OHLCV is the gate — anything
+    # missing here cascades). Meta/analyst/news failures are extra colour.
+    all_failed = ohlcv_failed | meta_failed | analyst_failed | news_failed
+    build_health = {
+        "attempted": len(ticker_list),
+        "succeeded": len(ticker_list) - len(ohlcv_failed),
+        "failed": sorted(all_failed),
+        "retries_recovered": retries_recovered,
+        "build_seconds": int(time.time() - t0),
+    }
+    print(f"Build health: {build_health['succeeded']}/{build_health['attempted']} OK, "
+          f"{retries_recovered} retry-recovered, {build_health['build_seconds']}s")
+    if all_failed:
+        print(f"  failed: {', '.join(sorted(all_failed))}")
+
     html = render_html(returns, prices, meta, basket, bench_series, contrib, transactions,
                        signals, prices_native, returns_native, untracked=untracked,
                        watchlist=watchlist, news_items=news_items, analyst=analyst,
@@ -5098,7 +5169,8 @@ def main(demo: bool = False) -> None:
                        quant_metrics=quant_metrics,
                        ticker_news=ticker_news,
                        demo_mode=demo or not LOG_XLSX.exists(),
-                       sortable_inline_js=sortable_inline_js)
+                       sortable_inline_js=sortable_inline_js,
+                       build_health=build_health)
 
     out_path = DEMO_OUT_HTML if demo else OUT_HTML
     out_path.parent.mkdir(parents=True, exist_ok=True)
