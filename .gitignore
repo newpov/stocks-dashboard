@@ -24,3 +24,7 @@ log.xlsx
 v1.6-plan.md
 gemini tips.md
 
+# Local daily-rebuild infrastructure (machine-specific; managed by Task Scheduler)
+daily_rebuild.ps1
+daily_rebuild.log
+
