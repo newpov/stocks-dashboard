@@ -24,7 +24,8 @@ log.xlsx
 v1.6-plan.md
 gemini tips.md
 
-# Local daily-rebuild infrastructure (machine-specific; managed by Task Scheduler)
-daily_rebuild.ps1
+# Local daily-rebuild log (run history; machine-specific)
+# Note: daily_rebuild.ps1 and setup_scheduled_task.ps1 ARE committed so the
+# author can recover the setup on a new machine via `git clone`.
 daily_rebuild.log
 
