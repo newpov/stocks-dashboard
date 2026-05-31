@@ -1137,6 +1137,24 @@ def compute_benchmark_series(bench: pd.Series, start_date: pd.Timestamp) -> pd.S
     return rebased.loc[start_date:]
 
 
+def compute_rolling_alpha(basket: pd.Series, bench: pd.Series,
+                          window_days: int = 30) -> pd.Series:
+    """Trailing-window excess return of basket over benchmark, in percentage
+    points. Both inputs are cumulative-% series indexed by date. For each
+    date t, returns (basket[t] - basket[t - W]) - (bench[t] - bench[t - W]),
+    aligned via outer-merge then forward-filled so the two series share a
+    common daily index even when one is missing trading days the other has."""
+    if basket.empty or bench.empty:
+        return pd.Series(dtype=float)
+    df = pd.concat([basket.rename("b"), bench.rename("s")], axis=1).sort_index()
+    df = df.ffill().dropna()
+    if len(df) < window_days + 1:
+        return pd.Series(dtype=float)
+    b_window = df["b"] - df["b"].shift(window_days)
+    s_window = df["s"] - df["s"].shift(window_days)
+    return (b_window - s_window).dropna()
+
+
 def compute_signals(prices: pd.DataFrame) -> pd.DataFrame:
     """Compute a compact technical-analysis signal per ticker.
 
@@ -2846,6 +2864,70 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     spy_final = float(bench.iloc[-1]) if not bench.empty else 0.0
     vs_spy = basket_final - spy_final
 
+    # T4: total + geometric-annualized return for the hero subtitle.
+    # basket_final is a percentage (e.g. 31.7 means +31.7%), so we divide by
+    # 100 before compounding and multiply back at the end. Annualization is
+    # suppressed below 3 months elapsed -- extrapolating from a tiny window
+    # produces misleadingly large numbers.
+    years_elapsed = max(0.0,
+        (pd.Timestamp.now() - first_purchase).days / 365.25)
+    _total_cls = "pos" if basket_final >= 0 else "neg"
+    _total_html = f'<span class="{_total_cls}">{basket_final:+.1f}%</span>'
+    _ann_html = ""
+    if years_elapsed >= 0.25 and basket_final > -100:
+        annualized_pct = ((1 + basket_final / 100) ** (1 / years_elapsed) - 1) * 100
+        _ann_cls = "pos" if annualized_pct >= 0 else "neg"
+        _ann_html = (f' <span class="hero-sub-sep">&middot;</span> '
+                     f'<span class="{_ann_cls}">{annualized_pct:+.1f}%</span> annualized')
+    hero_sub_html = (
+        f'{_total_html} total{_ann_html}'
+        f' <span class="hero-sub-meta">&middot; TWR, renormalized as positions enter</span>'
+    )
+
+    # T7: 30-day rolling alpha sparkline (basket excess over SPY, pp).
+    # Server-side renders a small inline SVG; latest value is shown next to
+    # the label for the at-a-glance "are we currently ahead?" signal.
+    rolling_alpha = compute_rolling_alpha(basket, bench, window_days=30)
+    if rolling_alpha.empty or len(rolling_alpha) < 5:
+        alpha_sparkline_html = ""
+    else:
+        SW, SH = 240, 36  # viewBox in svg units
+        pad_x, pad_y = 2, 4
+        vals = rolling_alpha.tolist()
+        vmin, vmax = min(vals), max(vals)
+        # Add a hair of headroom so flat-line edge cases don't divide-by-zero.
+        vrange = max(vmax - vmin, 1e-9)
+        zero_in_range = (vmin <= 0 <= vmax)
+        n = len(vals)
+        # Map each point to (x, y). x evenly spaced; y inverted (SVG down=+).
+        def _y(v: float) -> float:
+            return pad_y + (vmax - v) / vrange * (SH - 2 * pad_y)
+        def _x(i: int) -> float:
+            return pad_x + i / max(n - 1, 1) * (SW - 2 * pad_x)
+        points = " ".join(f"{_x(i):.1f},{_y(v):.2f}" for i, v in enumerate(vals))
+        baseline_y = _y(0.0) if zero_in_range else None
+        baseline_svg = (
+            f'<line x1="0" y1="{baseline_y:.2f}" x2="{SW}" y2="{baseline_y:.2f}" '
+            f'stroke="var(--text-dim)" stroke-width="0.5" stroke-dasharray="2,3" opacity="0.5"/>'
+            if baseline_y is not None else ""
+        )
+        latest = vals[-1]
+        latest_cls = "pos" if latest >= 0 else "neg"
+        stroke_color = "var(--up)" if latest >= 0 else "var(--down)"
+        alpha_sparkline_html = (
+            f'<div class="alpha-sparkline-wrap">'
+            f'  <div class="alpha-sparkline-head">'
+            f'    <span class="alpha-sparkline-label">30-day rolling &alpha; vs SPY</span>'
+            f'    <span class="alpha-sparkline-latest {latest_cls}">{latest:+.1f} pp</span>'
+            f'  </div>'
+            f'  <svg class="alpha-sparkline" viewBox="0 0 {SW} {SH}" preserveAspectRatio="none">'
+            f'    {baseline_svg}'
+            f'    <polyline points="{points}" fill="none" stroke="{stroke_color}" '
+            f'              stroke-width="1.2" stroke-linejoin="round"/>'
+            f'  </svg>'
+            f'</div>'
+        )
+
     if not contrib.empty:
         best_contrib_name = contrib.iloc[0].name
         best_contrib_pp = float(contrib.iloc[0].contribution_pp)
@@ -2864,6 +2946,46 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     n_closed_total = len(closed_positions)
     n_wins = int((closed_positions["total_pct"] > 0).sum()) if n_closed_total else 0
     win_rate = (n_wins / n_closed_total * 100) if n_closed_total else 0.0
+
+    # T6: win/loss magnitude ratio. Headline = avg_win_£ / avg_loss_£.
+    # Unit caveat: pnl is approximated as total_invested * total_pct/100,
+    # which inherits whatever currency the underlying transactions table
+    # used (typically GBP for UK-domiciled T212). The RATIO is dimensionless
+    # so the headline number is correct regardless of currency mix; only
+    # the £ meta line is unit-approximate.
+    avg_win_pnl = 0.0
+    avg_loss_pnl = 0.0      # stored as a negative number
+    win_loss_ratio: float | None = None
+    if not closed_positions.empty:
+        pnl = closed_positions["total_invested"] * closed_positions["total_pct"] / 100.0
+        wins   = pnl[pnl > 0]
+        losses = pnl[pnl < 0]
+        avg_win_pnl  = float(wins.mean())   if len(wins)   > 0 else 0.0
+        avg_loss_pnl = float(losses.mean()) if len(losses) > 0 else 0.0
+        if avg_loss_pnl < 0 and len(wins) > 0:
+            win_loss_ratio = avg_win_pnl / abs(avg_loss_pnl)
+        elif len(wins) > 0 and len(losses) == 0:
+            win_loss_ratio = float("inf")
+        elif len(losses) > 0 and len(wins) == 0:
+            win_loss_ratio = 0.0
+    if win_loss_ratio is None:
+        wlr_value_str = "&mdash;"
+        wlr_cls = "dim"
+        wlr_meta_str = "no closed positions"
+    elif win_loss_ratio == float("inf"):
+        wlr_value_str = "&infin;"
+        wlr_cls = "pos"
+        wlr_meta_str = "no losers yet"
+    else:
+        wlr_value_str = f"{win_loss_ratio:.2f}&times;"
+        if win_loss_ratio >= 1.5:
+            wlr_cls = "pos"
+        elif win_loss_ratio < 1:
+            wlr_cls = "neg"
+        else:
+            wlr_cls = ""
+        wlr_meta_str = (f"{BASE_SYMBOL}{avg_win_pnl:,.0f} avg win &middot; "
+                        f"{BASE_SYMBOL}{abs(avg_loss_pnl):,.0f} avg loss")
 
     # 2. Cost-weighted average analyst upside across open positions. Uses the
     #    analyst cache directly (native ccy for both target and current_price,
@@ -2892,6 +3014,8 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     # 3. Max drawdown on the basket NAV series. The basket values are already
     #    % returns over baseline, so convert to multipliers, take cummax, and
     #    measure each point's drop from that running peak.
+    #    (Stays computed even though the hero card now shows Sharpe instead --
+    #    T8's stats registry will offer Max DD as an opt-in choice.)
     max_drawdown = 0.0
     max_drawdown_date_str = ""
     if not basket.empty:
@@ -2901,6 +3025,36 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
         max_drawdown = float(dd_series.min())
         if max_drawdown < 0:
             max_drawdown_date_str = pd.Timestamp(dd_series.idxmin()).strftime("%d %b %y")
+
+    # T5: weekly-cadence Sharpe ratio.
+    #   - Project convention: risk-free rate = 0 (matches the implicit TWR
+    #     assumption used elsewhere in the dashboard).
+    #   - Weekly log returns from W-FRI resample; std handles volatility.
+    #   - Annualized by sqrt(52). Daily (sqrt(252)) would mechanically yield
+    #     a higher number; we picked weekly to match the rest of the dashboard.
+    #   - Suppressed when fewer than ~4 weekly returns exist (too few obs for
+    #     std to be meaningful -- shows "--" instead of a misleading huge value).
+    sharpe_ratio: float | None = None
+    if not basket.empty:
+        weekly_mult = (1 + basket / 100.0).resample("W-FRI").last().dropna()
+        if len(weekly_mult) >= 5:
+            weekly_log_rets = np.log(weekly_mult).diff().dropna()
+            std = float(weekly_log_rets.std())
+            if std > 0:
+                sharpe_ratio = (float(weekly_log_rets.mean()) / std) * (52 ** 0.5)
+    if sharpe_ratio is None:
+        sharpe_value_str = "&mdash;"
+        sharpe_cls = "dim"
+        sharpe_meta_str = "needs &geq; 4 weeks of data"
+    else:
+        sharpe_value_str = f"{sharpe_ratio:.2f}"
+        if sharpe_ratio >= 1:
+            sharpe_cls = "pos"
+        elif sharpe_ratio < 0:
+            sharpe_cls = "neg"
+        else:
+            sharpe_cls = ""
+        sharpe_meta_str = "vol-adjusted &middot; weekly &times; &radic;52"
 
     data_dict = build_data_payload(returns, prices, meta, contrib, signals,
                                    prices_native, returns_native,
@@ -3069,6 +3223,37 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
   .layout-toggle:hover,.layout-reset:hover{{color:var(--text);border-color:var(--text-dim)}}
   .layout-toggle.active{{background:var(--accent);color:var(--ink);
     border-color:var(--accent);font-weight:600}}
+  /* Pulse halo around the Edit-layout button while the discovery hint is up.
+     box-shadow keeps it paint-only — the button's layout box never grows so
+     nothing nearby reflows. */
+  @keyframes edit-pulse{{
+    0%,100%{{box-shadow:0 0 0 0 rgba(245,158,11,0.55)}}
+    50%    {{box-shadow:0 0 0 8px rgba(245,158,11,0)}}
+  }}
+  .layout-toggle.pulse{{
+    animation:edit-pulse 1.8s ease-in-out infinite;
+    border-color:var(--accent);color:var(--text);
+  }}
+  /* One-time tooltip anchored just below the topbar (top-right of container). */
+  .edit-tooltip{{
+    position:absolute;top:52px;right:24px;z-index:35;
+    background:var(--surface-2);border:1px solid var(--accent);
+    border-radius:6px;padding:10px 14px;max-width:260px;
+    font-family:var(--font-mono);font-size:11px;line-height:1.5;color:var(--text);
+    box-shadow:0 6px 16px rgba(0,0,0,0.30);cursor:pointer;
+  }}
+  .edit-tooltip::before{{
+    content:'';position:absolute;top:-7px;right:24px;
+    width:12px;height:12px;background:var(--surface-2);
+    border-top:1px solid var(--accent);border-left:1px solid var(--accent);
+    transform:rotate(45deg);
+  }}
+  .edit-tooltip strong{{color:var(--accent);font-weight:600}}
+  .edit-tooltip-dismiss{{display:block;margin-top:6px;font-size:9.5px;
+    color:var(--text-dim);text-transform:uppercase;letter-spacing:0.06em}}
+  @media (max-width:700px){{
+    .edit-tooltip{{right:8px;left:8px;max-width:none;top:48px}}
+  }}
   .palette-toggle{{display:flex;gap:4px;
     font-family:var(--font-mono);font-size:10px;letter-spacing:0.06em;
   }}
@@ -3117,11 +3302,18 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
   body.edit-mode .module{{outline:1px solid var(--border);outline-offset:6px;border-radius:4px}}
   .module-ghost{{opacity:.35}}
   .module-chosen .module-bar{{border-style:solid;border-color:var(--accent)}}
-  /* Hidden modules vanish in normal view; in edit mode they stay visible but
-     dimmed and inert so they can be toggled back on. */
+  /* Hidden modules vanish in normal view. In edit mode they collapse to the
+     module-bar strip only — the content section is fully hidden so the page
+     doesn't read as "glitched / broken" from full-width dimmed-but-still-
+     rendered dead modules. The bar itself stays interactive (drag handle +
+     visibility checkbox) so the user can restore or reorder a hidden module. */
   .module[data-hidden="true"]{{display:none}}
-  body.edit-mode .module[data-hidden="true"]{{display:block;opacity:.45}}
-  body.edit-mode .module[data-hidden="true"] > section{{pointer-events:none}}
+  body.edit-mode .module[data-hidden="true"]{{display:block}}
+  body.edit-mode .module[data-hidden="true"] > section{{display:none}}
+  body.edit-mode .module[data-hidden="true"] .module-bar{{
+    opacity:.65;background:var(--surface-2);
+  }}
+  body.edit-mode .module[data-hidden="true"] .module-name{{text-decoration:line-through}}
   /* News list keeps an internal scroll cap now that it's full-width. */
   .module[data-module="news"] .news-list{{max-height:360px;overflow-y:auto}}
 
@@ -3166,6 +3358,11 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
   .hero-head-left{{display:flex;flex-direction:column;gap:2px}}
   .hero-title{{font-family:var(--font-ui);font-size:11px;color:var(--text-dim);letter-spacing:0.18em;text-transform:uppercase;font-weight:600}}
   .hero-sub{{font-family:var(--font-mono);font-size:11px;color:var(--text-dim);margin-top:6px}}
+  /* T4 hero subtitle: lead with total + annualized perf, then the methodology
+     note in a slightly dimmer / smaller secondary tier so the eye lands on
+     the numbers first. */
+  .hero-sub-sep{{color:var(--text-dim);opacity:0.7;margin:0 2px}}
+  .hero-sub-meta{{font-size:10px;opacity:0.65;margin-left:6px}}
   .hero-legend{{display:flex;gap:18px;font-family:var(--font-mono);font-size:11.5px;align-items:center}}
   .leg{{display:flex;align-items:center;gap:6px;color:var(--text-2)}}
   .leg-swatch{{width:14px;height:3px;border-radius:1px}}
@@ -3177,6 +3374,14 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
   }}
   .hero-chart-svg-wrap{{position:relative;width:100%;height:380px}}
   .hero-chart-svg{{width:100%;height:100%;display:block}}
+  /* T7: 30-day rolling alpha sparkline beneath the hero chart. */
+  .alpha-sparkline-wrap{{margin-top:14px;padding-top:10px;
+    border-top:1px solid var(--border)}}
+  .alpha-sparkline-head{{display:flex;justify-content:space-between;align-items:baseline;
+    font-family:var(--font-mono);font-size:11px;color:var(--text-dim);margin-bottom:4px}}
+  .alpha-sparkline-label{{letter-spacing:0.04em}}
+  .alpha-sparkline-latest{{font-weight:600;font-size:11.5px}}
+  .alpha-sparkline{{width:100%;height:36px;display:block}}
   .hero-tip{{
     position:absolute;background:var(--ink);border:1px solid var(--accent);border-radius:6px;
     padding:8px 12px;font-family:var(--font-mono);font-size:11px;color:var(--text);
@@ -3205,6 +3410,7 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
   .pos{{color:var(--up)}}
   .neg{{color:var(--down)}}
+  .stat-value.dim{{color:var(--text-dim);font-size:24px}}
   .build-info{{margin-top:14px;font-family:var(--font-mono);font-size:11px;color:var(--text-dim)}}
   .build-health{{font-family:var(--font-mono);font-size:10px;letter-spacing:0.02em;
     color:var(--text-dim);text-align:right;padding:8px 16px;border-top:1px solid var(--border);
@@ -3902,6 +4108,15 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
   </div>
 </div>
 
+<!-- One-time discovery tooltip for the Edit-layout button. Position is
+     anchored absolutely (CSS) so its place in the DOM doesn't matter for
+     visual layout. JS gates its visibility on the localStorage flag
+     'edit-layout-discovered'. -->
+<div class="edit-tooltip" id="edit-tooltip" hidden role="status" aria-live="polite">
+  Try <strong>Edit layout</strong> &mdash; drag modules, hide what you don&rsquo;t need, reset anytime.
+  <span class="edit-tooltip-dismiss">click to dismiss</span>
+</div>
+
 <header>
   <div class="eyebrow">{n_open} open <span class="dot">&middot;</span> {n_closed} closed <span class="dot">&middot;</span> first buy {first_purchase_str} <span class="dot">&middot;</span> in {BASE_CCY}</div>
   <h1>The basket since <em>October &rsquo;24</em></h1>
@@ -3910,7 +4125,7 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     <div class="hero-chart-head">
       <div class="hero-head-left">
         <div class="hero-title">Basket vs Benchmark</div>
-        <div class="hero-sub">time-weighted return &middot; renormalized as positions enter</div>
+        <div class="hero-sub">{hero_sub_html}</div>
       </div>
       <div class="hero-legend">
         <div class="leg"><span class="leg-swatch basket"></span>Basket</div>
@@ -3922,6 +4137,7 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
       <svg class="hero-chart-svg" id="hero-chart" preserveAspectRatio="none"></svg>
       <div class="hero-tip" id="hero-tip" hidden></div>
     </div>
+    {alpha_sparkline_html}
   </div>
 
   <div class="stats">
@@ -3936,14 +4152,14 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
       <div class="stat-meta">{n_open_covered} of {n_open} open covered</div>
     </div>
     <div class="stat">
-      <div class="stat-label">Max drawdown</div>
-      <div class="stat-value neg">{max_drawdown:.1f}%</div>
-      <div class="stat-meta">{('trough: ' + max_drawdown_date_str) if max_drawdown_date_str else 'no drawdown yet'}</div>
+      <div class="stat-label">Sharpe (1y)</div>
+      <div class="stat-value {sharpe_cls}">{sharpe_value_str}</div>
+      <div class="stat-meta">{sharpe_meta_str}</div>
     </div>
     <div class="stat">
-      <div class="stat-label">Top contributor</div>
-      <div class="stat-value pos">{best_contrib_pp:+.1f} pp</div>
-      <div class="stat-meta">{best_contrib_name} &middot; {BASE_SYMBOL}{best_contrib_wt:,.0f} basis</div>
+      <div class="stat-label">Win / loss ratio</div>
+      <div class="stat-value {wlr_cls}">{wlr_value_str}</div>
+      <div class="stat-meta">{wlr_meta_str}</div>
     </div>
     <div class="stat">
       <div class="stat-label">Top detractor</div>
@@ -4853,6 +5069,32 @@ document.querySelectorAll('.io-stock').forEach(row => {{
   if (editBtn) editBtn.addEventListener('click', () => {{
     if (document.body.classList.contains('edit-mode')) exitEdit(); else enterEdit();
   }});
+
+  // One-time discovery hint: pulse the edit button + show a tooltip on the
+  // first ever page load. Gated on a localStorage flag so returning visitors
+  // never see it again. Auto-dismisses after 8s OR on any click anywhere.
+  (function maybeShowDiscoveryHint() {{
+    if (!editBtn) return;
+    const DISCOVERED_KEY = 'edit-layout-discovered';
+    try {{ if (localStorage.getItem(DISCOVERED_KEY)) return; }}
+    catch (e) {{ return; }}  // privacy mode: skip rather than crash
+    const tip = document.getElementById('edit-tooltip');
+    editBtn.classList.add('pulse');
+    if (tip) tip.hidden = false;
+    let dismissed = false;
+    function dismiss() {{
+      if (dismissed) return;
+      dismissed = true;
+      editBtn.classList.remove('pulse');
+      if (tip) tip.hidden = true;
+      try {{ localStorage.setItem(DISCOVERED_KEY, '1'); }} catch (e) {{}}
+    }}
+    // Dismiss triggers: clicking anywhere, clicking the tooltip itself,
+    // or 8s timeout (whichever comes first).
+    document.addEventListener('click', dismiss, {{ once: true, capture: true }});
+    if (tip) tip.addEventListener('click', dismiss, {{ once: true }});
+    setTimeout(dismiss, 8000);
+  }})();
 
   stack.addEventListener('change', (e) => {{
     const cb = e.target.closest && e.target.closest('.module-vis-cb');

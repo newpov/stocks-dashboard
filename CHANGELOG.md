@@ -14,6 +14,46 @@ than a barely-working prototype.
 
 ---
 
+## v1.6 — Risk-adjusted metrics + UX polish · 31 May 2026
+
+Hero numbers get smarter (vol-adjusted, magnitude-aware, alpha-trended) and
+the edit-mode UX stops looking glitched. Backing fetch layer also gets a
+small observability boost.
+
+### Added
+- **Annualized return** in the hero subtitle alongside total return
+  (geometric, gated below 3 months elapsed to avoid extrapolation noise).
+- **Sharpe (1y)** stat card replacing Max Drawdown -- weekly log returns
+  annualized via &times; &radic;52, risk-free = 0 (project convention).
+  Color-banded green &geq; 1, red &lt; 0.
+- **Win / loss ratio** stat card replacing Top Contributor -- realized
+  &pound; magnitude of average win vs average loss. Distinguishes "70% win
+  rate with tiny wins and huge losses" from genuinely good strategies.
+- **30-day rolling &alpha; sparkline** beneath the hero chart -- excess
+  basket return over SPY in trailing pp, with current value color-coded.
+- **Build-health footer line**: surfaces silent yfinance failures
+  (e.g. delisted tickers) that previously hid in stderr.
+- **One-time edit-layout discovery hint**: pulse + tooltip on first ever
+  page load, gated by `localStorage["edit-layout-discovered"]`.
+
+### Changed
+- **Hidden modules in edit mode** now collapse to a slim strikethrough
+  placeholder bar instead of full-width dimmed content -- removes the
+  "page looks broken" impression first-time visitors had.
+- Hero subtitle wording: lead with the performance numbers, push the
+  methodology note ("TWR, renormalized") to a dimmer secondary tier.
+- Max Drawdown + Top Contributor stats stay computed in scope (no
+  observable card) -- forthcoming v1.7 stats registry makes them
+  opt-in via the edit-mode UI.
+
+### Internal
+- Every yfinance fetcher (`download_ohlcv`, `fetch_meta`,
+  `fetch_analyst_data`, `fetch_ticker_news`) now returns its failed-ticker
+  set as part of a tuple so `main()` can aggregate for the build-health
+  footer. Two callers inside `fetch_universe_outlook` updated to unpack.
+
+---
+
 ## v1.5 — Per-ticker context + GitHub-ready · 30 May 2026
 
 Two threads landed together: extending the modal with stock-specific
