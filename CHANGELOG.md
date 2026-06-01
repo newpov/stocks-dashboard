@@ -14,6 +14,93 @@ than a barely-working prototype.
 
 ---
 
+## v1.8 — Tighter and broader · 1 June 2026
+
+The polish debt from v1.7 closes (T1&ndash;T3), the universe layer widens
+from 150 hand-picked names to the full S&P 500 (T4), and the hero gains
+one new visualization &mdash; an inline drawdown sparkline (T5). Then a
+follow-up bug-fix pass (B1&ndash;B6) cleared a number of edge cases that
+only surfaced once the new data was rendering.
+
+### Added
+- **Drawdown sparkline inset**: a thin red line beneath the alpha
+  sparkline plots peak-to-trough drawdown at each date over the full
+  basket history. The header pill shows the current drawdown (e.g.
+  `-0.1%`) and the worst seen (`worst -15.6%`) so the eye can answer
+  "how close are we to the prior trough?" without scrolling.
+- **YTD return in the hero subtitle**: alongside total + annualized,
+  a new YTD % uses true compounding from the last basket value before
+  Jan 1 to the latest (`((1+final/100)/(1+jan1/100) - 1) * 100`), not
+  the pp-delta on cumulative %.
+
+### Changed
+- **Universe expanded to S&P 500**: `universe.csv` jumps from 153
+  hand-picked names to the full S&P 500 (503 tickers across 112
+  industries). The industry-outlook section now reflects a much richer
+  industry mix &mdash; utilities, specialty machinery, regulated
+  industrials &mdash; that were thinly sampled before. Class-share
+  symbols normalized (`BRK.B` &rarr; `BRK-B`) so yfinance resolves them.
+- **Alpha sparkline per-segment color**: the 30-day rolling alpha line
+  now splits at every zero crossing &mdash; green above the baseline,
+  red below &mdash; instead of using one single color picked from the
+  *latest* value. Interpolation lands the color flip exactly on the
+  baseline, not the next data point.
+- **Closed-position modal label**: closed positions now read
+  "between [first buy] and [last sell]" instead of "since [first buy]"
+  so the headline % is clearly buy-to-sell, not a current-date return.
+
+### Fixed
+- **Hero vs-SPY shading alignment** (T2 / B6): two bugs collapsed
+  into one symptom. First, the SPY polyline string was built *before*
+  the date-grid remap while the vs-SPY polygons were built *after*, so
+  the polyline used SPY's own evenly-spaced x grid and the polygons
+  used basket's grid &mdash; visible as a 0.3&ndash;0.5 px gap between
+  the dashed gray line and the shading boundary. Remap now runs first.
+  Second, when basket has trailing dates SPY doesn't (weekend builds
+  where European tickers extend basket past SPY's Friday close), the
+  shading had a visible gap at the right edge. The polygon iterator
+  now extends one final segment using SPY's last value held flat &mdash;
+  the SPY polyline itself stops honestly at its real last data point.
+- **Unusual-volume chips disappeared on weekend/holiday builds** (B1):
+  the chip detector compared `prices.at[last_idx, tkr]` to
+  `prices.at[prev_idx, tkr]`. On a Monday-before-US-open or weekend
+  build, `last_idx` falls on a date with no US ticker prices, so all
+  32 cache-flagged candidates returned NaN and the row rendered empty.
+  Each ticker now uses its own last 2 *valid* prices.
+- **Weekly-movers list included closed positions** (B3): the per-week
+  top/bottom-5 mover lists walked every ticker in `returns`, but
+  `prices.ffill()` keeps a closed ticker's series alive forever. A
+  ticker sold in Jan 2025 still topped/bottomed weekly movers for
+  every week after. Now each week filters by the ticker's
+  `[first_buy_date, last_action_date]` hold window.
+- **Modal scroll didn't reset on filter or ticker change** (B5):
+  switching from the "Open" filter chip to "Closed" left the table
+  scrolled to wherever you'd been; opening a new ticker modal opened
+  it scrolled to the previous ticker's last position. Both now reset
+  to top.
+
+### Internal
+- **Modal chart polylines precomputed in Python** (T1): coordinate
+  mapping for the per-ticker modal chart moves out of JS into a fixed
+  1000&times;600 viewBox. The SVG uses `preserveAspectRatio="none"`, so
+  the browser natively scales to whatever size the modal renders at and
+  the resize handler is gone entirely. Saves ~150&ndash;300 ms on first
+  modal-open and removes one source of layout coupling. Per-ticker
+  payload gains a `chart` field (points string, zero_y, axis ticks);
+  the JS render uses these directly with a defensive fallback for any
+  ticker missing the field.
+- New helpers: `_modal_polyline_d()`, `compute_drawdown_series()`.
+- No new dependencies. `docs/index.html` grows from ~1.93 MB to ~2.18 MB
+  (+13%) on the precomputed polyline data &mdash; trade for simpler JS.
+
+### Deferred to v1.9
+- Drawdown sparkline hover layer (currently static; no date/value
+  tooltip on mouseover).
+- Per-segment color on the modal chart itself (today still a single
+  color based on the position's total return sign).
+
+---
+
 ## v1.7 — Customizable stats + drill-down modals · 31 May 2026
 
 The hero stats become user-pickable, and most numbers on the page now

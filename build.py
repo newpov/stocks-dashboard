@@ -1235,6 +1235,21 @@ def compute_rolling_alpha(basket: pd.Series, bench: pd.Series,
     return (b_window - s_window).dropna()
 
 
+def compute_drawdown_series(basket: pd.Series) -> pd.Series:
+    """v1.8 T5: peak-to-trough drawdown at each date, in percent (<= 0).
+
+    Converts the cumulative-% basket series into a growth multiplier, tracks the
+    running peak, and returns (mult / running_peak - 1) * 100. A value of -5.2
+    means "at this date, the basket was 5.2% below its prior peak". Series is
+    indexed by the same dates as the input basket.
+    """
+    if basket.empty:
+        return pd.Series(dtype=float)
+    mult = 1 + basket / 100.0
+    running_peak = mult.cummax()
+    return (mult / running_peak - 1) * 100
+
+
 def compute_signals(prices: pd.DataFrame) -> pd.DataFrame:
     """Compute a compact technical-analysis signal per ticker.
 
@@ -2211,6 +2226,10 @@ def build_watchlist_payload(watchlist: pd.DataFrame, prices: pd.DataFrame,
             "dates": [d.strftime("%Y-%m-%d") for d in weekly.index],
             "prices": [round(float(p), 4) for p in weekly.tolist()],
         }
+        # T1: precompute the modal chart polyline (same path as portfolio tickers).
+        if baseline:
+            _rebased = [(float(p) / baseline - 1) * 100 for p in weekly.tolist()]
+            payload[tkr]["chart"] = _modal_polyline_d(_rebased)
     return payload
 
 
@@ -2843,6 +2862,86 @@ def render_toolbar(panel_n: int, n: int, returns: pd.DataFrame | None = None,
 </div>"""
 
 
+# v1.8 T1: fixed-viewBox coordinate space for the modal chart. JS scales the
+# viewBox to whatever the modal renders at via preserveAspectRatio="none", so
+# the polyline + axis tick coordinates stay correct regardless of modal size.
+# Padding chosen to match the legacy JS render (padL/padR/padT/padB) so the
+# visual proportions are preserved.
+MODAL_VB_W, MODAL_VB_H = 1000, 600
+MODAL_VB_PAD_L, MODAL_VB_PAD_R = 56, 32
+MODAL_VB_PAD_T, MODAL_VB_PAD_B = 28, 56
+
+
+def _modal_polyline_d(rebased_values: list[float]) -> dict:
+    """Pre-compute the modal chart's polyline + axis ticks in fixed viewBox
+    coordinates (T1). Returns a dict that the JS render path consumes:
+
+        {
+          "points":  "x1,y1 x2,y2 ..." for the rebased polyline,
+          "area_d":  "M ... Z" for the gradient-filled area under the line,
+          "zero_y":  y-coordinate of the 0% baseline,
+          "y_ticks": [{"v": pct, "y": y}, ...] 6 ticks,
+          "x_ticks": [{"idx": i, "x": x}, ...] up to 5 ticks (idx into series),
+          "xs":      [float, ...] per-point x coords (for hover indexing),
+          "ys":      [float, ...] per-point y coords (for hover dot positioning),
+          "vmin":    minimum rebased value (incl. 0% floor),
+          "vmax":    maximum rebased value (incl. 0% floor),
+        }
+
+    JS uses `xs` + `ys` for hover snapping, and the other fields as-is to
+    paint the chart at first open.
+    """
+    n = len(rebased_values)
+    if n == 0:
+        return {"points": "", "area_d": "", "zero_y": 0,
+                "y_ticks": [], "x_ticks": [], "xs": [], "ys": [],
+                "vmin": 0.0, "vmax": 0.0}
+    vmin = min(0.0, min(rebased_values))
+    vmax = max(0.0, max(rebased_values))
+    span = max(vmax - vmin, 1e-9)
+    inner_w = MODAL_VB_W - MODAL_VB_PAD_L - MODAL_VB_PAD_R
+    inner_h = MODAL_VB_H - MODAL_VB_PAD_T - MODAL_VB_PAD_B
+
+    def _x(i: int) -> float:
+        if n == 1:
+            return MODAL_VB_PAD_L + inner_w / 2
+        return MODAL_VB_PAD_L + (i / (n - 1)) * inner_w
+
+    def _y(v: float) -> float:
+        return MODAL_VB_PAD_T + (1 - (v - vmin) / span) * inner_h
+
+    xs = [_x(i) for i in range(n)]
+    ys = [_y(v) for v in rebased_values]
+    points = " ".join(f"{x:.1f},{y:.1f}" for x, y in zip(xs, ys))
+    zero_y = _y(0.0)
+    # 6 y-ticks (incl. endpoints) — matches the legacy JS render.
+    y_ticks = []
+    for i in range(6):
+        v = vmin + (i / 5) * span
+        y_ticks.append({"v": float(v), "y": float(_y(v))})
+    # Up to 5 x-ticks, evenly spaced over the series (indices into the
+    # weekly series so JS can label them with the matching date).
+    x_tick_count = min(5, n)
+    x_tick_idx = []
+    for i in range(x_tick_count):
+        if x_tick_count == 1:
+            x_tick_idx.append(0)
+        else:
+            x_tick_idx.append(int(round((i / (x_tick_count - 1)) * (n - 1))))
+    # Slimmed payload: JS reconstructs xs/ys/area-path at render time
+    # (cheap, sub-millisecond) which keeps the payload ~600 KB smaller across
+    # the basket. Tick x-coords are derived in JS from `_x(idx)` mirror.
+    return {
+        "points": points,
+        "zero_y": float(zero_y),
+        "y_ticks": y_ticks,
+        "x_tick_idx": x_tick_idx,
+        "n": n,
+        "vmin": float(vmin),
+        "vmax": float(vmax),
+    }
+
+
 def build_data_payload(returns: pd.DataFrame, prices: pd.DataFrame,
                        meta: pd.DataFrame, contrib: pd.DataFrame,
                        signals: pd.DataFrame,
@@ -2900,6 +2999,12 @@ def build_data_payload(returns: pd.DataFrame, prices: pd.DataFrame,
             "ccy_symbol": ccy_symbol,
             "baseline": float(r.baseline),
             "baseline_date": r.baseline_date.strftime("%Y-%m-%d"),
+            # v1.8.1 B4: expose last_action_date (most recent SELL for closed,
+            # last txn for any status) so the modal can show "between buy and
+            # sell" rather than the misleading "since buy" for closed positions.
+            "last_action_date": (pd.Timestamp(r.last_action_date).strftime("%Y-%m-%d")
+                                  if "last_action_date" in r.index and pd.notna(r.last_action_date)
+                                  else None),
             "latest": float(r.latest),
             "total": float(r.total_pct),
             "w1": _safe(r["1w_pct"]),
@@ -2926,6 +3031,14 @@ def build_data_payload(returns: pd.DataFrame, prices: pd.DataFrame,
             "dates": [d.strftime("%Y-%m-%d") for d in s_weekly.index],
             "prices": [round(float(p), 4) for p in s_weekly.tolist()],
         }
+        # T1: precompute the modal chart polyline in fixed-viewBox coordinates.
+        # Rebased values are (p / baseline - 1) * 100 — the same formula the
+        # legacy JS used at render time. Doing it here saves ~150-300 ms on
+        # first modal-open and makes the chart resize-free (viewBox handles it).
+        _baseline = float(r.baseline)
+        if _baseline:
+            _rebased = [(float(p) / _baseline - 1) * 100 for p in s_weekly.tolist()]
+            payload[tkr]["chart"] = _modal_polyline_d(_rebased)
         if quant_metrics is not None and tkr in quant_metrics.index:
             q = quant_metrics.loc[tkr]
             payload[tkr]["quant"] = {
@@ -3060,8 +3173,21 @@ def build_aux_payload(returns: pd.DataFrame, prices: pd.DataFrame,
     # by the week-ending date (Friday). Computed from the same `prices` frame
     # used elsewhere -- already in base currency (GBP), so percentages reflect
     # what the user would actually see in P&L terms.
+    # v1.8.1 B3: filter per week by each ticker's hold window. Previously a
+    # closed ticker (e.g. Corvus sold Jan 2025) still appeared in mover lists
+    # for every later week because prices.ffill kept its price series alive.
+    # Now: for each ticker, include only weeks within [first_buy_date,
+    # last_action_date] for closed, or [first_buy_date, +inf) for open.
     if not prices.empty and not returns.empty:
         held_tickers = [t for t in returns.index if t in prices.columns]
+        # Per-ticker hold window. None on either end means "no bound".
+        holds: dict[str, tuple[pd.Timestamp | None, pd.Timestamp | None]] = {}
+        for tkr in held_tickers:
+            row = returns.loc[tkr]
+            fbd = pd.Timestamp(row.first_buy_date) if "first_buy_date" in row.index and pd.notna(row.first_buy_date) else None
+            lad = pd.Timestamp(row.last_action_date) if "last_action_date" in row.index and pd.notna(row.last_action_date) else None
+            status = str(row.status) if "status" in row.index else "open"
+            holds[tkr] = (fbd, lad if status == "closed" else None)
         if held_tickers:
             sub = prices[held_tickers].copy()
             weekly = sub.resample("W-FRI").last().ffill()
@@ -3070,12 +3196,24 @@ def build_aux_payload(returns: pd.DataFrame, prices: pd.DataFrame,
                 row = weekly_pct.loc[date_idx].dropna()
                 if row.empty:
                     continue
+                date_ts = pd.Timestamp(date_idx)
+                # Keep only tickers held as of this week-ending date.
+                def _held(t: str) -> bool:
+                    fbd, lad = holds.get(t, (None, None))
+                    if fbd is not None and date_ts < fbd:
+                        return False
+                    if lad is not None and date_ts > lad:
+                        return False
+                    return True
+                row = row[[t for t in row.index if _held(str(t))]]
+                if row.empty:
+                    continue
                 ordered = row.sort_values()
                 top = [(t, float(v)) for (t, v) in ordered.tail(5).iloc[::-1].items() if v > 0]
                 bot = [(t, float(v)) for (t, v) in ordered.head(5).items() if v < 0]
                 if not top and not bot:
                     continue
-                key = pd.Timestamp(date_idx).strftime("%Y-%m-%d")
+                key = date_ts.strftime("%Y-%m-%d")
                 out["weekly_movers"][key] = {
                     "up":   [{"ticker": t, "pct": v} for (t, v) in top],
                     "down": [{"ticker": t, "pct": v} for (t, v) in bot],
@@ -3179,8 +3317,25 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
         _ann_cls = "pos" if annualized_pct >= 0 else "neg"
         _ann_html = (f' <span class="hero-sub-sep">&middot;</span> '
                      f'<span class="{_ann_cls}">{annualized_pct:+.1f}%</span> annualized')
+
+    # v1.8.1 B2: YTD return next to the annualized %. basket is cumulative-%,
+    # so YTD = ((1 + final/100) / (1 + at_jan1/100) - 1) * 100 -- recovers the
+    # true compounding return for the current calendar year rather than the
+    # plain pp-delta on cumulative %. Skip rendering when the basket series
+    # doesn't reach this year (e.g. first build in a new year before any data).
+    _ytd_html = ""
+    if not basket.empty:
+        ytd_cutoff = pd.Timestamp(f"{basket.index[-1].year}-01-01")
+        ytd_sub = basket.loc[basket.index <= ytd_cutoff]
+        ytd_ref = float(ytd_sub.iloc[-1]) if not ytd_sub.empty else None
+        if ytd_ref is not None and (1 + ytd_ref / 100) != 0:
+            ytd_pct = ((1 + basket_final / 100) / (1 + ytd_ref / 100) - 1) * 100
+            _ytd_cls = "pos" if ytd_pct >= 0 else "neg"
+            _ytd_html = (f' <span class="hero-sub-sep">&middot;</span> '
+                         f'<span class="{_ytd_cls}">{ytd_pct:+.1f}%</span> YTD')
+
     hero_sub_html = (
-        f'{_total_html} total{_ann_html}'
+        f'{_total_html} total{_ann_html}{_ytd_html}'
         f' <span class="hero-sub-meta">&middot; TWR, renormalized as positions enter</span>'
     )
 
@@ -3245,6 +3400,42 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
         latest = vals[-1]
         latest_cls = "pos" if latest >= 0 else "neg"
         stroke_color = "var(--up)" if latest >= 0 else "var(--down)"
+        # v1.8 T3: split into same-sign runs at zero crossings so the chart is
+        # green where the basket led SPY and red where it trailed -- previously
+        # the entire line used a single color picked from the LATEST value, so a
+        # currently-leading line that had recently been deep red still read as
+        # "all green". Interpolate the exact x at the y=0 crossing so the color
+        # flip lands on the baseline, not the next data point.
+        def _build_segmented_polylines() -> str:
+            if not zero_in_range:
+                # No crossing — emit one polyline at the sign of the run.
+                color = "var(--up)" if vals[0] >= 0 else "var(--down)"
+                return (f'<polyline points="{points}" fill="none" stroke="{color}" '
+                        f'stroke-width="1.2" stroke-linejoin="round"/>')
+            segments: list[tuple[list[tuple[float, float]], str]] = []
+            cur_color = "var(--up)" if vals[0] >= 0 else "var(--down)"
+            cur_pts: list[tuple[float, float]] = [(_x(0), _y(vals[0]))]
+            for i in range(1, len(vals)):
+                prev_v, cur_v = vals[i - 1], vals[i]
+                x_prev, x_cur = _x(i - 1), _x(i)
+                if (prev_v >= 0) == (cur_v >= 0):
+                    cur_pts.append((x_cur, _y(cur_v)))
+                else:
+                    denom = abs(prev_v) + abs(cur_v)
+                    t = abs(prev_v) / denom if denom > 0 else 0.5
+                    x_cross = x_prev + t * (x_cur - x_prev)
+                    y_zero = _y(0.0)
+                    cur_pts.append((x_cross, y_zero))
+                    segments.append((cur_pts, cur_color))
+                    cur_color = "var(--up)" if cur_v >= 0 else "var(--down)"
+                    cur_pts = [(x_cross, y_zero), (x_cur, _y(cur_v))]
+            segments.append((cur_pts, cur_color))
+            return "".join(
+                f'<polyline points="{" ".join(f"{x:.1f},{y:.2f}" for x, y in pts)}" '
+                f'fill="none" stroke="{color}" stroke-width="1.2" stroke-linejoin="round"/>'
+                for pts, color in segments
+            )
+        polyline_svg = _build_segmented_polylines()
         # Embed dates + values for the hover layer. Comma-separated keeps the
         # attribute compact; JS parses on demand.
         dates_attr = ",".join(dates)
@@ -3261,12 +3452,65 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
             f'       data-dates="{dates_attr}" data-values="{values_attr}" '
             f'       data-baseline-y="{baseline_y if baseline_y is not None else -1}">'
             f'    {baseline_svg}'
-            f'    <polyline points="{points}" fill="none" stroke="{stroke_color}" '
-            f'              stroke-width="1.2" stroke-linejoin="round"/>'
+            f'    {polyline_svg}'
             f'    <line class="alpha-cross" x1="0" y1="0" x2="0" y2="{SH}" '
             f'          stroke="var(--text-dim)" stroke-width="0.5" opacity="0" pointer-events="none"/>'
             f'    <circle class="alpha-dot" cx="0" cy="0" r="2.2" '
             f'            fill="{stroke_color}" opacity="0" pointer-events="none"/>'
+            f'  </svg>'
+            f'</div>'
+        )
+
+    # v1.8 T5: drawdown sparkline inset. Sits directly beneath the alpha
+    # sparkline so the eye can compare "how often were we ahead of SPY?" with
+    # "how deep are our drawdowns?" at a glance. Same fixed-viewBox approach
+    # for crisp scaling. Single red polyline + light area fill underneath; the
+    # current DD pill mirrors the alpha latest pill on the right.
+    dd_series = compute_drawdown_series(basket)
+    if dd_series.empty or len(dd_series) < 5:
+        dd_sparkline_html = ""
+    else:
+        DW, DH = 240, 30
+        dpad_x, dpad_y = 2, 3
+        dd_vals = dd_series.tolist()
+        # All values <= 0. Y axis goes from 0 at the top to min(dd) at the bottom.
+        dd_min = min(dd_vals + [0.0])
+        dd_range = max(abs(dd_min), 1e-9)
+        nd = len(dd_vals)
+        def _dy(v: float) -> float:
+            # v in [dd_min, 0]; 0 -> top, dd_min -> bottom.
+            return dpad_y + (-v) / dd_range * (DH - 2 * dpad_y)
+        def _dx(i: int) -> float:
+            return dpad_x + i / max(nd - 1, 1) * (DW - 2 * dpad_x)
+        dd_dates = [d.strftime("%Y-%m-%d") for d in dd_series.index]
+        dd_points = " ".join(f"{_dx(i):.1f},{_dy(v):.2f}" for i, v in enumerate(dd_vals))
+        # Filled area: polyline + bottom-right + bottom-left corners.
+        floor_y = DH - dpad_y
+        dd_area = (f"M {_dx(0):.1f},{floor_y:.2f} "
+                   + " ".join(f"L {_dx(i):.1f},{_dy(v):.2f}" for i, v in enumerate(dd_vals))
+                   + f" L {_dx(nd - 1):.1f},{floor_y:.2f} Z")
+        dd_latest = dd_vals[-1]
+        dd_worst = min(dd_vals)
+        dd_dates_attr = ",".join(dd_dates)
+        dd_values_attr = ",".join(f"{v:.3f}" for v in dd_vals)
+        dd_sparkline_html = (
+            f'<div class="dd-sparkline-wrap" id="dd-sparkline-wrap">'
+            f'  <div class="dd-sparkline-head">'
+            f'    <span class="dd-sparkline-label">Drawdown from prior peak '
+            f'<span class="dd-sparkline-meta">&middot; worst {dd_worst:+.1f}%</span></span>'
+            f'    <span class="dd-sparkline-latest" id="dd-sparkline-latest" '
+            f'          data-default-text="{dd_latest:+.1f}%">{dd_latest:+.1f}%</span>'
+            f'  </div>'
+            f'  <svg class="dd-sparkline" id="dd-sparkline-svg" '
+            f'       viewBox="0 0 {DW} {DH}" preserveAspectRatio="none" '
+            f'       data-dates="{dd_dates_attr}" data-values="{dd_values_attr}">'
+            f'    <path d="{dd_area}" class="dd-sparkline-fill"/>'
+            f'    <polyline points="{dd_points}" fill="none" stroke="var(--down)" '
+            f'              stroke-width="1.2" stroke-linejoin="round"/>'
+            f'    <line class="dd-cross" x1="0" y1="0" x2="0" y2="{DH}" '
+            f'          stroke="var(--text-dim)" stroke-width="0.5" opacity="0" pointer-events="none"/>'
+            f'    <circle class="dd-dot" cx="0" cy="0" r="2.2" '
+            f'            fill="var(--down)" opacity="0" pointer-events="none"/>'
             f'  </svg>'
             f'</div>'
         )
@@ -3826,6 +4070,18 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
   .alpha-sparkline-label{{letter-spacing:0.04em}}
   .alpha-sparkline-latest{{font-weight:600;font-size:11.5px}}
   .alpha-sparkline{{width:100%;height:36px;display:block;cursor:crosshair}}
+  /* v1.8 T5: drawdown sparkline. Sits flush under the alpha sparkline so the
+     two share a single visual register; lighter borders so it doesn't feel
+     like a fully separate section. */
+  .dd-sparkline-wrap{{margin-top:8px;padding-top:6px;
+    border-top:1px dashed rgba(255,255,255,0.06)}}
+  .dd-sparkline-head{{display:flex;justify-content:space-between;align-items:baseline;
+    font-family:var(--font-mono);font-size:11px;color:var(--text-dim);margin-bottom:3px}}
+  .dd-sparkline-label{{letter-spacing:0.04em}}
+  .dd-sparkline-meta{{margin-left:6px;color:var(--text-dim);opacity:0.7}}
+  .dd-sparkline-latest{{font-weight:600;font-size:11.5px;color:var(--down)}}
+  .dd-sparkline{{width:100%;height:30px;display:block;cursor:crosshair}}
+  .dd-sparkline-fill{{fill:rgba(248,113,113,0.14)}}
   .hero-tip{{
     position:absolute;background:var(--ink);border:1px solid var(--accent);border-radius:6px;
     padding:8px 12px;font-family:var(--font-mono);font-size:11px;color:var(--text);
@@ -4726,6 +4982,7 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
       <div class="hero-tip" id="hero-tip" hidden></div>
     </div>
     {alpha_sparkline_html}
+    {dd_sparkline_html}
   </div>
 
   <div class="stats" id="stats-grid"
@@ -4809,7 +5066,7 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
       <div class="modal-news-list"></div>
     </div>
     <div class="modal-chart-wrap">
-      <svg class="modal-chart" preserveAspectRatio="none"></svg>
+      <svg class="modal-chart" viewBox="0 0 {MODAL_VB_W} {MODAL_VB_H}" preserveAspectRatio="none"></svg>
       <div class="modal-tip" hidden></div>
     </div>
   </div>
@@ -4911,6 +5168,23 @@ function renderHeroChart() {{
     xTicks.push({{idx, x: basket.xs[idx], date: basket.dates[idx]}});
   }}
 
+  // Align SPY's x grid to basket's so dates line up exactly. buildPoints
+  // spreads each series across innerW based on its OWN length, so a 84-point
+  // SPY ended ~1% offset from an 85-point basket even though their dates
+  // matched 1:1. Re-mapping SPY's xs to basket's positions at matching dates
+  // fixes that — both the rendered SPY polyline and the vs-SPY area edge now
+  // sit on a single consistent x grid.
+  // v1.8 T2: this remap must happen BEFORE building spyPL below, otherwise the
+  // SPY polyline string captures the original xs while the vs-SPY polygons
+  // (built later) use the remapped xs, producing a visible gap between them.
+  if (spy.dates && spy.dates.length && spy.dates.length <= basket.dates.length) {{
+    const remapped = spy.dates.map(d => {{
+      const idx = basket.dates.indexOf(d);
+      return idx >= 0 ? basket.xs[idx] : NaN;
+    }});
+    if (remapped.every(v => !Number.isNaN(v))) spy.xs = remapped;
+  }}
+
   const basketPL = basket.xs.map((x, i) => `${{x.toFixed(1)}},${{basket.ys[i].toFixed(1)}}`).join(' ');
   const spyPL = spy.xs.map((x, i) => `${{x.toFixed(1)}},${{spy.ys[i].toFixed(1)}}`).join(' ');
   const zeroY = padT + (1 - (0 - vmin)/span) * innerH;
@@ -4927,30 +5201,22 @@ function renderHeroChart() {{
   // basket is above SPY and red when below. Crossovers are split exactly via
   // linear interpolation on the difference so the segment edges land on the
   // true crossing point, not the nearest weekly tick.
-  // Align SPY's x grid to basket's so dates line up exactly. buildPoints
-  // spreads each series across innerW based on its OWN length, so a 84-point
-  // SPY ended ~1% offset from an 85-point basket even though their dates
-  // matched 1:1. Re-mapping SPY's xs to basket's positions at matching dates
-  // fixes that — both the rendered SPY polyline and the vs-SPY area edge now
-  // sit on a single consistent x grid.
-  if (spy.dates && spy.dates.length && spy.dates.length <= basket.dates.length) {{
-    const remapped = spy.dates.map(d => {{
-      const idx = basket.dates.indexOf(d);
-      return idx >= 0 ? basket.xs[idx] : NaN;
-    }});
-    if (remapped.every(v => !Number.isNaN(v))) spy.xs = remapped;
-  }}
 
   // Vs-SPY area segments: between basket and SPY lines, painted green when
   // basket > SPY and red when below. Iterate over the overlapping date range
   // (SPY can start a week later than basket since the benchmark series begins
   // from first-trading-day-after-first-purchase).
+  // v1.8 T2 fix: pair basket and SPY by DATE (not by index). Previously the
+  // loop paired basket.xs[startInBasket+k] with spy.ys[k], which mis-aligned
+  // when basket had middle weeks SPY didn't. With the remap moved above
+  // spyPL, spy.xs and basket.xs share one grid for matching dates, so the
+  // polygon bottom edge follows the SPY polyline exactly.
   const vsSpySegments = [];
-  const startInBasket = spy.dates && spy.dates.length ? basket.dates.indexOf(spy.dates[0]) : -1;
-  if (startInBasket >= 0) {{
-    const m = Math.min(basket.vals.length - startInBasket, spy.vals.length);
-    for (let k = 0; k < m - 1; k++) {{
-      const bi = startInBasket + k, bi2 = startInBasket + k + 1;
+  if (spy.dates && spy.dates.length >= 2) {{
+    const basketIdxAt = spy.dates.map(d => basket.dates.indexOf(d));
+    for (let k = 0; k < spy.dates.length - 1; k++) {{
+      const bi = basketIdxAt[k], bi2 = basketIdxAt[k + 1];
+      if (bi < 0 || bi2 < 0) continue;
       const x1 = basket.xs[bi], x2 = basket.xs[bi2];
       const by1 = basket.ys[bi], by2 = basket.ys[bi2];
       const sy1 = spy.ys[k], sy2 = spy.ys[k + 1];
@@ -4975,6 +5241,46 @@ function renderHeroChart() {{
           pts: [[crossX, crossY], [x2, by2], [x2, sy2]],
           color: d2 >= 0 ? greenFill : redFill,
         }});
+      }}
+    }}
+    // v1.8.1 B6: basket can extend past SPY's last date (weekend builds where
+    // European tickers traded after SPY's Friday close, or holidays). Without
+    // a forward-fill the shade has a visible gap at the right edge. Extend a
+    // final segment from SPY's last paired basket-index up to basket's end,
+    // holding SPY's last value flat. The dashed SPY polyline itself stays
+    // visually honest (stops at its real last data point) -- only the
+    // comparison shading is forward-filled.
+    const lastSpyK = spy.dates.length - 1;
+    const lastSpyBi = basketIdxAt[lastSpyK];
+    if (lastSpyBi >= 0 && lastSpyBi < basket.xs.length - 1) {{
+      const sxL = basket.xs[lastSpyBi];
+      const syL = spy.ys[lastSpyK];
+      const spyTailVal = spy.vals[lastSpyK];
+      for (let bi = lastSpyBi; bi < basket.xs.length - 1; bi++) {{
+        const x1 = basket.xs[bi], x2 = basket.xs[bi + 1];
+        const by1 = basket.ys[bi], by2 = basket.ys[bi + 1];
+        const d1 = basket.vals[bi] - spyTailVal;
+        const d2 = basket.vals[bi + 1] - spyTailVal;
+        if (d1 === 0 && d2 === 0) continue;
+        if ((d1 >= 0) === (d2 >= 0)) {{
+          const color = (d1 + d2) >= 0 ? greenFill : redFill;
+          vsSpySegments.push({{
+            pts: [[x1, by1], [x2, by2], [x2, syL], [x1, syL]],
+            color,
+          }});
+        }} else {{
+          const t = d1 / (d1 - d2);
+          const crossX = x1 + t * (x2 - x1);
+          const crossY = by1 + t * (by2 - by1);
+          vsSpySegments.push({{
+            pts: [[x1, by1], [crossX, crossY], [x1, syL]],
+            color: d1 >= 0 ? greenFill : redFill,
+          }});
+          vsSpySegments.push({{
+            pts: [[crossX, crossY], [x2, by2], [x2, syL]],
+            color: d2 >= 0 ? greenFill : redFill,
+          }});
+        }}
       }}
     }}
   }}
@@ -5224,17 +5530,24 @@ document.querySelectorAll('.panel').forEach(panel => {{
   panel.querySelectorAll('.chip').forEach(chip => {{
     chip.addEventListener('click', (e) => {{
       e.stopPropagation();
-      // Only deactivate siblings in the SAME chip row — preserves status filter
-      // when toggling sectors and vice versa.
       const group = chip.closest('.chips');
       group.querySelectorAll('.chip').forEach(c => c.classList.remove('active'));
       chip.classList.add('active');
       applyFilter(panel);
+      // v1.8.1 B5: reset scroll to top when filter changes -- otherwise the
+      // user is mid-list in "Open" and switching to "Closed" leaves them at
+      // an arbitrary scroll position in a now-different dataset.
+      const scrollWrap = panel.querySelector('.table-scroll');
+      if (scrollWrap) scrollWrap.scrollTop = 0;
     }});
   }});
   const s = panel.querySelector('.search');
   if (s) {{
-    s.addEventListener('input', () => applyFilter(panel));
+    s.addEventListener('input', () => {{
+      applyFilter(panel);
+      const scrollWrap = panel.querySelector('.table-scroll');
+      if (scrollWrap) scrollWrap.scrollTop = 0;
+    }});
     s.addEventListener('click', (e) => e.stopPropagation());
   }}
 }});
@@ -5272,7 +5585,17 @@ function openModal(ticker) {{
   const pct = modal.querySelector('.modal-pct');
   pct.textContent = fmtPct(d.total, true);
   pct.className = 'modal-pct ' + (d.total >= 0 ? 'pos' : 'neg');
-  const sinceLabel = (d.status === 'watch') ? 'last 12 months' : ('since ' + fmtDate(d.baseline_date));
+  // v1.8.1 B4: closed positions show the hold window, not "since [buy]".
+  // The % is buy-avg→sell-avg, so the label should reflect that range so
+  // users don't read it as a current-date return.
+  let sinceLabel;
+  if (d.status === 'watch') {{
+    sinceLabel = 'last 12 months';
+  }} else if (d.status === 'closed' && d.last_action_date) {{
+    sinceLabel = 'between ' + fmtDate(d.baseline_date) + ' and ' + fmtDate(d.last_action_date);
+  }} else {{
+    sinceLabel = 'since ' + fmtDate(d.baseline_date);
+  }}
   modal.querySelector('.modal-since').textContent = sinceLabel;
   // Signal line
   const sigEl = modal.querySelector('#modal-signal');
@@ -5396,6 +5719,10 @@ function openModal(ticker) {{
   }}
   modal.removeAttribute('hidden');
   document.body.classList.add('modal-open');
+  // v1.8.1 B5: reset scroll so each new ticker opens at the top, not at the
+  // previous ticker's last scroll position.
+  const mc = modal.querySelector('.modal-card');
+  if (mc) mc.scrollTop = 0;
   requestAnimationFrame(() => renderBigChart(ticker));
 }}
 
@@ -5405,74 +5732,74 @@ function closeModal() {{
   modalTip.setAttribute('hidden', '');
 }}
 
+// v1.8 T1: viewBox coordinate space — server pre-renders the polyline + tick
+// geometry into `d.chart`, we just draw it. preserveAspectRatio="none" makes
+// the browser scale the viewBox to the modal's actual pixel size, so no
+// per-open recalc + no resize handler are needed.
+const MODAL_VB_W = {MODAL_VB_W};
+const MODAL_VB_H = {MODAL_VB_H};
+const MODAL_VB_PAD_L = {MODAL_VB_PAD_L};
+const MODAL_VB_PAD_T = {MODAL_VB_PAD_T};
+const MODAL_VB_INNER_W = MODAL_VB_W - MODAL_VB_PAD_L - {MODAL_VB_PAD_R};
+const MODAL_VB_INNER_H = MODAL_VB_H - MODAL_VB_PAD_T - {MODAL_VB_PAD_B};
+
+// T1: derive per-point viewBox coords from `n` + index. Mirrors _modal_polyline_d.
+function _modalX(i, n) {{
+  if (n <= 1) return MODAL_VB_PAD_L + MODAL_VB_INNER_W / 2;
+  return MODAL_VB_PAD_L + (i / (n - 1)) * MODAL_VB_INNER_W;
+}}
+function _modalY(v, vmin, vmax) {{
+  const span = Math.max(vmax - vmin, 1e-9);
+  return MODAL_VB_PAD_T + (1 - (v - vmin) / span) * MODAL_VB_INNER_H;
+}}
+
 function renderBigChart(ticker) {{
   currentTicker = ticker;
   const d = DATA[ticker];
-  const rect = modalChartWrap.getBoundingClientRect();
-  const W = Math.max(rect.width - 32, 300);
-  const H = Math.max(rect.height - 32, 200);
-  modalSvg.setAttribute('viewBox', `0 0 ${{W}} ${{H}}`);
-  modalSvg.setAttribute('width', W);
-  modalSvg.setAttribute('height', H);
-
-  const prices = d.prices;
+  if (!d || !d.chart || !d.chart.points) {{
+    modalSvg.innerHTML = '';
+    chartPoints = null;
+    return;
+  }}
+  const chart = d.chart;
+  const rebased = d.rebased || d.prices.map(p => (p / d.baseline - 1) * 100);
   const dates = d.dates;
-  const baseline = d.baseline;
-  const rebased = prices.map(p => (p / baseline - 1) * 100);
-
-  const vmin = Math.min(0, ...rebased);
-  const vmax = Math.max(0, ...rebased);
-  const span = (vmax - vmin) || 1;
-  const padL = 52, padR = 14, padT = 14, padB = 34;
-  const innerW = W - padL - padR;
-  const innerH = H - padT - padB;
-  const n = rebased.length;
-
-  const xs = rebased.map((_, i) => padL + (n === 1 ? innerW/2 : (i/(n-1)) * innerW));
-  const ys = rebased.map(v => padT + (1 - (v - vmin)/span) * innerH);
-  const zeroY = padT + (1 - (0 - vmin)/span) * innerH;
+  const prices = d.prices;
+  const n = chart.n;
+  const xs = new Array(n);
+  const ys = new Array(n);
+  for (let i = 0; i < n; i++) {{
+    xs[i] = _modalX(i, n);
+    ys[i] = _modalY(rebased[i], chart.vmin, chart.vmax);
+  }}
   const isUp = d.total >= 0;
   const color = isUp ? '#34d399' : '#f87171';
   const gradId = isUp ? 'grad-up-lg' : 'grad-down-lg';
+  const labelY = MODAL_VB_PAD_T + MODAL_VB_INNER_H;
+  // Area path = polyline + corner anchors. Cheap to rebuild from `chart.points`.
+  const firstX = xs[0], lastX = xs[n - 1];
+  const areaD = `M ${{firstX.toFixed(1)}},${{labelY.toFixed(1)}} L ${{chart.points.replaceAll(' ', ' L ')}} L ${{lastX.toFixed(1)}},${{labelY.toFixed(1)}} Z`;
 
-  const yTicks = [];
-  for (let i = 0; i <= 5; i++) {{
-    const v = vmin + (i/5) * span;
-    const y = padT + (1 - (v - vmin)/span) * innerH;
-    yTicks.push({{v, y}});
-  }}
-  const xTickCount = Math.min(5, n);
-  const xTicks = [];
-  for (let i = 0; i < xTickCount; i++) {{
-    const idx = Math.round((i/(xTickCount-1)) * (n-1));
-    xTicks.push({{idx, x: xs[idx], date: dates[idx]}});
-  }}
-
-  const pl = xs.map((x, i) => `${{x.toFixed(1)}},${{ys[i].toFixed(1)}}`).join(' ');
-  const areaD = `M ${{xs[0].toFixed(1)}},${{(padT + innerH).toFixed(1)}} ` +
-                xs.map((x, i) => `L ${{x.toFixed(1)}},${{ys[i].toFixed(1)}}`).join(' ') +
-                ` L ${{xs[n-1].toFixed(1)}},${{(padT + innerH).toFixed(1)}} Z`;
-
+  // Build SVG from precomputed geometry. Font sizes scale with the viewBox so
+  // they look tiny on widescreen unless we bump them — empirically a 1000x600
+  // box rendered at ~700x340 px asks for ~16-18 unit fonts to look right.
   let html = '';
-  html += yTicks.map(t =>
-    `<line x1="${{padL}}" y1="${{t.y.toFixed(1)}}" x2="${{padL + innerW}}" y2="${{t.y.toFixed(1)}}" stroke="rgba(255,255,255,0.04)" stroke-width="1"/>` +
-    `<text x="${{padL - 8}}" y="${{(t.y + 3.5).toFixed(1)}}" fill="#6b7185" font-size="10" font-family="Geist Mono, monospace" text-anchor="end">${{t.v >= 0 ? '+' : ''}}${{t.v.toFixed(0)}}%</text>`
+  html += chart.y_ticks.map(t =>
+    `<line x1="${{MODAL_VB_PAD_L}}" y1="${{t.y.toFixed(1)}}" x2="${{(MODAL_VB_PAD_L + MODAL_VB_INNER_W).toFixed(1)}}" y2="${{t.y.toFixed(1)}}" stroke="rgba(255,255,255,0.04)" stroke-width="1"/>` +
+    `<text x="${{(MODAL_VB_PAD_L - 8).toFixed(1)}}" y="${{(t.y + 6).toFixed(1)}}" fill="#6b7185" font-size="16" font-family="Geist Mono, monospace" text-anchor="end">${{t.v >= 0 ? '+' : ''}}${{t.v.toFixed(0)}}%</text>`
   ).join('');
-  html += `<line x1="${{padL}}" y1="${{zeroY.toFixed(1)}}" x2="${{padL + innerW}}" y2="${{zeroY.toFixed(1)}}" stroke="rgba(255,255,255,0.18)" stroke-width="0.8" stroke-dasharray="3 3"/>`;
-  html += xTicks.map(t =>
-    `<text x="${{t.x.toFixed(1)}}" y="${{(padT + innerH + 18).toFixed(1)}}" fill="#6b7185" font-size="10" font-family="Geist Mono, monospace" text-anchor="middle">${{fmtDate(t.date)}}</text>`
-  ).join('');
+  html += `<line x1="${{MODAL_VB_PAD_L}}" y1="${{chart.zero_y.toFixed(1)}}" x2="${{(MODAL_VB_PAD_L + MODAL_VB_INNER_W).toFixed(1)}}" y2="${{chart.zero_y.toFixed(1)}}" stroke="rgba(255,255,255,0.18)" stroke-width="0.8" stroke-dasharray="3 3"/>`;
+  html += chart.x_tick_idx.map(idx => {{
+    const x = _modalX(idx, n);
+    return `<text x="${{x.toFixed(1)}}" y="${{(labelY + 32).toFixed(1)}}" fill="#6b7185" font-size="16" font-family="Geist Mono, monospace" text-anchor="middle">${{fmtDate(dates[idx])}}</text>`;
+  }}).join('');
   html += `<path d="${{areaD}}" fill="url(#${{gradId}})"/>`;
-  html += `<polyline points="${{pl}}" fill="none" stroke="${{color}}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
-  html += `<line class="crosshair" x1="0" y1="${{padT}}" x2="0" y2="${{padT + innerH}}" stroke="${{color}}" stroke-width="0.8" stroke-dasharray="2 3" opacity="0"/>`;
-  html += `<circle class="dot" cx="0" cy="0" r="4" fill="${{color}}" stroke="${{color}}" opacity="0"/>`;
-
-  modalSvg.innerHTML = html;
-  chartPoints = {{xs, ys, dates, prices, rebased, padL, padT, innerW, innerH, vmin, span, baseline, color}};
+  html += `<polyline points="${{chart.points}}" fill="none" stroke="${{color}}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
+  html += `<line class="crosshair" x1="0" y1="${{MODAL_VB_PAD_T}}" x2="0" y2="${{labelY}}" stroke="${{color}}" stroke-width="0.8" stroke-dasharray="2 3" opacity="0"/>`;
+  html += `<circle class="dot" cx="0" cy="0" r="6" fill="${{color}}" stroke="${{color}}" opacity="0"/>`;
 
   // Transaction markers (buy/sell dots) — only if the per-stock transactions are available
   if (d.transactions && d.transactions.length > 0) {{
-    let markerHtml = '';
     for (const t of d.transactions) {{
       const txnTime = new Date(t.date).getTime();
       let bestIdx = 0, bestDiff = Infinity;
@@ -5484,13 +5811,15 @@ function renderBigChart(ticker) {{
       const isBuy = t.action === 'BUY';
       const mColor = isBuy ? '#34d399' : '#f87171';
       const label = isBuy ? 'B' : 'S';
-      const labelY = padT + innerH - 5;
-      markerHtml += `<line x1="${{mx.toFixed(1)}}" y1="${{padT.toFixed(1)}}" x2="${{mx.toFixed(1)}}" y2="${{(padT + innerH).toFixed(1)}}" stroke="${{mColor}}" stroke-width="0.7" stroke-dasharray="3 2" opacity="0.45"/>`;
-      markerHtml += `<circle cx="${{mx.toFixed(1)}}" cy="${{labelY.toFixed(1)}}" r="6" fill="${{mColor}}" stroke="#0b0e17" stroke-width="0.5"/>`;
-      markerHtml += `<text x="${{mx.toFixed(1)}}" y="${{(labelY + 3).toFixed(1)}}" fill="#0b0e17" font-size="8.5" font-weight="700" text-anchor="middle" font-family="Geist Mono, monospace">${{label}}</text>`;
+      const ly = labelY - 8;
+      html += `<line x1="${{mx.toFixed(1)}}" y1="${{MODAL_VB_PAD_T}}" x2="${{mx.toFixed(1)}}" y2="${{labelY.toFixed(1)}}" stroke="${{mColor}}" stroke-width="0.7" stroke-dasharray="3 2" opacity="0.45"/>`;
+      html += `<circle cx="${{mx.toFixed(1)}}" cy="${{ly.toFixed(1)}}" r="9" fill="${{mColor}}" stroke="#0b0e17" stroke-width="0.5"/>`;
+      html += `<text x="${{mx.toFixed(1)}}" y="${{(ly + 5).toFixed(1)}}" fill="#0b0e17" font-size="14" font-weight="700" text-anchor="middle" font-family="Geist Mono, monospace">${{label}}</text>`;
     }}
-    modalSvg.insertAdjacentHTML('beforeend', markerHtml);
   }}
+
+  modalSvg.innerHTML = html;
+  chartPoints = {{xs, ys, dates, prices, rebased, color}};
 }}
 
 modalSvg.addEventListener('mousemove', (e) => {{
@@ -5540,7 +5869,8 @@ document.addEventListener('keydown', (e) => {{
     closeInfoModal();
   }}
 }});
-window.addEventListener('resize', () => {{ if (currentTicker && !modal.hasAttribute('hidden')) renderBigChart(currentTicker); }});
+// T1: resize handler removed — viewBox="0 0 1000 600" + preserveAspectRatio="none"
+// makes the SVG scale natively. No re-render needed on window resize.
 
 document.querySelectorAll('#ret-table tbody tr').forEach(row => {{
   row.addEventListener('click', () => openModal(row.dataset.ticker));
@@ -5592,6 +5922,10 @@ function openInfoModal(title, sub, contentHtml) {{
   infoModalBody.innerHTML = contentHtml || '';
   infoModal.removeAttribute('hidden');
   document.body.classList.add('modal-open');
+  // v1.8.1 B5: reset scroll to top on new content so switching from one
+  // drill-down to another always starts at the title, not mid-list.
+  const ic = infoModal.querySelector('.modal-card');
+  if (ic) ic.scrollTop = 0;
   // Wire any ticker-clickable spans inside the new content -- they were
   // injected after the initial DOMContentLoaded handlers ran, so attach now.
   // Use _safeOpenTicker so universe-only tickers get a sensible fallback
@@ -6445,19 +6779,21 @@ def main(demo: bool = False) -> None:
     unusual_vol = []
     if not quant_metrics.empty and not prices.empty and not returns.empty and len(prices.index) >= 2:
         open_tkrs = set(returns[returns.status == "open"].index.tolist())
-        last_idx = prices.index[-1]
-        prev_idx = prices.index[-2]
         for tkr in quant_metrics.index:
             if tkr not in open_tkrs or tkr not in prices.columns:
                 continue
             vr = quant_metrics.loc[tkr, "vol_ratio"]
             if pd.isna(vr) or float(vr) <= 2.0:
                 continue
-            try:
-                last_px = float(prices.at[last_idx, tkr])
-                prev_px = float(prices.at[prev_idx, tkr])
-            except (KeyError, ValueError, TypeError):
+            # v1.8.1 B1: use each ticker's last 2 VALID prices instead of the
+            # global index endpoints. When the build runs on a weekend/holiday
+            # (latest_date = Sunday today) the latest row is NaN for US tickers
+            # so the global-endpoint version silently dropped every match.
+            s = prices[tkr].dropna()
+            if len(s) < 2:
                 continue
+            last_px = float(s.iloc[-1])
+            prev_px = float(s.iloc[-2])
             if not (last_px > 0 and prev_px > 0):
                 continue
             daily_pct = (last_px / prev_px - 1) * 100

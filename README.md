@@ -232,10 +232,17 @@ Hovering shows a tooltip with all three values at the hovered week. **Clicking
 a weekly point** opens an info modal listing that week's top up / down movers
 across the basket.
 
-Beneath the main chart sits a **30-day rolling alpha sparkline** — basket
-excess return vs SPY over the trailing 30 days, in percentage points. Color
-flips with sign at the latest value; hovering shows the date + value at the
-nearest point.
+Beneath the main chart sit two inline sparklines:
+
+- **30-day rolling alpha** — basket excess return vs SPY over the trailing
+  30 days, in percentage points. The line splits at every zero crossing —
+  green where the basket led SPY, red where it trailed. The color flip
+  lands exactly on the baseline (linearly interpolated), not at the next
+  data point. Hovering shows the date + value at the nearest point.
+- **Drawdown from prior peak** — a thin red line plotting peak-to-trough
+  drawdown at each date over the full basket history. The header pill
+  shows the current drawdown alongside the worst seen (e.g. `worst -15.6%`)
+  so the eye can answer "how close are we to the prior trough?" at a glance.
 
 ### Pre-hero context: unusual volume chips
 
@@ -626,7 +633,9 @@ Full deploy instructions: [worker/README.md](worker/README.md).
 4. **(Optional) Deploy the Worker** for live news per the
    [worker/README.md](worker/README.md).
 5. **Edit `universe.csv`** to taste — it's just a list of tickers to compare
-   industry performance against. The default 150 are US large/mid/small caps.
+   industry performance against. The default is the full S&P 500 (503
+   tickers across 112 industries); shrink it to a smaller hand-picked
+   list if you want a faster monthly refresh.
 6. **First build**: trigger Actions → Scheduled rebuild → Run workflow.
    The first run takes ~2 minutes because all caches are cold.
 
@@ -642,6 +651,95 @@ python build.py
 
 ---
 
+## Switching data sources if yfinance breaks
+
+`yfinance` is an unofficial Yahoo Finance scraper. Yahoo occasionally
+tweaks its internal API; when that happens, `pip install -U yfinance`
+fixes it within a day or two of the community patch. But if you want
+to harden the build against that risk (or just prefer not to depend on
+a scraping library at all), here are two free stacks that cover what
+this project actually needs.
+
+**What `yfinance` provides today, and which cache it fills:**
+
+| Cache | Field | Used by |
+|---|---|---|
+| `prices_cache.parquet` | Daily Close in native ccy | hero chart, sparklines |
+| `ohlcv_cache.parquet`  | OHLCV (volume + range)   | quant signals, unusual-vol |
+| `fx_cache.parquet`     | GBP/USD, EUR/GBP etc.    | currency normalisation |
+| `benchmark_cache.parquet` | SPY closes            | hero chart benchmark |
+| `meta.csv`             | name, sector, industry   | every section that labels a ticker |
+| `analyst_cache.parquet` | target, recommendation, market cap | analyst panel, industry outlook |
+| `universe_outlook_cache.parquet` | 12-mo return + analyst for the universe | industry outlook |
+
+### Option A: Stooq (prices + FX) via `pandas-datareader`
+
+Stooq is a Polish data aggregator that mirrors global EOD prices over
+plain HTTP. No API key, no rate limits, multi-year history,
+multi-currency, multi-exchange. Ideal for the bulk price + FX layer.
+
+```python
+import pandas_datareader.data as pdr
+prices = pdr.DataReader("AAPL.US", "stooq", start, end)   # daily OHLCV
+fx     = pdr.DataReader("GBPUSD",  "stooq", start, end)
+```
+
+- **Covers**: `prices_cache.parquet`, `ohlcv_cache.parquet`,
+  `fx_cache.parquet`, `benchmark_cache.parquet` (use `SPY.US`),
+  the 12-mo return half of `universe_outlook_cache.parquet`.
+- **Doesn't cover**: `meta.csv`, `analyst_cache.parquet`, or the
+  analyst half of the universe outlook.
+- **Ticker format**: requires suffixes — `.US`, `.UK`, `.DE`,
+  `.FR`, `.NL`. London `.L` &rarr; `.UK`, Paris `.PA` &rarr; `.FR`,
+  Amsterdam `.AS` &rarr; `.NL`. A one-time mapping in the build covers it.
+
+### Option B: Financial Modeling Prep (FMP) for the metadata + analyst layer
+
+FMP's free tier is **250 API calls/day** with a free key. It has the
+exact endpoints needed for the metadata + analyst caches that Stooq
+can't fill.
+
+```python
+import requests, os
+key = os.environ["FMP_KEY"]
+r = requests.get(f"https://financialmodelingprep.com/api/v3/profile/AAPL?apikey={key}")
+# returns name, sector, industry, mktCap in one call
+r = requests.get(f"https://financialmodelingprep.com/api/v3/analyst-estimates/AAPL?apikey={key}")
+```
+
+- **Covers**: `meta.csv`, `analyst_cache.parquet`, market cap
+  (for the `cap_tier` field).
+- **Quota fit**: held basket weekly refresh (~187 calls) sits at
+  ~27 calls/day. The monthly 500-ticker universe refresh fills two
+  consecutive days of quota; the 30-day cache absorbs it.
+- **Coverage**: US-listed names are full; London/Euro coverage is
+  patchier than Yahoo, so a few non-US holdings may need a manual
+  metadata override in `meta.csv` (already done today for tickers
+  yfinance returns nothing for).
+
+### Hybrid stack recommendation
+
+The cleanest swap is **Stooq + FMP together** &mdash; Stooq for the
+high-volume daily price refresh (no rate limit means you can fetch
+the universe daily if you want), FMP for the lower-volume monthly
+metadata + analyst lookups. Migration would mean two new fetchers in
+`build.py` behind a feature flag, with `yfinance` kept as the default
+until the swap is verified end-to-end on a fork.
+
+### What to skip
+
+- **Alpha Vantage** — was usable when the free tier was 500/day, but
+  it's now 25/day. Not viable for this volume.
+- **Twelve Data** — 800/day is okay for prices but analyst data is
+  paywalled, so you'd only use it for prices where Stooq is better.
+- **Polygon.io free** — 5 calls/min is too slow for a 500-ticker
+  monthly refresh.
+- **Yahoo scrapers** (`yahooquery`, `stockdex`) — same upstream
+  source as yfinance, so they break on the same Yahoo tweaks. Not
+  real diversification.
+
+---
+
 ## Known limitations
 
 1. **Share-quantity approximation.** Trading 212-style exports don't include
@@ -650,10 +748,10 @@ python build.py
    sells over 4 cycles overstates the actual cost basis). The author has
    accepted this — the *transactional-recency* rule for open/closed
    classification is independent of the share math and is robust.
-2. **Industry outlook is bounded by `universe.csv`.** Truly broad coverage
-   (Russell 2000, global indices) would require either a paid screener feed
-   or hardcoding thousands of tickers. The current 150-name universe is a
-   pragmatic compromise.
+2. **Industry outlook is bounded by `universe.csv`.** The default is the
+   full S&P 500 (503 tickers). Truly broad coverage (Russell 2000, global
+   indices) would require either a paid screener feed or hardcoding
+   thousands of tickers.
 3. **Worker is unmanaged for forks.** Forks inherit the source code but get
    their own `workers.dev` URL after running `wrangler deploy`. The
    `NEWS_WORKER_URL` constant in `build.py` must be updated by each fork
@@ -688,7 +786,7 @@ Worker is deployed) and prices/analyst data fresh to within the last day.
 - **Python 3.11** — build pipeline (`pandas`, `yfinance`, `feedparser`,
   `pyarrow`, `openpyxl`).
 - **Vanilla HTML / CSS / JS** in the rendered page. No frameworks, no
-  bundler, no transpilation. The whole page is a single ~1.5 MB file.
+  bundler, no transpilation. The whole page is a single ~2.2 MB file.
 - **[SortableJS](https://sortablejs.github.io/Sortable/)** for the
   drag-to-reorder module layout. Vendored into `docs/vendor/` so there's
   no CDN dependency.
@@ -723,32 +821,25 @@ This project would not exist without:
 
 ## Roadmap / open ideas
 
-Deferred from v1.7 (planned for v1.8):
+Deferred from v1.8 (candidate for v1.9):
 
-- **Precomputed modal chart polylines** — currently the modal chart's
-  polyline coordinates are computed in JS at first open (~150-300 ms);
-  pre-computing at build time and shipping them in the payload would
-  drop first-modal-open jank to imperceptible.
-- **Hero chart SPY-shading polygon alignment** — the green/red area
-  between basket and SPY can mis-align with the SPY polyline by ~1 px
-  near crossover points; the fix likely involves z-ordering the SPY line
-  on top of the shading polygon.
+- **Drawdown sparkline hover** — the inset currently has no
+  date/value tooltip on mouseover; the alpha sparkline above it does.
+- **Per-segment color on the modal chart** — the per-ticker modal
+  polyline still uses a single colour matching the position's total
+  return sign; same zero-crossing split as the alpha sparkline would
+  make below-baseline periods read at a glance.
 
 Other ideas:
 
-- **Broader universe** for industry outlook (S&P 500 constituents) — adds
-  ~5 minutes to the monthly refresh fetch.
-- **Drawdown chart** — small inset visualisation of the drawdown series
-  over time, not just the single max number.
 - **Currency exposure breakdown** — pie chart of cost basis by FX currency
   to make currency risk explicit.
 - **Dividend tracking** — Trading 212 exports include dividend rows; could
   surface as annual income and yield estimate.
-- **Lazy-loaded modal data** — the 1.5 MB page weight is dominated by the
+- **Lazy-loaded modal data** — the ~2.2 MB page weight is dominated by the
   per-ticker JSON; lazy-load on modal open would cut first paint.
-- **Per-segment color** for the rolling-alpha sparkline (currently uses
-  a single color matching the latest value's sign; segments below zero
-  could be painted red regardless of latest).
+- **Sector heatmap** — alternative to the industry-outlook list, showing
+  all 11 GICS sectors at a glance with 12-mo return colour-mapped.
 
 Contributions and forks welcome — see [LICENSE](LICENSE) for terms.
 
