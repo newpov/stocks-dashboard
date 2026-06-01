@@ -14,6 +14,85 @@ than a barely-working prototype.
 
 ---
 
+## v1.7 — Customizable stats + drill-down modals · 31 May 2026
+
+The hero stats become user-pickable, and most numbers on the page now
+drill into a focused info modal showing the breakdown.
+
+### Added
+- **Configurable hero stats**: pick 5 of 10 stats via edit-mode (drag to
+  reorder, checkbox to toggle, persisted to `localStorage`). Default
+  selection = annualized return, Sharpe, win rate, win/loss ratio, avg
+  analyst upside; the rest (total return, max drawdown, top contributor,
+  top detractor, open positions count) are opt-in.
+- **Rating-moves panel**: diff of this build's analyst cache vs last
+  build's surfaces target-price changes &geq; 5% and recommendation
+  shifts since the last refresh. Stored as `data/prior_analyst_cache.parquet`,
+  refreshed automatically.
+- **Unusual-volume chips**: pinned amber pills near the hero subtitle
+  for open positions trading on >2&times; their 63-day average volume
+  with a &gt;1% day move. Up to 3 chips; click any to drill into the
+  ticker modal.
+- **Click-to-expand drill-down modals** (T11&ndash;T15) via a new shared
+  info-modal element layered under the existing ticker modal:
+  - Industry-outlook cards &rarr; modal listing every ticker in that
+    industry from the universe, sorted by 12-mo return.
+  - Industry-attribution rows &rarr; modal listing every open position
+    in that industry with weight, return, contribution.
+  - Diversification "Best diversifiers" + "Most correlated pairs" ticker
+    symbols &rarr; ticker modal.
+  - Histogram-bar columns &rarr; modal listing every pair whose
+    correlation falls in the clicked bucket.
+  - Hero-chart weekly clicks &rarr; modal with that week's top 5 up &amp;
+    down movers across held tickers.
+- **Stacked modal semantics**: clicking a ticker inside an info modal
+  opens the ticker modal *on top*; Escape closes the topmost first,
+  then the underlying info modal on the next press.
+- **30-day alpha sparkline hover**: shows date + value at the nearest
+  point on mouse-move; crosshair + dot mark the position.
+- **Mobile detractor cards**: below 700px, the 7-column "Exit strategy"
+  table collapses to a 3-card stack with just the actionable tags
+  (signal &middot; analyst &middot; suggested action); tap opens the
+  ticker modal for full numbers.
+- **Desktop-view override toggle**: a "Desktop view" button (visible on
+  narrow viewports) forces the full desktop layout via `min-width:1100px`
+  on the body -- the page becomes horizontally scrollable on phones for
+  users who want full information density. Wikipedia / Reddit pattern.
+  Persisted in `localStorage`.
+
+### Changed
+- Universe-only tickers (in `universe.csv` but not in your basket /
+  watchlist) now open a "universe only" fallback info-modal instead of
+  silently failing, showing the limited fields we have (name, industry,
+  12-mo return, cap tier).
+- `compute_basket_correlation` now returns the full pair list alongside
+  the histogram and summary stats so T14's bucket-drill-down can filter
+  in JS without a round-trip.
+- Edit-layout discovery tooltip now positions itself dynamically against
+  the Edit button's actual viewport rect (was hardcoded to `right:24px`,
+  which misaligned with the palette toggle).
+
+### Internal
+- New `build_aux_payload()` helper assembles per-modal lookup tables
+  (`industries`, `sectors`, `pairs`, `weekly_movers`) into a single JSON
+  payload (`AUX_DATA`) consumed by the modal click handlers.
+- New `_safeOpenTicker()` JS helper routes ticker-clickable elements
+  through the universe-fallback path automatically.
+- Stack-aware Escape handler consolidates ticker + info modal close
+  routing into a single keydown listener.
+
+### Deferred to v1.8
+- **T16 precomputed modal chart polylines**: a perf optimization (&sim;200ms
+  saved on first modal open) that requires migrating the modal chart
+  to a fixed-viewBox coordinate system. Reverted from v1.7 scope as the
+  visual-regression risk outweighed the marginal benefit.
+- **Hero chart SPY-shading polygon alignment**: the green/red area
+  between basket and SPY can mis-align with the SPY polyline by ~1 px
+  near crossover points. Fix likely involves z-ordering the SPY line
+  on top of the shading polygon.
+
+---
+
 ## v1.6 — Risk-adjusted metrics + UX polish · 31 May 2026
 
 Hero numbers get smarter (vol-adjusted, magnitude-aware, alpha-trended) and

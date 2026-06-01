@@ -105,7 +105,7 @@ falls back to build-time news cleanly.
                           ▼
                 ┌───────────────────────┐
                 │  docs/index.html      │  ← single self-contained file
-                │  (renders 5 sections) │     ~1.2 MB, GitHub Pages serves
+                │  (renders 9 modules)  │     ~1.5 MB, GitHub Pages serves
                 └───────────────────────┘     this as the live dashboard
                           │
         ┌─────────────────┴─────────────────┐
@@ -132,15 +132,29 @@ then context, then details, then actions:
 
 ```
 ┌─ Header ──────────────────────────────────────────────────────────────┐
-│ Palette toggle · Hero chart (basket vs SPY + GBP/USD bars) · 5 stats │
+│ Edit-layout · Palette toggle · Desktop-view (on narrow viewports)    │
+│ Hero subtitle: total + annualized return · TWR methodology           │
+│ Unusual-volume chips (when any open name >2× vol with >1% move)      │
+│ Hero chart (basket vs SPY with vs-SPY area shading + GBP/USD bars)   │
+│ 30-day rolling alpha sparkline (hover for date+value)                │
+│ 5 configurable stat cards (default: annualized / Sharpe / win rate / │
+│ win-loss ratio / avg upside; pick from 10 via edit-mode)             │
 └───────────────────────────────────────────────────────────────────────┘
 
 ┌─ Industry outlook ─────────┬─ Market news ──────────────────────────┐
 │ 6 industries from universe │ Live finance headlines (Worker) or    │
 │ minus log.xlsx, top 3      │ build-time RSS (fallback). Source     │
 │ stocks by analyst upside,  │ filter chips: All / MarketWatch /     │
-│ cap-tier badges            │ Yahoo / CNBC / Motley Fool            │
+│ cap-tier badges. Click a   │ Yahoo / CNBC / Motley Fool            │
+│ card → info modal with     │                                       │
+│ every ticker in industry.  │                                       │
 └────────────────────────────┴───────────────────────────────────────┘
+
+┌─ Rating moves ───────────────────────────────────────────────────────┐
+│ Target-price changes ≥ 5% and recommendation shifts since the last  │
+│ build. Empty state on first build; populates on every subsequent    │
+│ build that hit any analyst-cache TTL.                               │
+└──────────────────────────────────────────────────────────────────────┘
 
 ┌─ Industry attribution ───────────────────────────────────────────────┐
 │ Cost-weighted basket return decomposed by industry. Shows which     │
@@ -173,34 +187,62 @@ then context, then details, then actions:
 └────────────────────────────┴───────────────────────────────────────┘
 ```
 
-### The 5 header stats
+### The header stats (configurable — pick 5 of 10)
 
-| Stat | Definition | Why it's there |
-|---|---|---|
-| **Win rate** | % of closed positions with `total_pct > 0` | Personal skill gauge over time. Above 50% = better than random. |
-| **Avg analyst upside** | Cost-weighted mean of `(target / current − 1)` across open positions | Forward-looking aggregate of Wall Street consensus on the basket. |
-| **Max drawdown** | Worst peak-to-trough decline on the basket NAV series | The single most-cited risk number in portfolio reporting. |
-| **Top contributor** | The stock that has added the most to basket return | Biggest single driver of the gains. |
-| **Top detractor** | The stock that has subtracted the most from basket return | Biggest single drag. |
+The hero stat strip is a **registry** of 10 stats. The default selection is
+5 of them, but every visitor can pick a different 5 (or up to 10) and reorder
+them via edit-mode. The choice persists in `localStorage`.
 
-Deliberately **excluded** from this strip: total basket return and vs-SPY,
-because both are already prominent in the hero chart's right-edge labels.
-Duplicating them in stat cards wastes space.
+| Slug | Stat | Definition | Why it's there |
+|---|---|---|---|
+| `annualized` ★ | **Annualized return** | `(1 + total_return)^(1/years) − 1`, geometric. Gated below 3 months elapsed (too noisy to annualize from a tiny window). | Time-normalized return so a 31% gain looks different at 6 months vs 19 months. |
+| `sharpe` ★ | **Sharpe (1y)** | Weekly log returns annualized via `× √52`, risk-free = 0 (project convention). Color-banded green ≥ 1, red < 0. | Tells you whether the return was earned smoothly or via wild swings. |
+| `win_rate` ★ | **Win rate** | % of closed positions with `total_pct > 0` | Personal skill gauge over time. Above 50% = better than random. |
+| `win_loss_ratio` ★ | **Win / loss £ ratio** | `avg_win_£ / avg_loss_£` across closed positions. Distinguishes "70% wins on tiny upside + big losses" from a genuinely good strategy. | Magnitude check on the win rate. ≥ 1.5 green, < 1 red. |
+| `avg_upside` ★ | **Avg analyst upside** | Cost-weighted mean of `(target / current − 1)` across open positions | Forward-looking aggregate of Wall Street consensus on the basket. |
+| `total_return` | **Total return** | Cumulative basket return since inception, in %. | Optional alongside annualized when the inception date matters more than the duration. |
+| `max_drawdown` | **Max drawdown** | Worst peak-to-trough decline on the basket NAV series | The single most-cited risk number in portfolio reporting. |
+| `top_contributor` | **Top contributor** | The stock that has added the most to basket return | Biggest single driver of the gains. |
+| `top_detractor` | **Top detractor** | The stock that has subtracted the most from basket return | Biggest single drag. |
+| `positions_open` | **Open positions** | Number of currently-open positions. | Simple density gauge: a basket of 80 is a different beast from 8. |
+
+★ = in the default 5. Total return and annualized return are also shown
+inline in the hero subtitle line, so the cards can be reserved for vol- and
+magnitude-adjusted measures unless the visitor overrides.
 
 ### The hero chart
 
-A composed visualisation with three layers sharing one x-axis:
+A composed visualisation with several layers sharing one x-axis:
 
-- **Amber filled area + line:** the basket's time-weighted return %
+- **Amber line + filled area:** the basket's time-weighted return %
   (renormalised as positions enter, so opening a new position doesn't reset
   the line).
 - **Grey dashed line:** SPY benchmark, rebased to the same starting date.
+- **Vs-SPY area shading:** the area between the basket and SPY lines, painted
+  green when basket is outperforming and red when underperforming. Crossover
+  points split the shading at the exact moment the lead changes hands.
+- **Subtle red wash below 0%:** marks the loss zone — even a brief crossing
+  into the red is immediately visible.
+- **Δ delta badge** at the right edge shows `Δ +4.2pp` style alpha vs SPY at
+  the latest date.
 - **Bottom strip — coloured bars:** weekly GBP/USD exchange rate centred on
-  the baseline value (first week). Green bars = pound stronger than baseline,
-  red = weaker. Labels show the baseline `ref $1.281` plus the range
-  `$min — $max`.
+  the baseline value. Green = pound stronger than baseline, red = weaker.
 
-Hovering the chart shows a tooltip with all three values at the hovered week.
+Hovering shows a tooltip with all three values at the hovered week. **Clicking
+a weekly point** opens an info modal listing that week's top up / down movers
+across the basket.
+
+Beneath the main chart sits a **30-day rolling alpha sparkline** — basket
+excess return vs SPY over the trailing 30 days, in percentage points. Color
+flips with sign at the latest value; hovering shows the date + value at the
+nearest point.
+
+### Pre-hero context: unusual volume chips
+
+When any open position trades on **&gt; 2&times; its 63-day average volume**
+with a non-trivial day move (&gt; 1%), an amber chip pinned just under the
+hero subtitle calls it out: `DELL +32.5% 4.9× vol`. Up to 3 chips; clicking
+one opens the ticker modal. Hides cleanly when nothing qualifies.
 
 ### Decision-flow ordering
 
@@ -208,21 +250,44 @@ The vertical order is deliberate — research → context → details → action
 
 1. **Outlook + News** at top: "what should I read about today" — new
    stocks and the market backdrop.
-2. **Attribution**: "which of my sector bets are paying off" — situational
+2. **Rating moves**: "did analyst views shift since last build" — diffs
+   of this build's analyst cache vs the prior build, surfacing target-price
+   changes ≥ 5% and recommendation shifts.
+3. **Attribution**: "which of my sector bets are paying off" — situational
    awareness of the basket as a whole.
-3. **Main table**: detailed per-stock view with sorting + filtering.
-4. **Re-entry ideas**: "of stocks I've held before, where do analysts see
+4. **Main table**: detailed per-stock view with sorting + filtering.
+5. **Re-entry ideas**: "of stocks I've held before, where do analysts see
    most upside" — buy candidates.
-5. **Exit strategy**: "of my current losers, which should I cut" — sell
+6. **Exit strategy**: "of my current losers, which should I cut" — sell
    candidates, with concrete 2× ATR suggested stops.
-6. **Basket diversification**: portfolio-level lens — pairwise correlations,
+7. **Basket diversification**: portfolio-level lens — pairwise correlations,
    most-correlated pairs (concentration risk), and best diversifiers.
-7. **Regrets / Lucky escapes**: retrospective — did I sell too early or
+8. **Regrets / Lucky escapes**: retrospective — did I sell too early or
    exit just in time.
 
 This ordering matches how the author actually reviews the portfolio: you
 read about the market first, look at how your sectors are doing, dig into
 specific positions, then decide what to buy or sell.
+
+### Click-to-expand drill-downs
+
+Most numbers on the page open a focused info modal showing the breakdown:
+
+- **Industry-outlook card** → every ticker in that industry from the universe,
+  sorted by 12-mo return.
+- **Industry-attribution row** → every open position in that industry with
+  weight, return, and contribution.
+- **Diversification tickers** ("Best diversifiers" / "Most correlated") → the
+  ticker's detail modal.
+- **Correlation histogram bar** → every pair whose correlation falls in
+  that bucket.
+- **Hero chart weekly point** → top up / down movers across the basket
+  that week.
+
+Modals **stack**: clicking a ticker inside an info modal opens the ticker
+modal *on top*; Escape closes the topmost first, the underlying info modal
+on a second Escape. This lets you drill from "show me this industry" to
+"show me one stock in it" without losing your place.
 
 ![Industry outlook and news pair sit side-by-side at the top of the page](docs/assets/demo-outlook-news.jpeg)
 
@@ -416,7 +481,22 @@ section, it slots into its default position for everyone — including visitors
 who already customised — so nobody silently loses it. This is why people who
 clone the repo each get a layout they can tailor without touching `build.py`.
 
+Edit mode also exposes the **hero stat picker**: each stat card grows a small
+drag grip + show/hide checkbox, and the user can swap in/out any of the 10
+stats in the registry. Persisted under `stocks-dashboard-stats-v1`. **Reset**
+clears both module layout and stats selection back to defaults in one click.
+
 ![Edit layout mode reveals drag handles and Shown/Hidden toggles on each module](docs/assets/demo-edit-layout.jpeg)
+
+### Desktop-view override on narrow viewports
+
+When the page is opened on a screen narrower than 900 px, a **"Desktop view"**
+button appears in the topbar. Tapping it sets `body { min-width: 1100px }` so
+the full desktop layout renders instead of the responsive mobile collapse —
+the page becomes horizontally scrollable on phones, but every column,
+sparkline, and stat card is visible. Same toggle flips back. Choice persists
+under `stocks-dashboard-force-desktop`. Wikipedia / Reddit ship the same
+pattern for the same reason.
 
 ---
 
@@ -426,15 +506,16 @@ clone the repo each get a layout they can tailor without touching `build.py`.
 stocks-dashboard/
 ├── README.md                          ← this file
 ├── LICENSE                            ← MIT
-├── CHANGELOG.md                       ← version history (v1.0 → v1.5)
+├── CHANGELOG.md                       ← version history (v1.0 → v1.7)
 ├── demo.html                          ← standalone self-contained demo (CI-rebuilt daily)
 ├── build.py                           ← the build pipeline
 ├── log.xlsx                           ← author's transaction log (private, gitignored)
 ├── transactions.csv                   ← public sample log used by demo.html
-├── tickers.csv                        ← legacy ticker config (unused)
 ├── watchlist.csv                      ← optional watchlist tickers
 ├── universe.csv                       ← 150 large/mid/small US caps for industry outlook
 ├── requirements.txt                   ← Python deps
+├── daily_rebuild.ps1                  ← optional Task Scheduler script for daily local rebuilds
+├── setup_scheduled_task.ps1           ← one-shot installer for the scheduled task
 ├── .gitignore
 │
 ├── .github/
@@ -448,6 +529,7 @@ stocks-dashboard/
 │   ├── fx_cache.parquet               ← FX pairs (USDGBP, EURGBP, etc.)
 │   ├── meta.csv                       ← sector / industry / name / currency
 │   ├── analyst_cache.parquet          ← yf.info per ticker, 7-day TTL
+│   ├── prior_analyst_cache.parquet    ← previous build's analyst snapshot for rating-moves diff
 │   ├── ticker_news_cache.parquet      ← per-ticker news for the modal, 7-day TTL
 │   └── universe_outlook_cache.parquet ← universe.csv precomputed, 30-day TTL
 │
@@ -476,20 +558,26 @@ stocks-dashboard/
 main()
 ├── load_transactions_from_log()       # parse log.xlsx
 ├── load_watchlist()                   # parse watchlist.csv (optional)
-├── download_prices(tickers)           # yfinance bulk fetch, daily history
+├── download_ohlcv(tickers)            # one yfinance batch: full OHLCV per ticker
 ├── download_benchmark()               # SPY
 ├── load_meta_cache() + fetch_meta()   # sector/industry/currency per ticker
 ├── download_fx(needed_pairs)          # USDGBP, EURGBP, etc.
 ├── convert_to_base(prices, meta, fx)  # native → GBP
-├── build_positions(transactions, prices)  # returns table
+├── build_positions(transactions, prices)        # returns table
 ├── compute_basket_mtm_series()        # TWR series
 ├── compute_benchmark_series()         # SPY rebased
+├── compute_rolling_alpha()            # 30-day trailing basket excess vs SPY (v1.6 sparkline)
 ├── compute_contributors()             # per-ticker contribution_pp
 ├── compute_signals()                  # technical signal per ticker
+├── compute_quant_metrics()            # SMA200 / ATR / RSI / 52w / Volume per ticker
+├── snapshot_prior_analyst()           # v1.7: copy current analyst cache for next-build diff
 ├── fetch_analyst_data(all_tickers, cache, ttl=7d)
+├── compute_rating_moves()             # v1.7: diff prior vs current analyst cache
+├── fetch_ticker_news(all_tickers, cache, ttl=7d) # v1.5: per-ticker modal news
 ├── load_universe() + fetch_universe_outlook(universe, ttl=30d)
 ├── fetch_news()                       # build-time RSS fallback
-└── render_html(...)                   # write docs/index.html
+└── render_html(...)                   # → write docs/index.html
+        └── build_aux_payload()        # v1.7: click-to-expand modal lookup tables
 ```
 
 `render_html()` is a single big f-string that templates the entire page. All
@@ -635,6 +723,19 @@ This project would not exist without:
 
 ## Roadmap / open ideas
 
+Deferred from v1.7 (planned for v1.8):
+
+- **Precomputed modal chart polylines** — currently the modal chart's
+  polyline coordinates are computed in JS at first open (~150-300 ms);
+  pre-computing at build time and shipping them in the payload would
+  drop first-modal-open jank to imperceptible.
+- **Hero chart SPY-shading polygon alignment** — the green/red area
+  between basket and SPY can mis-align with the SPY polyline by ~1 px
+  near crossover points; the fix likely involves z-ordering the SPY line
+  on top of the shading polygon.
+
+Other ideas:
+
 - **Broader universe** for industry outlook (S&P 500 constituents) — adds
   ~5 minutes to the monthly refresh fetch.
 - **Drawdown chart** — small inset visualisation of the drawdown series
@@ -643,10 +744,11 @@ This project would not exist without:
   to make currency risk explicit.
 - **Dividend tracking** — Trading 212 exports include dividend rows; could
   surface as annual income and yield estimate.
-- **Click-to-drill-down on industry cards** — the cached data is already
-  there, just not currently surfaced.
 - **Lazy-loaded modal data** — the 1.5 MB page weight is dominated by the
   per-ticker JSON; lazy-load on modal open would cut first paint.
+- **Per-segment color** for the rolling-alpha sparkline (currently uses
+  a single color matching the latest value's sign; segments below zero
+  could be painted red regardless of latest).
 
 Contributions and forks welcome — see [LICENSE](LICENSE) for terms.
 

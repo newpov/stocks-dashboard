@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -45,6 +46,10 @@ BENCHMARK_CACHE = ROOT / "data" / "benchmark_cache.parquet"
 META_CSV = ROOT / "data" / "meta.csv"
 WATCHLIST_CSV = ROOT / "watchlist.csv"
 ANALYST_CACHE = ROOT / "data" / "analyst_cache.parquet"
+# T9: snapshot of the analyst cache from the PREVIOUS build, used to detect
+# rating moves (target price changes, recommendation shifts) since last run.
+# Written just before ANALYST_CACHE gets overwritten in main().
+PRIOR_ANALYST_CACHE = ROOT / "data" / "prior_analyst_cache.parquet"
 ANALYST_TTL_DAYS = 7    # refetch a ticker's analyst data when older than this
 TICKER_NEWS_CACHE = ROOT / "data" / "ticker_news_cache.parquet"
 TICKER_NEWS_TTL_DAYS = 7   # same 7-day cadence as analyst data
@@ -719,6 +724,81 @@ def fetch_analyst_data(tickers: list[str], cache: pd.DataFrame,
     except Exception as e:
         print(f"WARN couldn't cache analyst data: {e}", file=sys.stderr)
     return combined, failed
+
+
+def snapshot_prior_analyst() -> None:
+    """T9: copy the current ANALYST_CACHE to PRIOR_ANALYST_CACHE before this
+    build's fetch_analyst_data overwrites it. Called from main() right before
+    the fetch. Safe to skip silently if the cache doesn't exist yet (first
+    build) -- compute_rating_moves handles the missing-prior case."""
+    if not ANALYST_CACHE.exists():
+        return
+    try:
+        PRIOR_ANALYST_CACHE.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ANALYST_CACHE, PRIOR_ANALYST_CACHE)
+    except Exception as e:
+        print(f"WARN couldn't snapshot prior analyst cache: {e}", file=sys.stderr)
+
+
+def compute_rating_moves(prior_path: Path,
+                         current: pd.DataFrame,
+                         min_target_pct: float = 5.0,
+                         max_results: int = 8) -> list[dict]:
+    """T9: diff prior vs current analyst cache, surface material moves.
+
+    A "move" is one of:
+      - target_price: abs % change in target_mean >= min_target_pct
+      - recommendation: recommendation string changed (e.g. hold -> buy)
+
+    Each result row: {ticker, kind, before, after, pct_change, abs_pct}.
+    Sorted by abs_pct descending so the most material moves bubble to the top.
+    Returns [] if prior cache is missing (first build after install)."""
+    if not prior_path.exists() or current.empty:
+        return []
+    try:
+        prior = pd.read_parquet(prior_path)
+    except Exception as e:
+        print(f"WARN couldn't read prior analyst cache: {e}", file=sys.stderr)
+        return []
+    if prior.empty:
+        return []
+    common = prior.index.intersection(current.index)
+    moves: list[dict] = []
+    for tkr in common:
+        p_row, c_row = prior.loc[tkr], current.loc[tkr]
+        # Target-price move
+        p_tgt = p_row.get("target_mean")
+        c_tgt = c_row.get("target_mean")
+        if (p_tgt is not None and c_tgt is not None
+                and pd.notna(p_tgt) and pd.notna(c_tgt)
+                and float(p_tgt) > 0):
+            pct = (float(c_tgt) / float(p_tgt) - 1) * 100
+            if abs(pct) >= min_target_pct:
+                moves.append({
+                    "ticker": tkr,
+                    "kind": "target",
+                    "before": float(p_tgt),
+                    "after":  float(c_tgt),
+                    "pct_change": pct,
+                    "abs_pct":   abs(pct),
+                })
+        # Recommendation move
+        p_rec = str(p_row.get("recommendation") or "").strip().lower()
+        c_rec = str(c_row.get("recommendation") or "").strip().lower()
+        if p_rec and c_rec and p_rec != c_rec:
+            moves.append({
+                "ticker": tkr,
+                "kind": "recommendation",
+                "before": p_rec,
+                "after":  c_rec,
+                "pct_change": 0.0,
+                # Synthetic sort weight so rec changes appear among similar-
+                # magnitude target moves (10pp keeps them visible without
+                # always dominating large target moves).
+                "abs_pct": 10.0,
+            })
+    moves.sort(key=lambda m: m["abs_pct"], reverse=True)
+    return moves[:max_results]
 
 
 # --------------------------------------------------------------------------
@@ -1448,6 +1528,14 @@ def compute_basket_correlation(returns: pd.DataFrame, prices_native: pd.DataFram
         "most_correlated": [{"a": a, "b": b, "corr": c} for (a, b, c) in most_correlated],
         "best_diversifiers": [{"ticker": t, "avg_corr": v} for (t, v) in best_diversifiers],
         "histogram": histogram,
+        # T14: full pair list so JS can filter by correlation bucket when the
+        # user clicks a histogram bar. Sorted by abs(corr) desc -- most
+        # diagnostic pairs first within each bucket.
+        "all_pairs": sorted(
+            [{"a": a, "b": b, "corr": c} for (a, b, c) in pairs],
+            key=lambda p: abs(p["corr"]),
+            reverse=True,
+        ),
     }
 
 
@@ -1903,6 +1991,39 @@ def render_detractors_strategy(contrib: pd.DataFrame, returns: pd.DataFrame,
             f'</tr>'
         )
     body = "".join(rows)
+    # T17: also build a 3-card stack for narrow viewports. The desktop table
+    # has 7 numeric columns that are unusable on phones; the cards distill
+    # each row to the essentials: ticker + tone-tagged signal + analyst rec
+    # + suggested action. Numeric details are still reachable by tapping the
+    # ticker (opens the modal).
+    mobile_cards: list[str] = []
+    for tkr, r in bot.head(3).iterrows():
+        ind = _esc(_industry_label(meta, tkr))
+        if tkr in signals.index:
+            sig = signals.loc[tkr]
+            sig_label, sig_tone = str(sig.signal), str(sig.tone)
+        else:
+            sig_label, sig_tone = "—", "neutral"
+        rec_raw = ""
+        if not analyst.empty and tkr in analyst.index:
+            rec_raw = str(analyst.loc[tkr].get("recommendation") or "")
+        rec_label, rec_cls = _REC_LABELS.get(rec_raw, ("—", "an-rec-none"))
+        action_label, action_tone = _exit_action(sig_tone, rec_raw)
+        mobile_cards.append(
+            f'<div class="dt-mobile-card ticker-clickable" data-ticker="{tkr}">'
+            f'  <div class="dt-mobile-head">'
+            f'    <span class="dt-mobile-tkr">{tkr}</span>'
+            f'    <span class="dt-mobile-ret neg">{r.total_pct:+.1f}%</span>'
+            f'  </div>'
+            f'  <div class="dt-mobile-ind">{ind}</div>'
+            f'  <div class="dt-mobile-pills">'
+            f'    <span class="dt-mobile-pill sig-{sig_tone}" title="Technical signal">{_esc(sig_label)}</span>'
+            f'    <span class="dt-mobile-pill an-rec {rec_cls}" title="Analyst recommendation">{rec_label}</span>'
+            f'    <span class="dt-mobile-pill dt-action-pill dt-action-{action_tone}" title="Suggested action">{action_label}</span>'
+            f'  </div>'
+            f'</div>'
+        )
+    mobile_html = "".join(mobile_cards)
     return f"""<section class="detractors-section">
   <div class="dt-head-row">
     <h3>Top detractors &mdash; exit strategy <span class="muted">({len(bot)})</span></h3>
@@ -1920,6 +2041,7 @@ def render_detractors_strategy(contrib: pd.DataFrame, returns: pd.DataFrame,
       <tbody>{body}</tbody>
     </table>
   </div>
+  <div class="dt-mobile-cards" aria-label="Top 3 detractors (mobile view)">{mobile_html}</div>
 </section>"""
 
 
@@ -2340,7 +2462,8 @@ def render_industry_attribution(rows: list[dict], basket_avg: float) -> str:
         else:
             bar_style = f'left:{50 - bar_pct:.1f}%;width:{bar_pct:.1f}%;background:var(--down);'
         body.append(
-            f'<tr data-industry="{_esc(r["industry"])}">'
+            f'<tr class="attribution-row-clickable" data-industry="{_esc(r["industry"])}" '
+            f'title="Click to see every open position in {_esc(r["industry"])}">'
             f'<td class="ia-industry">{_esc(r["industry"])}</td>'
             f'<td class="num ia-n">{r["n_holdings"]}</td>'
             f'<td class="num ia-cost">{BASE_SYMBOL}{r["cost_basis"]:,.0f}</td>'
@@ -2397,6 +2520,10 @@ def render_basket_diversification(data: dict | None, meta: pd.DataFrame) -> str:
     def _ind(t: str) -> str:
         return _industry_label(meta, t)
 
+    # T13: each ticker symbol in the diversification panel gets the
+    # `ticker-clickable` class -> opens its detail modal via the generic
+    # handler we wired in Batch 2. Pair rows expose both tickers as
+    # separately-clickable spans.
     most_rows = []
     for p in data["most_correlated"]:
         sec_a, sec_b = _ind(p["a"]), _ind(p["b"])
@@ -2404,7 +2531,11 @@ def render_basket_diversification(data: dict | None, meta: pd.DataFrame) -> str:
         most_rows.append(
             f'<li class="div-row">'
             f'<div class="div-pair">'
-            f'<span class="div-pair-syms">{p["a"]} &harr; {p["b"]}</span>'
+            f'<span class="div-pair-syms">'
+            f'<span class="ticker-clickable" data-ticker="{p["a"]}">{p["a"]}</span>'
+            f' &harr; '
+            f'<span class="ticker-clickable" data-ticker="{p["b"]}">{p["b"]}</span>'
+            f'</span>'
             f'<div class="div-pair-sub">{_esc(sub)}</div>'
             f'</div>'
             f'<span class="div-val div-val-hot">{p["corr"]:.2f}</span>'
@@ -2419,7 +2550,7 @@ def render_basket_diversification(data: dict | None, meta: pd.DataFrame) -> str:
         div_rows.append(
             f'<li class="div-row">'
             f'<div class="div-pair">'
-            f'<span class="div-pair-syms">{d["ticker"]}</span>'
+            f'<span class="div-pair-syms ticker-clickable" data-ticker="{d["ticker"]}">{d["ticker"]}</span>'
             f'<div class="div-pair-sub">{sub}</div>'
             f'</div>'
             f'<span class="div-val div-val-cool">{d["avg_corr"]:+.2f}</span>'
@@ -2428,6 +2559,9 @@ def render_basket_diversification(data: dict | None, meta: pd.DataFrame) -> str:
 
     # Histogram: each bar's height = % of the tallest. Empty buckets get a
     # minimum 2% sliver so the x-axis stays anchored visually.
+    # T14: each bar is wrapped in a full-height clickable column so even tiny
+    # bars (e.g. one-pair buckets) get a usable click target. The visible bar
+    # still scales with count; the parent column captures clicks.
     max_count = max((h["count"] for h in data["histogram"]), default=1) or 1
     bar_html_parts: list[str] = []
     xlabel_html_parts: list[str] = []
@@ -2436,8 +2570,13 @@ def render_basket_diversification(data: dict | None, meta: pd.DataFrame) -> str:
         height_pct = ratio * 100 if h["count"] > 0 else 2
         mid = (h["min"] + h["max"]) / 2
         tooltip = f'{h["min"]:+.2f} to {h["max"]:+.2f}: {h["count"]} pair' + ("s" if h["count"] != 1 else "")
+        col_cls = "div-hist-col" + (" div-hist-col-clickable" if h["count"] > 0 else "")
         bar_html_parts.append(
-            f'<div class="div-hist-bar" style="height:{height_pct:.1f}%" title="{tooltip}"></div>'
+            f'<div class="{col_cls}" '
+            f'data-bucket-lo="{h["min"]:.2f}" data-bucket-hi="{h["max"]:.2f}" '
+            f'title="{tooltip}">'
+            f'<div class="div-hist-bar" style="height:{height_pct:.1f}%"></div>'
+            f'</div>'
         )
         xlabel_html_parts.append(f'<span>{mid:+.2f}</span>')
 
@@ -2565,13 +2704,17 @@ def render_industry_outlook(groups: list[dict], universe_size: int) -> str:
                 f'</div>'
             )
         avg_cls = "pos" if g["avg_ret_12m"] >= 0 else "neg"
+        # T11: each card is clickable -> opens "all tickers in this industry"
+        # info-modal. The header carries a tiny "see all" hint so the
+        # interaction is discoverable without cluttering the card body.
         cards.append(
-            f'<div class="io-card">'
+            f'<div class="io-card industry-clickable" data-industry="{_esc(g["industry"])}" '
+            f'title="Click to see every tracked ticker in {_esc(g["industry"])}">'
             f'<div class="io-head">'
             f'<div class="io-industry">{_esc(g["industry"])}</div>'
             f'<div class="io-avg {avg_cls}">{g["avg_ret_12m"]:+.0f}% avg 12mo</div>'
             f'</div>'
-            f'<div class="io-sub muted">{g["n_holdings"]} tracked stocks</div>'
+            f'<div class="io-sub muted">{g["n_holdings"]} tracked stocks <span class="io-expand-hint">&rarr; see all</span></div>'
             f'<div class="io-stocks">{"".join(stock_rows)}</div>'
             f'</div>'
         )
@@ -2614,6 +2757,56 @@ def render_news(news_items: list[dict]) -> str:
   </div>
   <div class="news-chips" role="tablist">{''.join(chips)}</div>
   <div class="news-list">{''.join(rows)}</div>
+</section>"""
+
+
+def render_rating_moves(moves: list[dict], prior_exists: bool) -> str:
+    """T9: rating-moves panel rendering. Empty-state copy depends on whether
+    the prior cache exists: first build says "tracking starts next build";
+    later quiet builds say "no material moves since last refresh"."""
+    head = '<h3>Rating moves</h3>'
+    sub = ('<span class="muted rm-sub">vs last build &middot; target &geq; 5% or rec change</span>')
+    if not moves:
+        empty_msg = ("Tracking begins next build &mdash; this is the first "
+                     "snapshot of the analyst cache."
+                     if not prior_exists
+                     else "No material moves since the last refresh.")
+        return f"""<section class="rating-moves-section">
+  <div class="rm-head">{head}{sub}</div>
+  <p class="muted rm-empty">{empty_msg}</p>
+</section>"""
+    rows_html = []
+    for m in moves:
+        tkr = _esc(m["ticker"])
+        if m["kind"] == "target":
+            pct = m["pct_change"]
+            arrow_cls = "pos" if pct >= 0 else "neg"
+            sign = "+" if pct >= 0 else ""
+            row = (
+                f'<div class="rm-row" data-ticker="{tkr}">'
+                f'  <span class="rm-tkr ticker-clickable" data-ticker="{tkr}">{tkr}</span>'
+                f'  <span class="rm-kind">target</span>'
+                f'  <span class="rm-from">${m["before"]:,.2f}</span>'
+                f'  <span class="rm-arrow">&rarr;</span>'
+                f'  <span class="rm-to">${m["after"]:,.2f}</span>'
+                f'  <span class="rm-pct {arrow_cls}">{sign}{pct:.1f}%</span>'
+                f'</div>'
+            )
+        else:  # recommendation
+            row = (
+                f'<div class="rm-row" data-ticker="{tkr}">'
+                f'  <span class="rm-tkr ticker-clickable" data-ticker="{tkr}">{tkr}</span>'
+                f'  <span class="rm-kind">rec</span>'
+                f'  <span class="rm-from">{_esc(str(m["before"]))}</span>'
+                f'  <span class="rm-arrow">&rarr;</span>'
+                f'  <span class="rm-to">{_esc(str(m["after"]))}</span>'
+                f'  <span class="rm-pct">&mdash;</span>'
+                f'</div>'
+            )
+        rows_html.append(row)
+    return f"""<section class="rating-moves-section">
+  <div class="rm-head">{head}{sub}</div>
+  <div class="rm-list">{''.join(rows_html)}</div>
 </section>"""
 
 
@@ -2786,6 +2979,110 @@ def build_portfolio_payload(basket: pd.Series, bench: pd.Series,
     }
 
 
+def build_aux_payload(returns: pd.DataFrame, prices: pd.DataFrame,
+                      meta: pd.DataFrame, universe_outlook: pd.DataFrame | None,
+                      diversification_data: dict | None,
+                      basket_first_date: pd.Timestamp | None = None) -> dict:
+    """T11/T12/T14/T15: pre-shape per-modal data so the JS click handlers can
+    look up "what to show in the drill-down modal" by O(1) lookup.
+
+    Returns four top-level keys:
+      - industries:    dict[industry_label] -> [{ticker, name, return_12mo, cap_tier}, ...]
+      - sectors:       dict[sector_label]   -> [{ticker, name, weight, total_pct, contribution_pp}, ...]
+      - pairs:         [{a, b, corr}, ...] (sorted by abs(corr) desc)
+      - weekly_movers: dict[date_str]       -> {up: [...], down: [...]}
+    """
+    out: dict = {"industries": {}, "sectors": {}, "pairs": [], "weekly_movers": {}}
+
+    # T11: every universe ticker grouped by industry (so a click on the
+    # industry-outlook card opens "all tickers in this industry").
+    # Schema note: universe_outlook uses `ret_12m` (not return_12m_pct), and
+    # the ticker name lives in `meta` (joined by ticker index), not in the
+    # universe frame itself.
+    if universe_outlook is not None and not universe_outlook.empty:
+        for tkr, row in universe_outlook.iterrows():
+            ind = str(row.get("industry") or "").strip()
+            if not ind:
+                continue
+            r12 = row.get("ret_12m")
+            tier = row.get("cap_tier")
+            name = (str(meta.loc[tkr, "name"]).strip()
+                    if (tkr in meta.index and pd.notna(meta.loc[tkr, "name"]))
+                    else str(tkr))
+            entry = {
+                "ticker": str(tkr),
+                "name": name or str(tkr),
+                "return_12mo": (float(r12) if pd.notna(r12) else None),
+                "cap_tier": (str(tier) if pd.notna(tier) and tier else ""),
+            }
+            out["industries"].setdefault(ind, []).append(entry)
+        # Sort each industry by 12mo return descending (best at top).
+        for ind in out["industries"]:
+            out["industries"][ind].sort(
+                key=lambda e: (e["return_12mo"] is None, -(e["return_12mo"] or 0)),
+            )
+
+    # T12: open positions grouped by INDUSTRY (matching the attribution row key
+    # logic in build_industry_attribution: industry first, sector fallback,
+    # "Other" if neither). The dict key here is named "sectors" in the payload
+    # for forward-compat with potential future sector-only views but matches
+    # whatever the attribution rows use as their group label.
+    if not returns.empty:
+        open_pos = returns[returns.status == "open"]
+        total_weight = float(open_pos["weight"].sum()) if not open_pos.empty else 0.0
+        for tkr, r in open_pos.iterrows():
+            if tkr in meta.index:
+                key = (str(meta.loc[tkr, "industry"] or meta.loc[tkr, "sector"] or "").strip()
+                       or "Other")
+                name = str(meta.loc[tkr, "name"] or tkr).strip()
+            else:
+                key, name = "Other", str(tkr)
+            wt = float(r.weight) if pd.notna(r.weight) else 0.0
+            wt_pct = (wt / total_weight * 100) if total_weight > 0 else 0.0
+            tot = float(r.total_pct) if pd.notna(r.total_pct) else 0.0
+            contrib_pp = (wt_pct / 100.0) * tot
+            out["sectors"].setdefault(key, []).append({
+                "ticker": str(tkr),
+                "name": name,
+                "weight_pct": wt_pct,
+                "total_pct": tot,
+                "contribution_pp": contrib_pp,
+            })
+        # Sort each group by contribution descending (most-positive at top).
+        for k in out["sectors"]:
+            out["sectors"][k].sort(key=lambda e: -e["contribution_pp"])
+
+    # T14: full pair-correlation list (already sorted by abs(corr) desc).
+    if diversification_data and "all_pairs" in diversification_data:
+        out["pairs"] = diversification_data["all_pairs"]
+
+    # T15: per-week top-5 and bottom-5 movers across all held tickers, keyed
+    # by the week-ending date (Friday). Computed from the same `prices` frame
+    # used elsewhere -- already in base currency (GBP), so percentages reflect
+    # what the user would actually see in P&L terms.
+    if not prices.empty and not returns.empty:
+        held_tickers = [t for t in returns.index if t in prices.columns]
+        if held_tickers:
+            sub = prices[held_tickers].copy()
+            weekly = sub.resample("W-FRI").last().ffill()
+            weekly_pct = weekly.pct_change() * 100
+            for date_idx in weekly_pct.index:
+                row = weekly_pct.loc[date_idx].dropna()
+                if row.empty:
+                    continue
+                ordered = row.sort_values()
+                top = [(t, float(v)) for (t, v) in ordered.tail(5).iloc[::-1].items() if v > 0]
+                bot = [(t, float(v)) for (t, v) in ordered.head(5).items() if v < 0]
+                if not top and not bot:
+                    continue
+                key = pd.Timestamp(date_idx).strftime("%Y-%m-%d")
+                out["weekly_movers"][key] = {
+                    "up":   [{"ticker": t, "pct": v} for (t, v) in top],
+                    "down": [{"ticker": t, "pct": v} for (t, v) in bot],
+                }
+    return out
+
+
 def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
                 basket: pd.Series, bench: pd.Series, contrib: pd.DataFrame,
                 transactions: pd.DataFrame, signals: pd.DataFrame,
@@ -2801,7 +3098,10 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
                 ticker_news: pd.DataFrame | None = None,
                 demo_mode: bool = False,
                 sortable_inline_js: str | None = None,
-                build_health: dict | None = None) -> str:
+                build_health: dict | None = None,
+                rating_moves: list[dict] | None = None,
+                prior_analyst_exists: bool = False,
+                unusual_vol: list[dict] | None = None) -> str:
     weekly = prices.resample("W-FRI").last().ffill()
     defs_html = render_svg_defs()
     table_html = render_table(returns, weekly, meta, signals,
@@ -2884,9 +3184,39 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
         f' <span class="hero-sub-meta">&middot; TWR, renormalized as positions enter</span>'
     )
 
+    # T10: unusual-volume chips. Compose a small pinned row of pills for
+    # held names trading on >2x average volume with non-trivial moves.
+    # Empty when nothing qualifies (the whole row is suppressed).
+    _uv = unusual_vol or []
+    if _uv:
+        _chips = []
+        for u in _uv:
+            tkr = _esc(u["ticker"])
+            move_sign = "+" if u["daily_pct"] >= 0 else ""
+            move_cls = "uv-up" if u["daily_pct"] >= 0 else "uv-down"
+            _chips.append(
+                f'<button type="button" class="uv-chip ticker-clickable {move_cls}" '
+                f'data-ticker="{tkr}" '
+                f'title="Click to open {tkr} detail">'
+                f'<span class="uv-tkr">{tkr}</span>'
+                f'<span class="uv-move">{move_sign}{u["daily_pct"]:.1f}%</span>'
+                f'<span class="uv-vol">{u["vol_ratio"]:.1f}&times; vol</span>'
+                f'</button>'
+            )
+        unusual_vol_html = (
+            f'<div class="unusual-vol-row" role="region" aria-label="Unusual volume">'
+            f'<span class="uv-label">Unusual volume today:</span>'
+            f'{"".join(_chips)}'
+            f'</div>'
+        )
+    else:
+        unusual_vol_html = ""
+
     # T7: 30-day rolling alpha sparkline (basket excess over SPY, pp).
     # Server-side renders a small inline SVG; latest value is shown next to
-    # the label for the at-a-glance "are we currently ahead?" signal.
+    # the label for the at-a-glance "are we currently ahead?" signal. Cosmetic
+    # follow-up: hover shows date + value at the nearest point via JS overlay
+    # (data-dates / data-values attributes consumed by setupAlphaHover()).
     rolling_alpha = compute_rolling_alpha(basket, bench, window_days=30)
     if rolling_alpha.empty or len(rolling_alpha) < 5:
         alpha_sparkline_html = ""
@@ -2894,6 +3224,7 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
         SW, SH = 240, 36  # viewBox in svg units
         pad_x, pad_y = 2, 4
         vals = rolling_alpha.tolist()
+        dates = [d.strftime("%Y-%m-%d") for d in rolling_alpha.index]
         vmin, vmax = min(vals), max(vals)
         # Add a hair of headroom so flat-line edge cases don't divide-by-zero.
         vrange = max(vmax - vmin, 1e-9)
@@ -2914,16 +3245,28 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
         latest = vals[-1]
         latest_cls = "pos" if latest >= 0 else "neg"
         stroke_color = "var(--up)" if latest >= 0 else "var(--down)"
+        # Embed dates + values for the hover layer. Comma-separated keeps the
+        # attribute compact; JS parses on demand.
+        dates_attr = ",".join(dates)
+        values_attr = ",".join(f"{v:.3f}" for v in vals)
         alpha_sparkline_html = (
-            f'<div class="alpha-sparkline-wrap">'
+            f'<div class="alpha-sparkline-wrap" id="alpha-sparkline-wrap">'
             f'  <div class="alpha-sparkline-head">'
             f'    <span class="alpha-sparkline-label">30-day rolling &alpha; vs SPY</span>'
-            f'    <span class="alpha-sparkline-latest {latest_cls}">{latest:+.1f} pp</span>'
+            f'    <span class="alpha-sparkline-latest {latest_cls}" id="alpha-sparkline-latest" '
+            f'          data-default-text="{latest:+.1f} pp">{latest:+.1f} pp</span>'
             f'  </div>'
-            f'  <svg class="alpha-sparkline" viewBox="0 0 {SW} {SH}" preserveAspectRatio="none">'
+            f'  <svg class="alpha-sparkline" id="alpha-sparkline-svg" '
+            f'       viewBox="0 0 {SW} {SH}" preserveAspectRatio="none" '
+            f'       data-dates="{dates_attr}" data-values="{values_attr}" '
+            f'       data-baseline-y="{baseline_y if baseline_y is not None else -1}">'
             f'    {baseline_svg}'
             f'    <polyline points="{points}" fill="none" stroke="{stroke_color}" '
             f'              stroke-width="1.2" stroke-linejoin="round"/>'
+            f'    <line class="alpha-cross" x1="0" y1="0" x2="0" y2="{SH}" '
+            f'          stroke="var(--text-dim)" stroke-width="0.5" opacity="0" pointer-events="none"/>'
+            f'    <circle class="alpha-dot" cx="0" cy="0" r="2.2" '
+            f'            fill="{stroke_color}" opacity="0" pointer-events="none"/>'
             f'  </svg>'
             f'</div>'
         )
@@ -3056,6 +3399,62 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
             sharpe_cls = ""
         sharpe_meta_str = "vol-adjusted &middot; weekly &times; &radic;52"
 
+    # T8: Hero stats registry. Renders all 10 stat cards server-side; CSS hides
+    # the ones not in the user's selection. Default selection matches what
+    # T5/T6 left visible (annualized, sharpe, win_rate, win_loss_ratio,
+    # avg_upside). User can pick a different 5 (or up to 10) via edit-mode.
+    #
+    # Each entry is (slug, label, value_html, value_class, meta_html) -- a
+    # closure-free flat tuple so the registry stays a pure data structure.
+    # ann_pct only exists when years_elapsed >= 0.25; provide a fallback.
+    _ann_value_html = "&mdash;"
+    _ann_meta = "needs &geq; 3 months of data"
+    _ann_cls = "dim"
+    if years_elapsed >= 0.25 and basket_final > -100:
+        _ann_pct = ((1 + basket_final / 100) ** (1 / years_elapsed) - 1) * 100
+        _ann_value_html = f"{_ann_pct:+.1f}%"
+        _ann_cls = "pos" if _ann_pct >= 0 else "neg"
+        _ann_meta = f"over {years_elapsed:.1f} years &middot; geometric"
+
+    _stats_registry = [
+        # slug,             label,                value_html,                    cls,                                meta_html
+        ("total_return",    "Total return",       f"{basket_final:+.1f}%",       _cls(basket_final),                 f"since {first_purchase_str}"),
+        ("annualized",      "Annualized",         _ann_value_html,               _ann_cls,                           _ann_meta),
+        ("sharpe",          "Sharpe (1y)",        sharpe_value_str,              sharpe_cls,                         sharpe_meta_str),
+        ("win_rate",        "Win rate",           f"{win_rate:.0f}%",            _cls(win_rate - 50),                f"{n_wins} of {n_closed_total} closed wins"),
+        ("win_loss_ratio",  "Win / loss ratio",   wlr_value_str,                 wlr_cls,                            wlr_meta_str),
+        ("avg_upside",      "Avg analyst upside", f"{avg_upside:+.1f}%",         _cls(avg_upside),                   f"{n_open_covered} of {n_open} open covered"),
+        ("max_drawdown",    "Max drawdown",       f"{max_drawdown:.1f}%",        "neg",                              ("trough: " + max_drawdown_date_str) if max_drawdown_date_str else "no drawdown yet"),
+        ("top_contributor", "Top contributor",    f"{best_contrib_pp:+.1f} pp",  "pos",                              f"{best_contrib_name} &middot; {BASE_SYMBOL}{best_contrib_wt:,.0f} basis"),
+        ("top_detractor",   "Top detractor",      f"{worst_contrib_pp:+.1f} pp", "neg",                              f"{worst_contrib_name} &middot; {BASE_SYMBOL}{worst_contrib_wt:,.0f} basis"),
+        ("positions_open",  "Open positions",     f"{n_open}",                   "",                                 f"{n_closed} closed alongside"),
+    ]
+
+    HERO_STATS_DEFAULT = ["annualized", "sharpe", "win_rate", "win_loss_ratio", "avg_upside"]
+    _stats_default_csv = ",".join(HERO_STATS_DEFAULT)
+    _stats_all_csv = ",".join(slug for (slug, *_rest) in _stats_registry)
+
+    # Render each stat card. data-stat-default-shown="1" lets the CSS-only
+    # default state apply BEFORE the JS layout-state hydration runs (so the
+    # page doesn't flash all 10 then collapse to 5 on first paint).
+    _stat_cards = []
+    for (slug, label, val_html, val_cls, meta_html) in _stats_registry:
+        is_default = "1" if slug in HERO_STATS_DEFAULT else "0"
+        _stat_cards.append(
+            f'<div class="stat" data-stat="{slug}" data-stat-default-shown="{is_default}">'
+            f'<div class="stat-bar">'
+            f'<span class="stat-grip" aria-hidden="true">&#9776;</span>'
+            f'<span class="stat-bar-name">{label}</span>'
+            f'<label class="stat-vis"><input type="checkbox" class="stat-vis-cb"{" checked" if is_default == "1" else ""}>'
+            f'<span class="stat-vis-txt">{"Shown" if is_default == "1" else "Hidden"}</span></label>'
+            f'</div>'
+            f'<div class="stat-label">{label}</div>'
+            f'<div class="stat-value {val_cls}">{val_html}</div>'
+            f'<div class="stat-meta">{meta_html}</div>'
+            f'</div>'
+        )
+    stats_cards_html = "\n    ".join(_stat_cards)
+
     data_dict = build_data_payload(returns, prices, meta, contrib, signals,
                                    prices_native, returns_native,
                                    quant_metrics=quant_metrics,
@@ -3070,6 +3469,15 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     portfolio_json = json.dumps(
         build_portfolio_payload(basket, bench, first_purchase, fx=fx), separators=(",", ":")
     )
+    # T11/T12/T14/T15: aux payload for click-to-expand drill-down modals.
+    # Reuses diversification_data (computed below) for the pair list -- this
+    # block depends on it so we compute it inline first, then pass it.
+    aux_payload = build_aux_payload(
+        returns, prices, meta, universe_outlook,
+        diversification_data=diversification_data,
+        basket_first_date=first_purchase,
+    )
+    aux_json = json.dumps(aux_payload, separators=(",", ":"))
 
     # ---- Customizable module stack -----------------------------------------
     # Each top-level content section is wrapped as a draggable/hideable
@@ -3080,9 +3488,15 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     # wrap a blank module.
     toolbar_html = render_toolbar(0, n_total, returns=returns, meta=meta)
     holdings_html = f'<section class="panel active" id="panel-0">{toolbar_html}{table_html}</section>'
+    # T9: rating-moves panel sits right after News in the default order so
+    # the analyst-watch signal lands near the headline market context.
+    # (Avoided putting it BETWEEN outlook + news -- those two pair into a
+    # side-by-side layout when adjacent, which an interloper would break.)
+    rating_moves_html = render_rating_moves(rating_moves or [], prior_analyst_exists)
     _module_defs = [
         ("outlook", "Industry outlook", industry_html),
         ("news", "News", news_html),
+        ("rating_moves", "Rating moves", rating_moves_html),
         ("attribution", "Industry attribution", attribution_html),
         ("holdings", "Holdings", holdings_html),
         ("analyst", "Re-entry ideas", analyst_html),
@@ -3223,6 +3637,17 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
   .layout-toggle:hover,.layout-reset:hover{{color:var(--text);border-color:var(--text-dim)}}
   .layout-toggle.active{{background:var(--accent);color:var(--ink);
     border-color:var(--accent);font-weight:600}}
+  /* Desktop-view toggle: only visible on narrow viewports (where the mobile
+     media queries activate). When toggled on (`body.force-desktop`), the body
+     gets a min-width so the desktop layout always renders -- the page becomes
+     horizontally scrollable on phones, which is the trade-off the user opts
+     into when they tap this button. Wikipedia / Reddit use the same pattern. */
+  .desktop-mode-btn{{display:none}}
+  @media (max-width:900px){{
+    .desktop-mode-btn{{display:inline-block}}
+  }}
+  body.force-desktop{{min-width:1100px}}
+  body.force-desktop .desktop-mode-btn{{display:inline-block !important}}
   /* Pulse halo around the Edit-layout button while the discovery hint is up.
      box-shadow keeps it paint-only — the button's layout box never grows so
      nothing nearby reflows. */
@@ -3234,16 +3659,19 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     animation:edit-pulse 1.8s ease-in-out infinite;
     border-color:var(--accent);color:var(--text);
   }}
-  /* One-time tooltip anchored just below the topbar (top-right of container). */
+  /* One-time tooltip; position is JS-set via editBtn.getBoundingClientRect()
+     when shown, so the arrow always points at the actual Edit-layout button
+     regardless of topbar contents or screen size. CSS provides the visual
+     dressing; the `position:fixed` + top/left values are overwritten on show. */
   .edit-tooltip{{
-    position:absolute;top:52px;right:24px;z-index:35;
+    position:fixed;z-index:35;
     background:var(--surface-2);border:1px solid var(--accent);
     border-radius:6px;padding:10px 14px;max-width:260px;
     font-family:var(--font-mono);font-size:11px;line-height:1.5;color:var(--text);
     box-shadow:0 6px 16px rgba(0,0,0,0.30);cursor:pointer;
   }}
   .edit-tooltip::before{{
-    content:'';position:absolute;top:-7px;right:24px;
+    content:'';position:absolute;top:-7px;left:18px;
     width:12px;height:12px;background:var(--surface-2);
     border-top:1px solid var(--accent);border-left:1px solid var(--accent);
     transform:rotate(45deg);
@@ -3363,6 +3791,22 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
      the numbers first. */
   .hero-sub-sep{{color:var(--text-dim);opacity:0.7;margin:0 2px}}
   .hero-sub-meta{{font-size:10px;opacity:0.65;margin-left:6px}}
+  /* T10 unusual-volume chips: amber-bordered pills near the hero subtitle.
+     The row hides entirely when no tickers qualify (Python emits "" then). */
+  .unusual-vol-row{{display:flex;flex-wrap:wrap;align-items:center;gap:6px;
+    margin-top:10px;font-family:var(--font-mono);font-size:10.5px}}
+  .uv-label{{color:var(--text-dim);text-transform:uppercase;letter-spacing:0.06em;
+    font-size:9.5px;margin-right:2px}}
+  .uv-chip{{display:inline-flex;align-items:center;gap:6px;padding:3px 8px;
+    background:rgba(245,158,11,0.07);border:1px solid var(--accent);
+    border-radius:14px;color:var(--text);cursor:pointer;
+    font-family:var(--font-mono);font-size:10.5px;transition:background 0.15s;}}
+  .uv-chip:hover{{background:rgba(245,158,11,0.18)}}
+  .uv-tkr{{font-weight:600;letter-spacing:0.04em}}
+  .uv-move{{font-weight:500}}
+  .uv-up .uv-move{{color:var(--up)}}
+  .uv-down .uv-move{{color:var(--down)}}
+  .uv-vol{{color:var(--text-dim);font-size:9.5px}}
   .hero-legend{{display:flex;gap:18px;font-family:var(--font-mono);font-size:11.5px;align-items:center}}
   .leg{{display:flex;align-items:center;gap:6px;color:var(--text-2)}}
   .leg-swatch{{width:14px;height:3px;border-radius:1px}}
@@ -3381,7 +3825,7 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     font-family:var(--font-mono);font-size:11px;color:var(--text-dim);margin-bottom:4px}}
   .alpha-sparkline-label{{letter-spacing:0.04em}}
   .alpha-sparkline-latest{{font-weight:600;font-size:11.5px}}
-  .alpha-sparkline{{width:100%;height:36px;display:block}}
+  .alpha-sparkline{{width:100%;height:36px;display:block;cursor:crosshair}}
   .hero-tip{{
     position:absolute;background:var(--ink);border:1px solid var(--accent);border-radius:6px;
     padding:8px 12px;font-family:var(--font-mono);font-size:11px;color:var(--text);
@@ -3394,7 +3838,29 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
   .hero-tip .tip-label{{color:var(--text-dim)}}
 
   /* Stats */
-  .stats{{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-bottom:14px}}
+  /* T8: stats grid is auto-fit so user-customized selection (3-10 cards)
+     wraps cleanly rather than leaving empty 5-col slots. */
+  .stats{{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin-bottom:14px}}
+  /* T8 visibility: hide non-selected stats outside edit-mode. In edit-mode
+     all 10 are visible (faded if not currently selected) so the user can
+     toggle them on. */
+  .stat[data-stat-hidden="true"]{{display:none}}
+  body.edit-mode .stat[data-stat-hidden="true"]{{display:block;opacity:0.45}}
+  body.edit-mode .stat[data-stat-hidden="true"] .stat-value{{filter:grayscale(1)}}
+  .stat-bar{{display:none}}
+  body.edit-mode .stat-bar{{
+    display:flex;align-items:center;gap:8px;margin:-8px -12px 8px -12px;padding:5px 10px;
+    background:var(--surface);border-bottom:1px dashed var(--border);
+    font-family:var(--font-mono);font-size:10px;letter-spacing:0.04em;
+  }}
+  .stat-grip{{cursor:grab;color:var(--text-dim);font-size:11px;user-select:none}}
+  body.edit-mode .stat-grip:active{{cursor:grabbing}}
+  .stat-bar-name{{font-weight:600;color:var(--text);text-transform:uppercase;letter-spacing:0.06em;font-size:9.5px}}
+  .stat-vis{{margin-left:auto;display:flex;align-items:center;gap:5px;color:var(--text-dim);cursor:pointer;user-select:none}}
+  .stat-vis input{{cursor:pointer;accent-color:var(--accent);transform:scale(0.85)}}
+  body.edit-mode .stat{{outline:1px solid var(--border);outline-offset:3px;border-radius:8px}}
+  .stat-ghost{{opacity:0.35}}
+  .stat-chosen .stat-bar{{border-bottom-color:var(--accent);background:var(--surface-2)}}
   .stat{{
     background:linear-gradient(180deg,var(--surface) 0%,var(--ink-soft) 100%);
     border:1px solid var(--border);border-radius:12px;padding:16px 20px;position:relative;overflow:hidden;
@@ -3464,6 +3930,32 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     color:var(--text-dim);line-height:1.5}}
   .dt-head-row strong{{color:var(--text-2);font-weight:500}}
   .dt-scroll{{width:100%;overflow-x:auto}}
+  /* T17: mobile card view shown below 700px. The desktop table has 7
+     columns of numerics; on phones the row collapses to a small card per
+     ticker with just the actionable tags (signal / analyst / suggested
+     action). Tap the card to drill into the ticker modal. */
+  .dt-mobile-cards{{display:none}}
+  .dt-mobile-card{{
+    background:var(--surface-2);border:1px solid var(--border);
+    border-radius:10px;padding:12px 14px;margin-bottom:8px;cursor:pointer;
+    transition:background 0.12s;
+  }}
+  .dt-mobile-card:last-child{{margin-bottom:0}}
+  .dt-mobile-card:hover{{background:var(--surface)}}
+  .dt-mobile-head{{display:flex;justify-content:space-between;align-items:baseline;
+    font-family:var(--font-mono)}}
+  .dt-mobile-tkr{{font-size:14px;font-weight:600;letter-spacing:0.04em;color:var(--text)}}
+  .dt-mobile-ret{{font-size:13px;font-weight:600}}
+  .dt-mobile-ind{{font-family:var(--font-ui);font-size:11px;color:var(--text-dim);
+    margin:2px 0 8px}}
+  .dt-mobile-pills{{display:flex;flex-wrap:wrap;gap:6px}}
+  .dt-mobile-pill{{padding:3px 8px;border-radius:10px;font-family:var(--font-mono);
+    font-size:9.5px;letter-spacing:0.04em;text-transform:uppercase;font-weight:600;
+    border:1px solid var(--border);background:var(--ink-soft)}}
+  @media (max-width:700px){{
+    .dt-scroll{{display:none}}
+    .dt-mobile-cards{{display:block}}
+  }}
   .dt-table{{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}}
   .dt-table th{{text-align:left;padding:7px 10px;font-size:9.5px;color:var(--text-dim);
     text-transform:uppercase;letter-spacing:0.14em;font-weight:600;border-bottom:1px solid var(--border)}}
@@ -3534,9 +4026,45 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
   .outlook-news-row .io-grid{{flex:1 1 auto;overflow-y:auto;min-height:0;max-height:none;
     grid-template-columns:1fr;gap:10px;padding-right:4px}}
   .outlook-news-row .news-list{{flex:1 1 auto;min-height:0;max-height:none;overflow-y:auto}}
-  .watchlist-section,.news-section,.analyst-section{{
+  .watchlist-section,.news-section,.analyst-section,.rating-moves-section{{
     background:linear-gradient(180deg,var(--surface) 0%,var(--ink-soft) 100%);
     border:1px solid var(--border);border-radius:12px;padding:18px 20px;
+  }}
+  /* T9 rating-moves panel: compact table of target / rec changes since
+     last build. Hover highlights a row; tickers in the first col are
+     clickable to open the modal (handled via .ticker-clickable). */
+  .rm-head{{display:flex;align-items:baseline;justify-content:space-between;
+    gap:10px;margin-bottom:10px}}
+  .rm-head h3{{font-family:var(--font-ui);font-size:13px;color:var(--text);
+    margin:0;text-transform:uppercase;letter-spacing:0.10em;font-weight:600}}
+  .rm-sub{{font-family:var(--font-mono);font-size:10px;color:var(--text-dim);
+    letter-spacing:0.04em}}
+  .rm-empty{{font-family:var(--font-mono);font-size:11px;color:var(--text-dim);
+    font-style:italic;margin:8px 0 0}}
+  .rm-list{{display:flex;flex-direction:column;gap:0}}
+  .rm-row{{display:grid;grid-template-columns:60px 50px 1fr 16px 1fr 70px;
+    gap:8px;align-items:center;padding:8px 0;border-bottom:1px solid var(--border);
+    font-family:var(--font-mono);font-size:11.5px;color:var(--text);
+    transition:background 0.1s ease;}}
+  .rm-row:last-child{{border-bottom:none}}
+  .rm-row:hover{{background:rgba(245,158,11,0.04)}}
+  .rm-tkr{{font-weight:600;letter-spacing:0.04em;cursor:pointer}}
+  .rm-tkr:hover{{color:var(--accent)}}
+  .rm-kind{{color:var(--text-dim);font-size:10px;text-transform:uppercase;
+    letter-spacing:0.06em}}
+  .rm-from{{color:var(--text-dim)}}
+  .rm-arrow{{color:var(--text-dim);text-align:center;font-size:11px}}
+  .rm-to{{color:var(--text);font-weight:500}}
+  .rm-pct{{font-weight:600;text-align:right}}
+  @media (max-width:700px){{
+    .rm-row{{grid-template-columns:50px 1fr 1fr 60px;
+      grid-template-areas:"tkr kind kind pct" "from arrow to pct";gap:4px 6px}}
+    .rm-tkr{{grid-area:tkr}}
+    .rm-kind{{grid-area:kind}}
+    .rm-from{{grid-area:from}}
+    .rm-arrow{{grid-area:arrow}}
+    .rm-to{{grid-area:to}}
+    .rm-pct{{grid-area:pct;align-self:start}}
   }}
   /* Full-width analyst section (re-entry ideas) below the main table */
   section.analyst-section{{margin:22px 0 8px}}
@@ -3945,6 +4473,63 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
   .modal{{position:fixed;inset:0;z-index:100;display:flex;align-items:center;justify-content:center;
     background:rgba(8,11,18,0.78);backdrop-filter:blur(12px);padding:20px;animation:modalIn 0.2s ease}}
   .modal[hidden]{{display:none}}
+  /* T11/T12/T14/T15 info-modal: lower z-index than the ticker modal so it
+     visually layers UNDER any ticker modal opened on top. */
+  .info-modal{{z-index:90;background:rgba(8,11,18,0.55)}}
+  .info-modal .modal-card{{max-width:760px}}
+  .info-modal-head{{margin-bottom:14px;padding-right:36px}}
+  .info-modal-title{{font-family:var(--font-display);font-size:22px;font-weight:500;
+    margin:0 0 4px;color:var(--text);letter-spacing:-0.01em}}
+  .info-modal-sub{{font-family:var(--font-mono);font-size:11px;color:var(--text-dim);
+    letter-spacing:0.04em}}
+  .info-modal-body{{font-family:var(--font-ui);color:var(--text)}}
+  /* Shared modal table style for industry / sector / pair / mover lists */
+  .im-table{{width:100%;border-collapse:collapse;font-family:var(--font-mono);font-size:11.5px}}
+  .im-table th{{text-align:left;padding:6px 8px;color:var(--text-dim);
+    text-transform:uppercase;letter-spacing:0.06em;font-size:10px;font-weight:600;
+    border-bottom:1px solid var(--border)}}
+  .im-table th.num,.im-table td.num{{text-align:right}}
+  .im-table td{{padding:8px;border-bottom:1px solid var(--border)}}
+  .im-table tbody tr:last-child td{{border-bottom:none}}
+  .im-table tbody tr.ticker-clickable{{cursor:pointer;transition:background 0.1s}}
+  .im-table tbody tr.ticker-clickable:hover{{background:var(--surface-2)}}
+  .im-tkr{{font-weight:600;letter-spacing:0.04em;color:var(--text)}}
+  .im-tkr.ticker-clickable{{cursor:pointer}}
+  .im-tkr.ticker-clickable:hover{{color:var(--accent)}}
+  .im-name{{color:var(--text-dim)}}
+  .im-arrow{{color:var(--text-dim);text-align:center}}
+  .im-tier{{display:inline-block;font-size:8.5px;padding:1px 5px;border-radius:4px;
+    margin-left:6px;text-transform:uppercase;letter-spacing:0.04em;vertical-align:1px;
+    background:var(--surface-2);color:var(--text-dim);border:1px solid var(--border)}}
+  .im-tier-mega{{background:rgba(245,158,11,0.18);color:var(--accent);border-color:var(--accent)}}
+  .im-tier-large{{background:rgba(52,211,153,0.12);color:var(--up);border-color:var(--up)}}
+  /* T15 movers: two-column layout (up | down) inside the info-modal */
+  .im-movers{{display:grid;grid-template-columns:1fr 1fr;gap:18px}}
+  .im-movers-h{{font-family:var(--font-mono);font-size:11px;text-transform:uppercase;
+    letter-spacing:0.08em;margin:0 0 8px;font-weight:600}}
+  @media (max-width:600px){{
+    .im-movers{{grid-template-columns:1fr}}
+  }}
+  /* T11 hint chip on industry-outlook cards */
+  .io-expand-hint{{color:var(--text-dim);font-size:9.5px;margin-left:6px;
+    text-transform:uppercase;letter-spacing:0.06em;opacity:0.6;transition:opacity 0.2s}}
+  .industry-clickable{{cursor:pointer}}
+  .industry-clickable:hover .io-expand-hint{{opacity:1;color:var(--accent)}}
+  /* T12 attribution rows are clickable */
+  .attribution-row-clickable{{cursor:pointer;transition:background 0.12s}}
+  .attribution-row-clickable:hover{{background:var(--surface-2)}}
+  /* T14 histogram columns: each column wraps a variable-height bar with
+     a full-height clickable area, so even one-pair buckets are easy to hit. */
+  .div-hist-col{{position:relative;display:flex;align-items:flex-end;
+    flex:1 1 0;height:100%;min-width:0}}
+  .div-hist-col-clickable{{cursor:pointer;transition:background 0.12s}}
+  .div-hist-col-clickable:hover{{background:rgba(245,158,11,0.06)}}
+  .div-hist-col-clickable:hover .div-hist-bar{{filter:brightness(1.25)}}
+  /* Universe-only fallback modal style */
+  .im-uni-note{{margin:14px 0 0;font-size:11px;line-height:1.5}}
+  .im-uni-table td{{padding:8px}}
+  /* T15 hero week-click rects: pointer cursor on hover */
+  .hero-week-click{{cursor:pointer}}
   @keyframes modalIn{{from{{opacity:0}}to{{opacity:1}}}}
   .modal-card{{
     background:linear-gradient(180deg,var(--surface-2) 0%,var(--surface) 100%);
@@ -4100,6 +4685,8 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
           title="Reorder or hide sections; saved in your browser">Edit layout</button>
   <button class="layout-reset" id="reset-layout-btn" type="button" hidden
           title="Restore the default order and show all sections">Reset</button>
+  <button class="layout-toggle desktop-mode-btn" id="desktop-mode-btn" type="button" aria-pressed="false"
+          title="Force the full desktop layout (the page becomes horizontally scrollable on phones)">Desktop view</button>
   <div class="palette-toggle" role="tablist" aria-label="Color palette">
     <button data-palette="default" aria-pressed="true">Default</button>
     <button data-palette="softdark">Soft Dark</button>
@@ -4126,6 +4713,7 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
       <div class="hero-head-left">
         <div class="hero-title">Basket vs Benchmark</div>
         <div class="hero-sub">{hero_sub_html}</div>
+        {unusual_vol_html}
       </div>
       <div class="hero-legend">
         <div class="leg"><span class="leg-swatch basket"></span>Basket</div>
@@ -4140,32 +4728,10 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     {alpha_sparkline_html}
   </div>
 
-  <div class="stats">
-    <div class="stat">
-      <div class="stat-label">Win rate</div>
-      <div class="stat-value {_cls(win_rate - 50)}">{win_rate:.0f}%</div>
-      <div class="stat-meta">{n_wins} of {n_closed_total} closed wins</div>
-    </div>
-    <div class="stat">
-      <div class="stat-label">Avg analyst upside</div>
-      <div class="stat-value {_cls(avg_upside)}">{avg_upside:+.1f}%</div>
-      <div class="stat-meta">{n_open_covered} of {n_open} open covered</div>
-    </div>
-    <div class="stat">
-      <div class="stat-label">Sharpe (1y)</div>
-      <div class="stat-value {sharpe_cls}">{sharpe_value_str}</div>
-      <div class="stat-meta">{sharpe_meta_str}</div>
-    </div>
-    <div class="stat">
-      <div class="stat-label">Win / loss ratio</div>
-      <div class="stat-value {wlr_cls}">{wlr_value_str}</div>
-      <div class="stat-meta">{wlr_meta_str}</div>
-    </div>
-    <div class="stat">
-      <div class="stat-label">Top detractor</div>
-      <div class="stat-value neg">{worst_contrib_pp:+.1f} pp</div>
-      <div class="stat-meta">{worst_contrib_name} &middot; {BASE_SYMBOL}{worst_contrib_wt:,.0f} basis</div>
-    </div>
+  <div class="stats" id="stats-grid"
+       data-stats-default="{_stats_default_csv}"
+       data-stats-all="{_stats_all_csv}">
+    {stats_cards_html}
   </div>
 
   <div class="build-info">
@@ -4249,10 +4815,28 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
   </div>
 </div>
 
+<!-- T11/T12/T14/T15: shared "info" modal for industry / sector / pair-list /
+     weekly-movers drill-downs. Lower z-index than the ticker modal so that
+     ticker modals open ON TOP of the info modal (stacked modal behavior --
+     closing the ticker modal returns the user to the still-open info modal). -->
+<div class="modal info-modal" id="info-modal" hidden role="dialog" aria-modal="true">
+  <div class="modal-card info-modal-card" role="document">
+    <button class="modal-close" id="info-modal-close" aria-label="Close">&times;</button>
+    <div class="info-modal-head">
+      <h2 class="info-modal-title"></h2>
+      <div class="info-modal-sub muted"></div>
+    </div>
+    <div class="info-modal-body"></div>
+  </div>
+</div>
+
 {sortable_script_tag}
 <script>
 const DATA = {data_json};
 const PORTFOLIO = {portfolio_json};
+// T11/T12/T14/T15: pre-shaped drill-down data for click-to-expand modals
+// (industries, sectors, correlation pairs, weekly movers).
+const AUX_DATA = {aux_json};
 
 // ---- Helpers
 function fmtMoney(v, sym) {{
@@ -4477,10 +5061,31 @@ function renderHeroChart() {{
     html += `<text x="${{(padL + innerW + 6).toFixed(1)}}" y="${{(fxBaseY + 3).toFixed(1)}}" fill="${{fxColor}}" font-size="10" font-family="Geist Mono, monospace" font-weight="500">$${{fxEnd.toFixed(3)}}</text>`;
   }}
 
-  // Crosshair
-  html += `<line class="hero-cross" x1="0" y1="${{padT}}" x2="0" y2="${{padT + innerH}}" stroke="${{basketColor}}" stroke-width="0.8" stroke-dasharray="2 3" opacity="0"/>`;
-  html += `<circle class="hero-dot-basket" cx="0" cy="0" r="4" fill="${{basketColor}}" opacity="0"/>`;
-  html += `<circle class="hero-dot-spy" cx="0" cy="0" r="3.5" fill="${{spyColor}}" opacity="0"/>`;
+  // Crosshair + hover dots. pointer-events="none" so they don't intercept
+  // clicks on the T15 week-click rects layered above them in DOM order.
+  html += `<line class="hero-cross" x1="0" y1="${{padT}}" x2="0" y2="${{padT + innerH}}" stroke="${{basketColor}}" stroke-width="0.8" stroke-dasharray="2 3" opacity="0" pointer-events="none"/>`;
+  html += `<circle class="hero-dot-basket" cx="0" cy="0" r="4" fill="${{basketColor}}" opacity="0" pointer-events="none"/>`;
+  html += `<circle class="hero-dot-spy" cx="0" cy="0" r="3.5" fill="${{spyColor}}" opacity="0" pointer-events="none"/>`;
+
+  // T15: per-week transparent click rects. One <rect> per weekly point spans
+  // half the gap before + after that point so clicks land naturally near the
+  // visible value. data-week-end carries the week-ending date used to look
+  // up AUX_DATA.weekly_movers in the click handler. pointer-events="all" is
+  // explicit because transparent-fill SVG rects can be hit-test-skipped by
+  // some browsers in edge cases.
+  if (basket.xs.length > 1) {{
+    const halfStep = (basket.xs[1] - basket.xs[0]) / 2;
+    for (let i = 0; i < basket.xs.length; i++) {{
+      const cx = basket.xs[i];
+      const left  = Math.max(padL, cx - halfStep);
+      const right = Math.min(padL + innerW, cx + halfStep);
+      const w = right - left;
+      if (w <= 0) continue;
+      html += `<rect class="hero-week-click" data-week-end="${{basket.dates[i]}}" `
+            + `x="${{left.toFixed(1)}}" y="${{padT}}" width="${{w.toFixed(1)}}" `
+            + `height="${{innerH.toFixed(1)}}" fill="transparent" pointer-events="all" />`;
+    }}
+  }}
 
   svg.innerHTML = html;
 
@@ -4923,7 +5528,18 @@ modalSvg.addEventListener('mouseleave', () => {{
 
 modal.querySelector('.modal-close').addEventListener('click', closeModal);
 modal.addEventListener('click', (e) => {{ if (e.target === modal) closeModal(); }});
-document.addEventListener('keydown', (e) => {{ if (e.key === 'Escape') closeModal(); }});
+// Stack-aware ESC: ticker modal takes priority (it's visually on top).
+// If both modals are open, the FIRST Escape closes ticker only -- the info
+// modal stays visible underneath. A second Escape closes info. This single
+// handler replaces both the old ticker-only handler and the separate info
+// handler in the click-to-expand block below.
+document.addEventListener('keydown', (e) => {{
+  if (e.key !== 'Escape') return;
+  if (!modal.hasAttribute('hidden')) {{ closeModal(); return; }}
+  if (typeof infoModal !== 'undefined' && infoModal && !infoModal.hasAttribute('hidden')) {{
+    closeInfoModal();
+  }}
+}});
 window.addEventListener('resize', () => {{ if (currentTicker && !modal.hasAttribute('hidden')) renderBigChart(currentTicker); }});
 
 document.querySelectorAll('#ret-table tbody tr').forEach(row => {{
@@ -4938,10 +5554,256 @@ document.querySelectorAll('.wl-card, .an-card').forEach(card => {{
 document.querySelectorAll('.io-stock').forEach(row => {{
   row.addEventListener('click', () => openModal(row.dataset.ticker));
 }});
+// T9/T10: generic ticker-clickable handler. Anything bearing the class +
+// data-ticker opens the modal. Used by the rating-moves panel ticker spans
+// and the unusual-volume hero chips. Cheaper than registering per-section
+// selectors and stays correct if future sections use the same convention.
+document.querySelectorAll('.ticker-clickable[data-ticker]').forEach(el => {{
+  el.addEventListener('click', (e) => {{
+    e.preventDefault();
+    e.stopPropagation();
+    openModal(el.dataset.ticker);
+  }});
+}});
+
+// ============================================================================
+// T11/T12/T14/T15: info-modal stack for click-to-expand drill-downs.
+//
+// Architecture: separate modal element (#info-modal) at lower z-index than
+// the existing ticker modal. When a user clicks an industry / sector /
+// pair-bucket / weekly-point, openInfoModal() shows the info-modal with the
+// relevant content. Tickers within the info-modal also have .ticker-clickable
+// -- their handler opens the existing ticker modal ON TOP of the info-modal
+// (true stacking; closing the ticker modal returns to the info-modal).
+//
+// ESC key + backdrop click are routed via stack priority: if the ticker
+// modal is open, those gestures close it first; only when it's already
+// closed do they affect the info-modal.
+// ============================================================================
+const infoModal = document.getElementById('info-modal');
+const infoModalTitle = infoModal.querySelector('.info-modal-title');
+const infoModalSub = infoModal.querySelector('.info-modal-sub');
+const infoModalBody = infoModal.querySelector('.info-modal-body');
+const infoModalClose = document.getElementById('info-modal-close');
+
+function openInfoModal(title, sub, contentHtml) {{
+  infoModalTitle.innerHTML = title || '';
+  infoModalSub.innerHTML = sub || '';
+  infoModalBody.innerHTML = contentHtml || '';
+  infoModal.removeAttribute('hidden');
+  document.body.classList.add('modal-open');
+  // Wire any ticker-clickable spans inside the new content -- they were
+  // injected after the initial DOMContentLoaded handlers ran, so attach now.
+  // Use _safeOpenTicker so universe-only tickers get a sensible fallback
+  // instead of silently failing.
+  infoModalBody.querySelectorAll('.ticker-clickable[data-ticker]').forEach(el => {{
+    el.addEventListener('click', (e) => {{
+      e.preventDefault();
+      e.stopPropagation();
+      _safeOpenTicker(el.dataset.ticker);
+    }});
+  }});
+}}
+function closeInfoModal() {{
+  infoModal.setAttribute('hidden', '');
+  // Only release modal-open if the ticker modal isn't itself still open.
+  if (modal.hasAttribute('hidden')) document.body.classList.remove('modal-open');
+}}
+
+infoModalClose.addEventListener('click', closeInfoModal);
+infoModal.addEventListener('click', (e) => {{ if (e.target === infoModal) closeInfoModal(); }});
+// ESC handling is centralized in the stack-aware handler near closeModal()
+// above -- the consolidated handler closes the topmost open modal first.
+
+// ----- Helpers for assembling info-modal content -----
+function _capTierBadge(tier) {{
+  if (!tier) return '';
+  return `<span class="im-tier im-tier-${{tier.toLowerCase()}}">${{tier}}</span>`;
+}}
+function _pctSpan(v) {{
+  if (v === null || v === undefined || Number.isNaN(v)) return '<span class="muted">&mdash;</span>';
+  const cls = v >= 0 ? 'pos' : 'neg';
+  return `<span class="${{cls}}">${{v >= 0 ? '+' : ''}}${{v.toFixed(1)}}%</span>`;
+}}
+// Universe-aware ticker opener. If DATA has the ticker (held / watch-listed),
+// opens the existing rich ticker modal. Otherwise shows a "universe only"
+// fallback info-modal with the limited fields we have for that ticker
+// (industry, name, 12mo return, cap tier). This prevents silent no-ops when
+// users click on universe-only tickers in the industry outlook breakdown.
+function _safeOpenTicker(ticker) {{
+  if (DATA[ticker]) {{ openModal(ticker); return; }}
+  let entry = null, industry = '';
+  const inds = AUX_DATA.industries || {{}};
+  for (const ind in inds) {{
+    const m = inds[ind].find(e => e.ticker === ticker);
+    if (m) {{ entry = m; industry = ind; break; }}
+  }}
+  if (entry) {{
+    const tierBadge = entry.cap_tier ? ' ' + _capTierBadge(entry.cap_tier) : '';
+    const body = (
+      `<table class="im-table im-uni-table"><tbody>`
+      + `<tr><td class="muted">Name</td><td>${{entry.name}}${{tierBadge}}</td></tr>`
+      + `<tr><td class="muted">Industry</td><td>${{industry}}</td></tr>`
+      + `<tr><td class="muted">12-month return</td><td class="num">${{_pctSpan(entry.return_12mo)}}</td></tr>`
+      + `</tbody></table>`
+      + `<p class="muted im-uni-note">Limited data: this ticker is in the reference `
+      + `<code>universe.csv</code> but not in your basket or watchlist. Add it to `
+      + `<code>log.xlsx</code> or <code>watchlist.csv</code> for full chart, modal stats, and news.</p>`
+    );
+    openInfoModal(`${{ticker}} &middot; universe only`, industry, body);
+  }} else {{
+    openInfoModal(ticker, 'no detail data',
+      `<p class="muted">No detail data is loaded for this ticker.</p>`);
+  }}
+}}
+
+// T11: industry-card click -> info-modal listing every ticker in that industry.
+document.querySelectorAll('.industry-clickable[data-industry]').forEach(card => {{
+  card.addEventListener('click', (e) => {{
+    // If the user clicked an inner stock row whose ticker has detail DATA
+    // (i.e. it's a held / watchlisted name with full OHLCV), let the inner
+    // handler's openModal() win -- don't ALSO open the industry modal.
+    // But if it's a universe-only ticker (no DATA), the inner openModal call
+    // would silently fail; fall through to open the industry overview info
+    // modal as the next-best drill-down.
+    const inner = e.target.closest && e.target.closest('.io-stock');
+    if (inner && inner.dataset.ticker && DATA[inner.dataset.ticker]) return;
+    const ind = card.dataset.industry;
+    const entries = (AUX_DATA.industries && AUX_DATA.industries[ind]) || [];
+    const rows = entries.map(en => (
+      `<tr class="ticker-clickable" data-ticker="${{en.ticker}}">`
+      + `<td class="im-tkr">${{en.ticker}}${{_capTierBadge(en.cap_tier)}}</td>`
+      + `<td class="im-name">${{en.name}}</td>`
+      + `<td class="num im-ret">${{_pctSpan(en.return_12mo)}}</td>`
+      + `</tr>`
+    )).join('');
+    const sub = `${{entries.length}} tracked ticker${{entries.length === 1 ? '' : 's'}} &middot; sorted by 12-mo return`;
+    const body = entries.length
+      ? `<table class="im-table"><thead><tr><th>Ticker</th><th>Name</th><th class="num">12-mo</th></tr></thead><tbody>${{rows}}</tbody></table>`
+      : `<p class="muted">No tracked tickers in this industry.</p>`;
+    openInfoModal(`Industry &middot; ${{ind}}`, sub, body);
+  }});
+}});
+
+// T12: attribution-row click -> info-modal listing every open position in
+// that industry (matched by the same industry-or-sector-fallback key).
+document.querySelectorAll('.attribution-row-clickable[data-industry]').forEach(row => {{
+  row.addEventListener('click', () => {{
+    const key = row.dataset.industry;
+    const positions = (AUX_DATA.sectors && AUX_DATA.sectors[key]) || [];
+    const rows = positions.map(p => (
+      `<tr class="ticker-clickable" data-ticker="${{p.ticker}}">`
+      + `<td class="im-tkr">${{p.ticker}}</td>`
+      + `<td class="im-name">${{p.name}}</td>`
+      + `<td class="num">${{p.weight_pct.toFixed(1)}}%</td>`
+      + `<td class="num">${{_pctSpan(p.total_pct)}}</td>`
+      + `<td class="num">${{_pctSpan(p.contribution_pp)}}</td>`
+      + `</tr>`
+    )).join('');
+    const sub = `${{positions.length}} open position${{positions.length === 1 ? '' : 's'}} &middot; sorted by contribution`;
+    const body = positions.length
+      ? `<table class="im-table"><thead><tr><th>Ticker</th><th>Name</th><th class="num">Weight</th><th class="num">Return</th><th class="num">Contrib</th></tr></thead><tbody>${{rows}}</tbody></table>`
+      : `<p class="muted">No open positions found for this industry.</p>`;
+    openInfoModal(`Industry attribution &middot; ${{key}}`, sub, body);
+  }});
+}});
+
+// T14: histogram-column click -> info-modal listing every pair whose
+// correlation falls within the clicked bucket. The pairs list comes from
+// AUX_DATA.pairs (pre-sorted by abs(corr) desc); we filter to [lo, hi]
+// inline. Click target is the full-height column wrapper, so even tiny
+// bars are easy to hit.
+document.querySelectorAll('.div-hist-col-clickable[data-bucket-lo]').forEach(bar => {{
+  bar.addEventListener('click', () => {{
+    const lo = parseFloat(bar.dataset.bucketLo);
+    const hi = parseFloat(bar.dataset.bucketHi);
+    const pairs = (AUX_DATA.pairs || []).filter(p => p.corr >= lo && p.corr <= hi);
+    const rows = pairs.map(p => {{
+      const cls = p.corr >= 0.6 ? 'neg' : (p.corr <= 0 ? 'pos' : '');
+      return (
+        `<tr>`
+        + `<td><span class="ticker-clickable im-tkr" data-ticker="${{p.a}}">${{p.a}}</span></td>`
+        + `<td><span class="im-arrow">&harr;</span></td>`
+        + `<td><span class="ticker-clickable im-tkr" data-ticker="${{p.b}}">${{p.b}}</span></td>`
+        + `<td class="num ${{cls}}">${{p.corr >= 0 ? '+' : ''}}${{p.corr.toFixed(2)}}</td>`
+        + `</tr>`
+      );
+    }}).join('');
+    const sub = `${{pairs.length}} pair${{pairs.length === 1 ? '' : 's'}} in range &middot; click any ticker for detail`;
+    const body = pairs.length
+      ? `<table class="im-table"><thead><tr><th>A</th><th></th><th>B</th><th class="num">&rho;</th></tr></thead><tbody>${{rows}}</tbody></table>`
+      : `<p class="muted">No pairs found in this bucket.</p>`;
+    openInfoModal(`Correlation bucket &middot; ${{lo.toFixed(2)}} to ${{hi.toFixed(2)}}`, sub, body);
+  }});
+}});
+
+// T15: hero-week-click rect -> info-modal of that week's top/bottom movers
+// (basket-wide, in base currency). Delegated off the hero SVG since the
+// rects are inserted dynamically by renderHeroChart (which fires multiple
+// times across responsive resizes).
+document.getElementById('hero-chart').addEventListener('click', (e) => {{
+  const rect = e.target.closest && e.target.closest('.hero-week-click');
+  if (!rect) return;
+  const dateKey = rect.dataset.weekEnd;
+  const wk = AUX_DATA.weekly_movers && AUX_DATA.weekly_movers[dateKey];
+  if (!wk) {{
+    openInfoModal(`Week ending ${{dateKey}}`,
+      'no movers recorded for this week',
+      '<p class="muted">No movement data available for this week.</p>');
+    return;
+  }}
+  const mkRow = (m) => (
+    `<tr class="ticker-clickable" data-ticker="${{m.ticker}}">`
+    + `<td class="im-tkr">${{m.ticker}}</td>`
+    + `<td class="num">${{_pctSpan(m.pct)}}</td>`
+    + `</tr>`
+  );
+  const up   = (wk.up   || []).map(mkRow).join('');
+  const down = (wk.down || []).map(mkRow).join('');
+  const body = (
+    `<div class="im-movers">`
+    + `<div class="im-movers-col">`
+    +   `<h4 class="im-movers-h pos">Top movers up</h4>`
+    +   (up   ? `<table class="im-table"><tbody>${{up}}</tbody></table>`   : `<p class="muted">none</p>`)
+    + `</div>`
+    + `<div class="im-movers-col">`
+    +   `<h4 class="im-movers-h neg">Top movers down</h4>`
+    +   (down ? `<table class="im-table"><tbody>${{down}}</tbody></table>` : `<p class="muted">none</p>`)
+    + `</div>`
+    + `</div>`
+  );
+  openInfoModal(`Week ending ${{dateKey}}`,
+    'top movers across your held tickers',
+    body);
+}});
 
 // ---- Palette toggle ---------------------------------------------------
 // Body class controls which set of CSS variables wins. Persist the choice
 // across visits via localStorage so the page remembers the user's preference.
+// Desktop-view override: lets users on narrow viewports force the full
+// desktop layout (page becomes horizontally scrollable). Persisted via
+// localStorage so the choice survives reloads. Mirrors the palette toggle's
+// state-management pattern.
+(function setupDesktopMode() {{
+  const btn = document.getElementById('desktop-mode-btn');
+  if (!btn) return;
+  const KEY = 'stocks-dashboard-force-desktop';
+  function apply(forced) {{
+    document.body.classList.toggle('force-desktop', forced);
+    btn.classList.toggle('active', forced);
+    btn.setAttribute('aria-pressed', forced ? 'true' : 'false');
+    btn.textContent = forced ? 'Mobile view' : 'Desktop view';
+  }}
+  let saved = false;
+  try {{ saved = localStorage.getItem(KEY) === '1'; }} catch (e) {{}}
+  apply(saved);
+  btn.addEventListener('click', () => {{
+    const next = !document.body.classList.contains('force-desktop');
+    apply(next);
+    try {{ localStorage.setItem(KEY, next ? '1' : '0'); }} catch (e) {{}}
+  }});
+}})();
+
 (function setupPalette() {{
   const PALETTE_KEY = 'stocks-dashboard-palette';
   const buttons = document.querySelectorAll('.palette-toggle button');
@@ -5073,6 +5935,11 @@ document.querySelectorAll('.io-stock').forEach(row => {{
   // One-time discovery hint: pulse the edit button + show a tooltip on the
   // first ever page load. Gated on a localStorage flag so returning visitors
   // never see it again. Auto-dismisses after 8s OR on any click anywhere.
+  //
+  // Tooltip position is computed from the button's actual viewport rect so
+  // the arrow lines up regardless of topbar contents -- a prior version
+  // hardcoded `right:24px` which (incorrectly) ended up pointing at the
+  // palette buttons because the topbar is left-aligned within its container.
   (function maybeShowDiscoveryHint() {{
     if (!editBtn) return;
     const DISCOVERED_KEY = 'edit-layout-discovered';
@@ -5080,7 +5947,17 @@ document.querySelectorAll('.io-stock').forEach(row => {{
     catch (e) {{ return; }}  // privacy mode: skip rather than crash
     const tip = document.getElementById('edit-tooltip');
     editBtn.classList.add('pulse');
-    if (tip) tip.hidden = false;
+    if (tip) {{
+      // Anchor the tooltip's top-left ~8px below + aligned with the button's
+      // left edge. The CSS arrow sits at left:18px, so it points up at the
+      // button. Slight left-shift (10px) puts the arrow under the button's
+      // center rather than its leftmost pixel for a softer visual anchor.
+      const r = editBtn.getBoundingClientRect();
+      tip.style.top  = (r.bottom + 8) + 'px';
+      tip.style.left = Math.max(8, r.left - 10) + 'px';
+      tip.style.right = 'auto';
+      tip.hidden = false;
+    }}
     let dismissed = false;
     function dismiss() {{
       if (dismissed) return;
@@ -5114,6 +5991,173 @@ document.querySelectorAll('.io-stock').forEach(row => {{
     defaultOrder.forEach(id => {{ const el = modById(id); if (el) stack.appendChild(el); }});
     applyHidden([]);
     applyPairing();
+  }});
+}})();
+
+// T8: Hero stats picker. Independent of setupLayout to keep responsibilities
+// isolated (modules vs stats can be edited / reset / persisted independently).
+// localStorage schema: {{"selected": ["slug1", "slug2", ...]}} -- an ordered
+// array of currently-visible stat slugs. Anything not in `selected` is hidden
+// outside edit-mode; in edit-mode all 10 stats are visible (greyed if hidden)
+// so the user can toggle them on. Sortable drag in edit-mode reorders.
+(function setupStats() {{
+  const KEY = 'stocks-dashboard-stats-v1';
+  const grid = document.getElementById('stats-grid');
+  if (!grid) return;
+  const defaultSelected = (grid.dataset.statsDefault || '').split(',').filter(Boolean);
+  const allSlugs = (grid.dataset.statsAll || '').split(',').filter(Boolean);
+
+  const cards = () => Array.from(grid.querySelectorAll(':scope > .stat'));
+
+  function load() {{
+    try {{
+      const raw = localStorage.getItem(KEY);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      if (parsed && Array.isArray(parsed.selected)) {{
+        // Drop unknown slugs (forward-compat for future stats added/removed).
+        return parsed.selected.filter(s => allSlugs.includes(s));
+      }}
+    }} catch (e) {{}}
+    return null;
+  }}
+  function save(selected) {{
+    try {{ localStorage.setItem(KEY, JSON.stringify({{ selected: selected }})); }}
+    catch (e) {{}}
+  }}
+  function apply(selected) {{
+    const orderMap = {{}};
+    selected.forEach((s, i) => {{ orderMap[s] = i; }});
+    cards().forEach(card => {{
+      const slug = card.dataset.stat;
+      const isShown = selected.includes(slug);
+      card.dataset.statHidden = isShown ? 'false' : 'true';
+      // CSS `order` reorders without touching DOM, plays nice with Sortable.
+      card.style.order = isShown ? String(orderMap[slug]) : '99';
+      const cb = card.querySelector('.stat-vis-cb');
+      if (cb) cb.checked = isShown;
+      const txt = card.querySelector('.stat-vis-txt');
+      if (txt) txt.textContent = isShown ? 'Shown' : 'Hidden';
+    }});
+  }}
+
+  apply(load() || defaultSelected);
+
+  grid.addEventListener('change', (e) => {{
+    const cb = e.target.closest && e.target.closest('.stat-vis-cb');
+    if (!cb) return;
+    const card = cb.closest('.stat');
+    if (!card) return;
+    const slug = card.dataset.stat;
+    const cur = load() || defaultSelected.slice();
+    const next = cb.checked
+      ? (cur.includes(slug) ? cur : cur.concat([slug]))
+      : cur.filter(s => s !== slug);
+    apply(next);
+    save(next);
+  }});
+
+  // Drag-to-reorder available in edit-mode only. SortableJS reads visual
+  // order via card position; we then derive `selected` from the new order.
+  let sortable = null;
+  function attachSortable() {{
+    if (!window.Sortable || sortable) return;
+    sortable = window.Sortable.create(grid, {{
+      handle: '.stat-grip', draggable: '.stat', animation: 150,
+      ghostClass: 'stat-ghost', chosenClass: 'stat-chosen',
+      onEnd: () => {{
+        // After drag, DOM order reflects user intent. Re-derive selected list
+        // from the new visual order, keeping only currently-shown cards.
+        const order = cards()
+          .filter(c => c.dataset.statHidden !== 'true')
+          .map(c => c.dataset.stat);
+        save(order);
+        apply(order);
+      }},
+    }});
+  }}
+  function detachSortable() {{
+    if (sortable) {{ sortable.destroy(); sortable = null; }}
+  }}
+  // Observe body class changes (edit-mode toggle) instead of hooking the
+  // edit button click directly -- avoids ordering coupling with setupLayout.
+  const onEditChange = () => {{
+    if (document.body.classList.contains('edit-mode')) attachSortable();
+    else detachSortable();
+  }};
+  new MutationObserver(onEditChange).observe(document.body,
+    {{ attributes: true, attributeFilter: ['class'] }});
+  onEditChange();
+
+  // Reset button also clears stats state (one button, both layers).
+  const resetBtn = document.getElementById('reset-layout-btn');
+  if (resetBtn) {{
+    resetBtn.addEventListener('click', () => {{
+      try {{ localStorage.removeItem(KEY); }} catch (e) {{}}
+      apply(defaultSelected);
+    }});
+  }}
+}})();
+
+// T7 cosmetic: alpha sparkline hover. Shows date + value of the nearest
+// point in the header pill; vertical crosshair + dot mark the position.
+// Defensive about missing element so this is a no-op when the sparkline
+// itself was suppressed (less than 5 weeks of data).
+(function setupAlphaHover() {{
+  const wrap = document.getElementById('alpha-sparkline-wrap');
+  const svg  = document.getElementById('alpha-sparkline-svg');
+  const latestEl = document.getElementById('alpha-sparkline-latest');
+  if (!wrap || !svg || !latestEl) return;
+  const dates  = (svg.dataset.dates  || '').split(',').filter(Boolean);
+  const values = (svg.dataset.values || '').split(',').map(parseFloat);
+  if (!dates.length || dates.length !== values.length) return;
+  const cross = svg.querySelector('.alpha-cross');
+  const dot   = svg.querySelector('.alpha-dot');
+  const vb = svg.viewBox.baseVal;   // {{x, y, width, height}}
+  const padX = 2, padY = 4;
+  const vmin = Math.min(...values), vmax = Math.max(...values);
+  const vrange = Math.max(vmax - vmin, 1e-9);
+  const n = values.length;
+  const xAt = (i) => padX + i / Math.max(n - 1, 1) * (vb.width - 2 * padX);
+  const yAt = (v) => padY + (vmax - v) / vrange * (vb.height - 2 * padY);
+  const defaultText = latestEl.dataset.defaultText;
+  const defaultCls = latestEl.classList.contains('neg') ? 'neg' : 'pos';
+
+  function relMonth(dateStr) {{
+    // Compact date for the head pill, e.g. "12 Mar 25".
+    const d = new Date(dateStr + 'T00:00:00');
+    if (isNaN(d.getTime())) return dateStr;
+    const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    return `${{d.getDate()}} ${{months[d.getMonth()]}} ${{String(d.getFullYear()).slice(-2)}}`;
+  }}
+
+  svg.addEventListener('mousemove', (e) => {{
+    const rect = svg.getBoundingClientRect();
+    const vbX = (e.clientX - rect.left) / rect.width * vb.width;
+    // Nearest index in the dataset
+    let best = 0, bestDist = Infinity;
+    for (let i = 0; i < n; i++) {{
+      const d = Math.abs(xAt(i) - vbX);
+      if (d < bestDist) {{ bestDist = d; best = i; }}
+    }}
+    const v = values[best];
+    cross.setAttribute('x1', xAt(best));
+    cross.setAttribute('x2', xAt(best));
+    cross.setAttribute('opacity', '0.6');
+    dot.setAttribute('cx', xAt(best));
+    dot.setAttribute('cy', yAt(v));
+    dot.setAttribute('opacity', '1');
+    latestEl.textContent = `${{relMonth(dates[best])}} · ${{v >= 0 ? '+' : ''}}${{v.toFixed(1)}} pp`;
+    latestEl.classList.remove('pos', 'neg');
+    latestEl.classList.add(v >= 0 ? 'pos' : 'neg');
+  }});
+
+  svg.addEventListener('mouseleave', () => {{
+    cross.setAttribute('opacity', '0');
+    dot.setAttribute('opacity', '0');
+    latestEl.textContent = defaultText;
+    latestEl.classList.remove('pos', 'neg');
+    latestEl.classList.add(defaultCls);
   }});
 }})();
 
@@ -5352,10 +6396,18 @@ def main(demo: bool = False) -> None:
     analyst_candidates = sorted(returns[returns.status == "closed"].index.tolist()) \
         if not returns.empty else []
     analyst_cache = load_analyst_cache()
+    # T9: snapshot the cache BEFORE fetch_analyst_data writes today's version,
+    # so the next render_html can diff "today vs yesterday" for rating moves.
+    snapshot_prior_analyst()
     if all_fetch_tickers:
         analyst, analyst_failed = fetch_analyst_data(all_fetch_tickers, analyst_cache)
     else:
         analyst, analyst_failed = analyst_cache, set()
+    rating_moves = compute_rating_moves(PRIOR_ANALYST_CACHE, analyst)
+    if rating_moves:
+        print(f"Rating moves: {len(rating_moves)} material moves vs last build")
+    elif not PRIOR_ANALYST_CACHE.exists():
+        print("Rating moves: no prior cache (first build) -- tracking begins next build")
 
     # Per-ticker news: same 7-day TTL pattern as analyst cache. Most builds
     # reuse the parquet; a fresh fetch happens roughly once per week per ticker.
@@ -5386,6 +6438,41 @@ def main(demo: bool = False) -> None:
     if demo and SORTABLE_VENDOR.exists():
         sortable_inline_js = SORTABLE_VENDOR.read_text(encoding="utf-8")
 
+    # T10: unusual-volume chips near the hero subtitle. Filter to open
+    # positions where today's volume is >2x the 63-day average AND the
+    # latest-day move is non-trivial (|move| > 1%). Sorted by abs(move),
+    # capped at 3 pills (more would clutter the hero).
+    unusual_vol = []
+    if not quant_metrics.empty and not prices.empty and not returns.empty and len(prices.index) >= 2:
+        open_tkrs = set(returns[returns.status == "open"].index.tolist())
+        last_idx = prices.index[-1]
+        prev_idx = prices.index[-2]
+        for tkr in quant_metrics.index:
+            if tkr not in open_tkrs or tkr not in prices.columns:
+                continue
+            vr = quant_metrics.loc[tkr, "vol_ratio"]
+            if pd.isna(vr) or float(vr) <= 2.0:
+                continue
+            try:
+                last_px = float(prices.at[last_idx, tkr])
+                prev_px = float(prices.at[prev_idx, tkr])
+            except (KeyError, ValueError, TypeError):
+                continue
+            if not (last_px > 0 and prev_px > 0):
+                continue
+            daily_pct = (last_px / prev_px - 1) * 100
+            if abs(daily_pct) <= 1:
+                continue
+            unusual_vol.append({
+                "ticker":    str(tkr),
+                "daily_pct": float(daily_pct),
+                "vol_ratio": float(vr),
+            })
+        unusual_vol.sort(key=lambda x: abs(x["daily_pct"]), reverse=True)
+        unusual_vol = unusual_vol[:3]
+        if unusual_vol:
+            print(f"Unusual volume: {len(unusual_vol)} open name(s) on >2x vol with >1% move")
+
     # Build-health: union of every fetcher's failed-ticker set so the footer
     # surfaces silent yfinance failures that would otherwise hide in stderr.
     # "attempted" is the held+watch universe (OHLCV is the gate — anything
@@ -5412,7 +6499,10 @@ def main(demo: bool = False) -> None:
                        ticker_news=ticker_news,
                        demo_mode=demo or not LOG_XLSX.exists(),
                        sortable_inline_js=sortable_inline_js,
-                       build_health=build_health)
+                       build_health=build_health,
+                       rating_moves=rating_moves,
+                       prior_analyst_exists=PRIOR_ANALYST_CACHE.exists(),
+                       unusual_vol=unusual_vol)
 
     out_path = DEMO_OUT_HTML if demo else OUT_HTML
     out_path.parent.mkdir(parents=True, exist_ok=True)

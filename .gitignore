@@ -22,7 +22,10 @@ log.xlsx
 
 # Local planning / scratch docs not meant for the repo
 v1.6-plan.md
+v1.7-plan.md
 gemini tips.md
+audit_implement.md
+dashboard-audit.md
 
 # Local daily-rebuild log (run history; machine-specific)
 # Note: daily_rebuild.ps1 and setup_scheduled_task.ps1 ARE committed so the
