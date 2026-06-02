@@ -1,0 +1,24 @@
+# Generated dashboard output (2.4 MB self-contained HTML; edit build.py instead)
+docs/index.html
+demo.html
+
+# Binary parquet caches (committed for fast cold-start CI, opaque to Claude)
+data/*.parquet
+
+# Python bloat
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Local-only logs and scratch
+daily_rebuild.log
+
+# Asset binaries (README screenshots — read as images via Read tool only if needed)
+docs/assets/*.jpeg
+docs/assets/*.png
+docs/assets/*.gif
+
+# OneDrive sync artifacts
+*.tmp
+~$*
