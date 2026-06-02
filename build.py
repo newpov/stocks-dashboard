@@ -1368,8 +1368,11 @@ def build_positions(transactions: pd.DataFrame, prices: pd.DataFrame) -> pd.Data
 
         ytd_cutoff = pd.Timestamp(f"{latest_date.year}-01-01")
         ytd_sub = ticker_series.loc[:ytd_cutoff]
-        ytd_ref = float(ytd_sub.iloc[-1]) if not ytd_sub.empty else avg_buy_price
-        ytd_pct = (latest / ytd_ref - 1) * 100 if status == "open" and ytd_ref > 0 else float("nan")
+        # Fall back to NaN (not avg_buy_price) when no prior-year data exists, so the
+        # YTD column renders as `—` instead of a silently-wrong "return since buy".
+        # Triggers only for tickers with <1y of price history (e.g. recent IPOs).
+        ytd_ref = float(ytd_sub.iloc[-1]) if not ytd_sub.empty else float("nan")
+        ytd_pct = (latest / ytd_ref - 1) * 100 if status == "open" and pd.notna(ytd_ref) and ytd_ref > 0 else float("nan")
 
         txn_list = [
             {
@@ -7449,8 +7452,11 @@ def main(demo: bool = False) -> None:
     print(f"Benchmark {BENCHMARK} series ({BASE_CCY}): {len(bench_series)} points")
 
     contrib = compute_contributors(returns)
-    print(f"Contributors: top {contrib.iloc[0].name} ({contrib.iloc[0].contribution_pp:+.2f} pp), "
-          f"worst {contrib.iloc[-1].name} ({contrib.iloc[-1].contribution_pp:+.2f} pp)")
+    if not contrib.empty:
+        print(f"Contributors: top {contrib.iloc[0].name} ({contrib.iloc[0].contribution_pp:+.2f} pp), "
+              f"worst {contrib.iloc[-1].name} ({contrib.iloc[-1].contribution_pp:+.2f} pp)")
+    else:
+        print("Contributors: none (no open positions)")
 
     signals = compute_signals(prices)
     sig_counts = signals.signal.value_counts()
