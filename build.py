@@ -55,6 +55,288 @@ TICKER_NEWS_CACHE = ROOT / "data" / "ticker_news_cache.parquet"
 TICKER_NEWS_TTL_DAYS = 7   # same 7-day cadence as analyst data
 TICKER_NEWS_TOP_N = 5      # items stored per ticker
 
+# v1.9 Pocket Lesson: 100 short, beginner-friendly tips tied to concepts the
+# dashboard actually surfaces. JS picks one at random on each page load; a
+# "Next tip" button rotates without reloading. A topbar toggle hides the card
+# entirely (state persisted in localStorage as `pocketLessonOn`).
+# Each entry is {"title": str, "body": str (3-4 sentences plain English)}.
+# Edit freely; the JS just expects an array of {title, body}.
+POCKET_LESSONS: list[dict[str, str]] = [
+    {"title": "Time-weighted return (TWR)",
+     "body": "TWR measures how your investment skill performed, stripping out the impact of when you added or withdrew money. Adding £1,000 right before a 10% drop shouldn't make your strategy look bad — TWR corrects for that. This dashboard uses TWR so opening a new position doesn't reset the basket's track record."},
+    {"title": "Annualised return",
+     "body": "Annualised return rescales any return to a per-year figure, letting you compare a 6-month gain to a 3-year one fairly. A 50% return over 2 years is roughly 22.5% annualised, not 25%, because of compounding. Treat single-year annualised numbers with caution — they can over-extrapolate noise."},
+    {"title": "Sharpe ratio basics",
+     "body": "Sharpe measures return per unit of risk: higher means you got paid more for the volatility you endured. Above 1 is considered solid, above 2 excellent, but the ratio depends on your risk-free rate assumption. It's most useful for comparing strategies, not as an absolute grade."},
+    {"title": "Win rate alone misleads",
+     "body": "A 90% win rate sounds great until you realise the 10% losers wiped out all the gains. Win rate must be paired with average win size vs average loss size — that's why this dashboard shows both win rate AND win/loss ratio. A 50% win rate with a 3:1 win/loss ratio is far better than 80% at 1:3."},
+    {"title": "Win/loss ratio explained",
+     "body": "Win/loss ratio is your average winning trade size divided by your average losing trade size. A ratio of 2 means winners are twice the size of losers on average — even a 40% win rate is profitable at that ratio. Pair it with win rate for the full picture."},
+    {"title": "Maximum drawdown",
+     "body": "Max drawdown is the worst peak-to-trough decline your portfolio has ever experienced. A -25% drawdown means you watched £100k become £75k from some prior high. Recovery time matters as much as depth — a fast 30% drop that bounces back in 3 months is psychologically easier than a 15% drop dragging on for 2 years."},
+    {"title": "YTD return",
+     "body": "Year-to-date return shows performance from January 1 to today, ignoring everything before. It's useful for tax planning and year-end comparisons but can mislead mid-year — a strong Q1 followed by flat months still shows a great YTD. Always look at YTD alongside longer-horizon numbers."},
+    {"title": "Alpha vs benchmark",
+     "body": "Alpha is the return you generated above what a passive benchmark like SPY would have delivered. Positive alpha means your stock picks beat the index; negative means you'd have done better just buying the ETF. The 30-day rolling alpha sparkline shows how that gap evolves week by week."},
+    {"title": "The loss-zone shading",
+     "body": "The subtle red wash below the 0% line marks the loss zone — when the basket dips below the original baseline. Even a brief crossing is immediately visible, so you can quickly tell whether you're in green or red territory. Crossing back above takes more positive momentum than the depth of the dip suggests, because of compounding."},
+    {"title": "Why TWR renormalises",
+     "body": "When you open a new position, your portfolio's denominator grows but the new stock starts at zero return. TWR renormalises so the line doesn't visually reset just because you added capital. The compounded chain stays smooth — only actual price changes move the line."},
+    {"title": "The Δ delta badge",
+     "body": "The Δ at the right edge of the hero chart shows your basket's lead (or lag) over SPY in percentage points right now. A Δ +4.2pp means you're 4.2 percentage points ahead of just buying the index. Over years this matters; over weeks it's noise."},
+    {"title": "Drawdown vs return",
+     "body": "Two strategies can both deliver +15% per year, but one might have a -10% worst drawdown and the other -40%. The first is dramatically easier to live with. The dashboard shows current drawdown next to worst-ever so you can sense how close you are to a familiar low."},
+    {"title": "Standard deviation as risk",
+     "body": "Investing literature uses standard deviation of returns as the default risk proxy. It captures volatility but not tail risk — a strategy that loses 80% once a decade has the same stdev as one that loses 5% each month. Always look at max drawdown alongside it."},
+    {"title": "Sortino vs Sharpe",
+     "body": "Sortino is like Sharpe but only penalises downside volatility, ignoring upside swings. It's a better measure for asymmetric strategies — like covered calls — where Sharpe unfairly punishes wins. Most dashboards still use Sharpe because it's the convention."},
+    {"title": "Volatility ≠ risk",
+     "body": "Volatility measures how much prices swing; risk is the chance of permanent loss. A volatile stock that always recovers (e.g. quality compounders) has low real risk. A flat stock heading toward bankruptcy has low volatility but maximum risk. Don't conflate them."},
+    {"title": "Beta basics",
+     "body": "Beta measures how much a stock moves relative to the market. Beta of 1.2 means 20% more volatile than SPY; 0.8 means 20% less. Tech stocks typically have beta above 1, utilities below. Beta only matters if you're hedging or constructing factor-based portfolios."},
+    {"title": "Correlation basics",
+     "body": "Correlation runs from -1 (move opposite) through 0 (independent) to +1 (move together). For portfolio diversification, lower or negative correlations between holdings reduces overall volatility. Two stocks at 0.9 correlation are essentially the same position from a risk lens."},
+    {"title": "The 30-stock myth",
+     "body": "Academic research suggests ~30 stocks captures most of the diversification benefit available in a single market. Beyond that, adding more names mainly adds tracking-error noise without lowering risk. But concentration in one sector across 30 names doesn't diversify at all."},
+    {"title": "Sector concentration",
+     "body": "If 40% of your basket is tech, your portfolio's fate is essentially the Nasdaq's — no matter how many individual names you hold. The sector chip filter on the main table lets you sense this concentration at a glance. Diversifying within tech helps slightly, but not much."},
+    {"title": "Best diversifiers",
+     "body": "The Best diversifiers panel highlights stocks in your basket with the lowest correlation to the rest. Keeping a few of these — even ones you find boring — is what stops your whole basket moving as one body when the market sells off."},
+    {"title": "Most-correlated pairs",
+     "body": "The Most correlated pairs list flags positions that essentially move as one. Holding both gives you no diversification benefit — you've effectively got a double-weight position in a single bet. Consider whether you really need both."},
+    {"title": "RSI 14-day",
+     "body": "Relative Strength Index measures momentum on a 0-100 scale from the last 14 days of price action. Above 70 is conventionally overbought; below 30 oversold. RSI works well in range-bound markets and badly in strong trends."},
+    {"title": "Why RSI fails in trends",
+     "body": "In a strong uptrend, RSI can stay above 70 for weeks while the price keeps climbing. Selling on an overbought signal in 2020 or 2024 would have cost a fortune. Pair RSI with trend context — like distance from the 200-day average."},
+    {"title": "200-day moving average",
+     "body": "Price above the 200-day SMA is the classic in-an-uptrend signal; below it is downtrend. The 200-day is slow but reliable — it filters short-term noise and rarely flips. The vs 200d stat in the modal shows how far above or below each position sits."},
+    {"title": "ATR (Average True Range)",
+     "body": "ATR measures the typical price range over the last 14 days, in absolute terms. It's the most honest volatility measure for individual stocks — not annualised, not normalised, just how much does this thing move on a normal day. Useful for setting stops at 2× ATR."},
+    {"title": "52-week range position",
+     "body": "This stat shows where the current price sits between the 52-week low (0%) and high (100%). Names at 90%+ are near multi-year highs — breakout candidates or due for cool-off. Names below 25% are deep in their range: value or value-trap, context decides."},
+    {"title": "Volume ratio",
+     "body": "Volume ratio compares today's volume to the 63-day average. Above 2× often signals news — earnings, M&A, rating change, macro event. The dashboard surfaces these as unusual-volume chips. Worth checking why the move happened before reacting."},
+    {"title": "Analyst target prices",
+     "body": "Analyst targets are 12-month price forecasts, averaged across the analysts covering a stock. Aggregated targets are useful as a sanity check, but individual targets are notoriously biased — sell-side analysts rarely issue sell ratings on their own coverage. Read targets as rough consensus, not gospel."},
+    {"title": "The 1-5 recommendation scale",
+     "body": "Most data sources convert analyst ratings to a 1-5 scale: 1 = Strong Buy, 5 = Strong Sell, 3 = Hold. A mean below 2 means broad bullish consensus; above 3 means caution. Few stocks ever cross above 3 because analysts are structurally biased to Hold rather than Sell."},
+    {"title": "Buy-rating bias",
+     "body": "Sell-side analysts work for banks that want their corporate clients (the rated companies) to remain customers. Issuing a Sell rating burns those relationships. Result: ~60% of all analyst ratings are Buy, ~35% Hold, ~5% Sell. Adjust your interpretation accordingly."},
+    {"title": "Number of analysts matters",
+     "body": "A 30% upside from 25 analysts is more meaningful than the same target from 2 analysts on a thinly-covered small-cap. The Analyst column shows coverage depth — a thin number means take any consensus with extra salt."},
+    {"title": "Coverage gaps",
+     "body": "Some small-cap and foreign-listed names have zero analyst coverage. That doesn't mean they're bad — it means the institutional buy-side never funded research on them. Some of the best long-term opportunities historically came from this overlooked pool, but you're on your own for analysis."},
+    {"title": "Upside % interpretation",
+     "body": "Upside = (target price ÷ current price - 1) × 100. A 40% upside on a tightly-followed mega-cap is a strong signal; the same upside on a thinly-covered micro-cap may just reflect optimistic 12-month-out modelling. Pair with number of analysts and recent rating changes."},
+    {"title": "Rating moves > ratings",
+     "body": "A stock at Hold that just got upgraded from Sell tells you more than one perpetually rated Buy. The Rating moves panel surfaces these changes — analyst opinion shifts often lead price by weeks. Persistent ratings carry little information; recent changes do."},
+    {"title": "Market cap tiers",
+     "body": "Mega-cap: > $200B. Large: $10B–$200B. Mid: $2B–$10B. Small: < $2B. Different tiers behave differently — small-caps outperform over decades but with much higher volatility and drawdowns. The cap tier badge on each ticker keeps this visible."},
+    {"title": "GICS sectors briefly",
+     "body": "Global Industry Classification Standard splits the equity market into 11 sectors: Tech, Healthcare, Financials, Communications, Discretionary, Staples, Industrials, Energy, Materials, Utilities, Real Estate. Each behaves differently in different economic regimes — utilities outperform in recessions, tech in growth."},
+    {"title": "Industry vs sector",
+     "body": "Sector is the top level (e.g. Technology); industry is the sub-classification (e.g. Software, Semiconductors). The dashboard groups by industry where possible because behaviour is more uniform — semiconductor stocks correlate more with each other than with consumer-tech."},
+    {"title": "FX attribution",
+     "body": "For non-GBP holdings, your return splits into the stock's native return + the currency move against GBP. If a US stock gained 10% but the dollar weakened 5% against the pound, you actually earned ~4.5% in GBP terms. The FX delta row in the modal makes this explicit."},
+    {"title": "Currency exposure",
+     "body": "Holding US stocks gives you dollar exposure whether you want it or not. A 50% USD allocation means a stronger pound costs you even if every stock did fine. The FX bar at the bottom of the hero chart shows GBP/USD week by week — a visual reminder of currency drift."},
+    {"title": "Realised vs unrealised P&L",
+     "body": "Realised P&L is locked in from completed sales — it's already in your pocket (or out of it). Unrealised P&L is paper gain or loss on still-open positions, which can swing wildly. Both matter for tax (only realised counts) but only realised matters for actual cash."},
+    {"title": "Post-exit move",
+     "body": "When you sell, the stock keeps moving without you. The post-exit field shows what it did since: positive means you missed gains (regret), negative means you escaped before a fall (lucky escape). Both are educational — neither means you made a mistake in real-time."},
+    {"title": "Renormalised TWR explained",
+     "body": "Time-weighted return chains period-by-period returns multiplicatively so each window's gain compounds. Adding new positions starts a new chain link at zero — the basket as a whole keeps compounding from the original baseline. This isolates portfolio skill from cash-flow timing."},
+    {"title": "Equal weight vs market cap weight",
+     "body": "Equal weight means each position is the same size; market-cap weight means bigger companies get more capital. Equal-weight historically outperforms long-term (you're overweight small/mid caps) but with higher drawdowns. The dashboard's weight field shows your actual allocation."},
+    {"title": "The 2% rule",
+     "body": "A common rule: don't put more than 2% of your portfolio in any single position. This caps the damage from any single name going to zero. 2% is conservative for high-conviction picks; some allocators run 5%-10% on their best ideas, accepting higher single-name risk."},
+    {"title": "Averaging down vs DCA",
+     "body": "Averaging down = buying more as the price falls, lowering your cost basis. Dollar-cost averaging = buying fixed amounts on schedule regardless of price. Averaging down only works if your thesis remains intact; DCA is mechanical and doesn't require ongoing judgement."},
+    {"title": "Selling winners too early",
+     "body": "The most common psychological mistake: cutting profits at +10% while letting losses run to -40%. Letting winners compound is mathematically how portfolios get rich. The lucky escapes / regrets table helps confront the asymmetry directly."},
+    {"title": "Holding losers too long",
+     "body": "The mirror problem: refusing to sell a loser because that locks in the loss. The loss already happened; selling just acknowledges it. Anchoring on your buy price is the #1 way amateur investors underperform — focus on whether the thesis still holds, not your cost basis."},
+    {"title": "Anchoring on buy price",
+     "body": "Your buy price is meaningless to the future of the stock. The market doesn't know or care what you paid. When deciding whether to keep or sell, ask: would I buy this stock at today's price with fresh capital? If no, sell — your buy price is sunk."},
+    {"title": "Confirmation bias",
+     "body": "Once you own a stock, you'll find yourself reading more bullish articles about it. This is normal but dangerous — you'll miss disconfirming evidence until it's too late. Force yourself to actively seek the bear case on your largest holdings every quarter."},
+    {"title": "FOMO warning",
+     "body": "Stocks that have just rallied 50% feel safest to buy *because* they've rallied — the momentum is visible and exciting. They're actually the most dangerous moments. The 52-week-range stat (near-high vs mid-range) is partly a FOMO check."},
+    {"title": "Recency bias",
+     "body": "Whatever happened last month feels more important than it is. A stock that's down 20% in 4 weeks feels broken even if its 3-year chart looks fine. The 1m, 3m, YTD, total returns side-by-side in the modal exist to fight recency bias — always check multiple horizons."},
+    {"title": "Loss aversion",
+     "body": "Behavioural research shows people feel a loss roughly twice as intensely as the equivalent gain. This explains why investors panic-sell at lows and refuse to take losses gracefully. The dashboard's risk metrics (Sharpe, drawdown) help you pre-commit to risk levels before emotion takes over."},
+    {"title": "Spread and slippage",
+     "body": "Buying at market price means you pay the ask, not the mid-price. For thinly-traded small-caps the spread can be 1%+ of the trade. Limit orders avoid spread cost but risk not filling. For weekly-or-less trading frequency, spread cost is a real drag on returns."},
+    {"title": "Stop loss basics",
+     "body": "A stop loss is a pre-committed price at which you'll sell, no matter how much you want to hold. The exit strategy table in the dashboard suggests 2× ATR stops — twice the typical daily range. This survives normal noise but cuts losses on real breakdowns."},
+    {"title": "2× ATR stop",
+     "body": "Setting your stop at 2× ATR below the recent price means you tolerate normal volatility but exit on outsized moves. ATR is honest about how much the stock typically moves, so a 2× ATR stop adapts to volatile vs calm stocks automatically. Static % stops don't."},
+    {"title": "Trailing stop",
+     "body": "A trailing stop moves up as the price moves up but never down. Combined with 2× ATR, it lets winners run while protecting downside. Trailing stops are the simplest way to mechanise cut losses, let winners ride — the hardest single behaviour in trading."},
+    {"title": "Rebalancing",
+     "body": "Rebalancing = selling some of your winners to buy more of your laggards, restoring target weights. It's counter-intuitive but historically adds 0.5-1% per year because you're selling high and buying low mechanically. Most do this annually or semi-annually."},
+    {"title": "Concentration limits",
+     "body": "Even with high conviction, hard-capping any single position at e.g. 10% protects against single-name disasters. The S&P 500 itself rebalances away from over-concentration in any single name. Your portfolio dashboard should make concentration obvious — that's why top contributor is a default stat."},
+    {"title": "Cash position",
+     "body": "Cash isn't dead weight — it's an option. Holding 5-10% cash means you can act on opportunities when they appear without selling existing positions. Cash also dampens volatility, improving Sharpe ratio. Don't treat 100% invested as the default."},
+    {"title": "Time horizon matters",
+     "body": "A 10-year horizon means you can ignore monthly noise and tolerate larger drawdowns. A 6-month horizon means liquidity, low volatility, and avoiding tail risk matter most. Mismatched horizon = wrong portfolio. Your stop-loss aggressiveness should match your time horizon."},
+    {"title": "Interest rates and stocks",
+     "body": "Higher rates make bonds more attractive vs stocks, especially growth stocks whose future earnings get discounted more heavily. Lower rates do the opposite — they're a structural tailwind for stocks, especially growth. The central bank posture matters enormously."},
+    {"title": "Inflation impact",
+     "body": "Moderate inflation (2-3%) is fine for stocks long-term — companies pass costs through. High unexpected inflation hurts growth stocks (future earnings devalued) and helps commodity, energy, and real-estate names. Inflation-sensitive sectors deserve a place in any long-horizon basket."},
+    {"title": "Yield curve briefly",
+     "body": "The yield curve plots interest rates across bond maturities (3m, 1y, 5y, 10y, 30y). Normally upward-sloping (longer bonds yield more). When it inverts (short rates higher than long), a recession has historically followed within 18 months. Watch it as a slow macro signal."},
+    {"title": "Recession indicators",
+     "body": "Reliable historical recession indicators: inverted yield curve, rising unemployment (Sahm rule: +0.5pp from low), falling PMI below 50, and credit spreads widening. Stocks often peak 6-12 months before recessions actually start. Lead times are long, false signals exist."},
+    {"title": "Geopolitical risk",
+     "body": "Wars, sanctions, supply-chain disruptions, and trade tariffs all hit stocks — but rarely permanently. Markets generally recover within 6-18 months of major geopolitical shocks. Don't sell into the panic; rebalance toward the names most unfairly punished."},
+    {"title": "The WATCH tag",
+     "body": "Watchlist tickers are stocks you're tracking but don't own. They show up in the modal with their 12-month return for context but contribute zero weight to your basket stats. The watchlist is your idea funnel — keep it short and curated."},
+    {"title": "Closed positions in stats",
+     "body": "Win rate, win/loss ratio, and exit-strategy metrics all use closed positions to give you historical performance data. Open positions don't count yet because the outcome is unknown. The dashboard's closed-position filter shows just these — useful for honest self-assessment."},
+    {"title": "Why some positions show CLOSED",
+     "body": "A position is classified closed when the most recent transaction is a SELL. This is a transactional-recency rule — robust to partial exits and to multiple open/close cycles on the same ticker. It doesn't require knowing exact share quantities."},
+    {"title": "The rolling alpha sparkline",
+     "body": "The thin line under the hero chart shows your basket's excess return vs SPY over a rolling 30-day window. Green segments = you beat SPY; red = you trailed. Persistent green means your stock picks are adding real value; persistent red means you might as well own the index."},
+    {"title": "Drawdown sparkline",
+     "body": "The red drawdown sparkline shows how far below the prior peak the basket sits at each date. A nearly-flat line at 0% means a smooth ride; deep red excursions are stress tests you survived. Pair the current drawdown with the worst-seen number to gauge familiarity."},
+    {"title": "Weekly movers",
+     "body": "Click any weekly point on the hero chart to see that week's biggest up and down movers in your basket. Most weeks are dominated by 2-3 names; concentration of P&L into a few stocks is normal but worth noticing. If the same name dominates week after week, it's becoming your portfolio."},
+    {"title": "Industry outlook",
+     "body": "The industry-outlook section shows 12-month returns across an S&P 500-wide universe, grouped by industry. It tells you which industries are hot or cold — useful for spotting where the market is allocating attention. Industries already up 50%+ tend to mean-revert; bottom-quartile industries often lead the next cycle."},
+    {"title": "Top contributor / detractor",
+     "body": "These stats name your basket's single biggest positive and negative driver. Healthy diversification looks like contributions spread across many names. If your top contributor is +12pp while everyone else is +1pp each, your basket's fate is really one stock's fate."},
+    {"title": "Renormalised contribution",
+     "body": "A position's contribution = its return × its weight in the portfolio. A 100% winner at 1% weight contributes the same as a 10% winner at 10% weight. The attribution breakdown makes this math obvious — you can't ignore weight when judging position impact."},
+    {"title": "Pyramid building",
+     "body": "Pyramid building = adding to winners as they prove themselves, not at the start. Risk is small early (small position, easy stop) but you compound into the names actually working. The opposite of averaging down — and historically more profitable in trend-following styles."},
+    {"title": "Conviction sizing",
+     "body": "Some allocators size positions by conviction: 5% for high-conviction ideas, 2% for medium, 1% for exploratory. This makes failure cheap and success meaningful. Equal-weighting everything means your conviction effectively doesn't show up in your portfolio."},
+    {"title": "Trading commissions",
+     "body": "Most retail brokers are commission-free, but spread, slippage, and FX conversion costs still apply. International trades often cost 0.5-1% in FX alone. Always check the effective cost of a trade, not just the headline commission-free claim."},
+    {"title": "Cost basis methods",
+     "body": "FIFO (first-in-first-out) is the default cost basis in most jurisdictions: when you sell, the oldest shares leave first. Some allow LIFO or specific-lot identification — these matter for tax optimisation, especially in volatile names where lot selection can swing realised gains by 30%+."},
+    {"title": "Capital gains short vs long",
+     "body": "In most countries, capital gains tax is lower on positions held longer than 12 months. Selling at 11 months instead of 13 months can cost you 10-20% extra in tax. Worth checking your jurisdiction's specific threshold before exit-timing decisions."},
+    {"title": "Tax-loss harvesting",
+     "body": "Selling losers to crystallise capital losses you can offset against gains is tax-loss harvesting. UK and US both allow this, with rules around wash sales (re-buying immediately disqualifies the loss). End of tax year is the usual season — but it's a year-round opportunity."},
+    {"title": "The realised P&L field",
+     "body": "Realised P&L is the locked-in profit from closed positions: (avg sell price - avg buy price) × shares sold. Once you've sold, this number doesn't move. It's the cleanest measure of historical trading skill — separate from open-position swings that are still subject to market noise."},
+    {"title": "Dividend yield",
+     "body": "Dividend yield = annual dividend / current price. Yields above 5-6% are unusual and often a red flag (price may have collapsed). Stable dividend payers (utilities, consumer staples) yield 2-4%; growth stocks often pay nothing. This dashboard doesn't model dividends — assume them as bonus return."},
+    {"title": "The Top 10 filter",
+     "body": "The Top 10 filter on the main table shows your 10 best-returning positions. Useful for confirming your conviction names are actually delivering. If your best ideas aren't in your top 10, your conviction sizing might not be matching reality."},
+    {"title": "The Losers filter",
+     "body": "Losers filter = open positions with negative return. These deserve more attention than winners: a thesis broken? Sector rotation against you? An earnings miss? Going through losers once a month and asking why is this here is one of the highest-ROI portfolio reviews."},
+    {"title": "The sector chip filter",
+     "body": "The sector chip lets you focus on one slice of the basket at a time. Use it to spot-check whether your tech allocation has overconcentrated, or whether your defensive sleeve is doing its job in a drawdown. Concentration is most visible when you isolate one sector."},
+    {"title": "What renormalised TWR means",
+     "body": "Time-weighted return where opening a new position doesn't reset the line. Each existing position keeps compounding; new positions start their own chain. The overall basket is the weighted average — the fairest measure of multi-period multi-position portfolio skill."},
+    {"title": "Why the hero compares to SPY",
+     "body": "S&P 500 (SPY) is the default benchmark because it's the cheapest, most liquid, most-held diversified US equity exposure. If your stock picks can't beat SPY over a few years, you'd be better off just owning the ETF. The Δ delta badge keeps that comparison front-and-centre."},
+    {"title": "Basket leading SPY temporarily",
+     "body": "Even passive investors who own SPY can outperform for a year through luck. The relevant question: does your basket beat SPY on a Sharpe-adjusted basis over 3+ years? Single-year alpha is mostly noise; multi-year alpha is some signal."},
+    {"title": "The Buy rating's silent contract",
+     "body": "When an analyst issues a Buy, they're effectively saying this stock will return 10%+ over 12 months relative to alternatives. Read the rating, then check whether the stated upside (target ÷ current) actually delivers that. Sometimes a Buy has only 3% implied upside — the rating doesn't match the math."},
+    {"title": "Why Strong Sell is rare",
+     "body": "Strong Sell ratings damage an analyst's relationship with the rated company. Companies retaliate by cutting access to management, conferences, and earnings calls. So analysts use euphemisms: Underperform, Hold (when they really mean sell), or coverage drop. Read between the lines."},
+    {"title": "The news section's purpose",
+     "body": "The news feed isn't a trading signal — it's situational awareness. Markets often move on news, but by the time it's in headlines, it's priced in. Use the news to know why things are moving, not as a buy/sell trigger."},
+    {"title": "Per-ticker news in the modal",
+     "body": "Each ticker modal shows up to 5 recent headlines about that specific company. Useful when something moves and you want to know if there's a known catalyst — earnings beat, downgrade, merger rumour. Absence of news + a big move often means index/sector flow, not company-specific."},
+    {"title": "The volume signal",
+     "body": "The Volume stat in the modal shows today's volume ÷ 63-day average. Above 1.5× without obvious news often precedes a price move. The unusual-volume chips surface the most extreme examples — worth checking why before deciding what to do."},
+    {"title": "The breakout pattern",
+     "body": "A breakout = price closes above a multi-month resistance level on heavy volume. Combined with a 52-week-high stat near 100% and elevated volume ratio, breakouts have been one of the most robust technical patterns historically. But failed breakouts are common — confirmation matters."},
+    {"title": "The oversold bounce",
+     "body": "RSI below 30 combined with proximity to 52-week-low historically yields short-term bounces. Doesn't mean the long-term trend is up — just that mean-reversion plays a role in the short term. The re-entry ideas section identifies these in your historical holdings."},
+    {"title": "Survivorship bias warning",
+     "body": "Past performance studies have a survivorship-bias problem: they include companies that still exist but exclude bankruptcies. Long-run stock returns reported as the market returns 10% implicitly assume you avoided the disasters. Your portfolio is exposed to disasters academic studies hide."},
+    {"title": "The compound interest question",
+     "body": "At 7% per year, money doubles every ~10 years (rule of 72). At 10%, every 7 years. The difference between 7% and 10% annualised return doesn't sound dramatic, but over 30 years it's the difference between 8× and 17× — more than twice as much money."},
+    {"title": "Fees compound too",
+     "body": "A 1% fee per year sounds small. Over 30 years it compounds to ~26% of final value. Funds with 2% expense ratios end up with roughly half the final value of equivalent 0.05% index funds, even if gross returns match. Fees are the silent return killer."},
+    {"title": "Time in the market",
+     "body": "Studies of market timers find that missing the 10 best days over decades cuts long-term returns dramatically. Those best days often cluster right after the worst days. Lesson: it's almost impossible to time exits well, so disciplined buy-and-hold tends to beat trying to dodge."},
+    {"title": "What this dashboard won't tell you",
+     "body": "No metric on this dashboard tells you whether to buy or sell. They're decision aids: context to make the call yourself, then accountability for the choice. The most valuable thing any portfolio tool does is force you to look at uncomfortable numbers — drawdown, losers, FX drag — that emotion would otherwise hide."},
+]
+
+# v1.9 #7: tag each tip with a category for the filter chips. Categories are
+# tied to dashboard sections so a user can say "I'm looking at the modal --
+# what's there to learn about quant signals?" and narrow the pool. Mapping is
+# title-prefix-based to keep edits surgical -- adding a new tip means picking
+# the matching prefix below or extending the list. Anything unmapped falls
+# into "Concepts" which is fine for the catch-all framing tips.
+POCKET_LESSON_CATEGORIES: dict[str, list[str]] = {
+    "Returns": [
+        "Time-weighted return", "Annualised return", "YTD return", "Alpha vs",
+        "Why TWR", "Renormalised TWR", "What renormalised TWR",
+        "The Δ delta", "Realised vs unrealised", "Post-exit move",
+        "The compound interest", "The realised P&L",
+    ],
+    "Risk": [
+        "Sharpe", "Maximum drawdown", "Drawdown vs", "Drawdown sparkline",
+        "Standard deviation", "Sortino", "Volatility", "Beta",
+        "Survivorship bias",
+    ],
+    "Diversification": [
+        "Correlation", "The 30-stock", "Sector concentration", "Best diversifiers",
+        "Most-correlated", "Equal weight", "The 2% rule", "Concentration limits",
+        "Cash position",
+    ],
+    "Technical": [
+        "RSI", "Why RSI fails", "200-day", "ATR", "52-week range",
+        "Volume ratio", "The volume signal", "The breakout", "The oversold",
+        "The rolling alpha sparkline",
+    ],
+    "Analyst": [
+        "Analyst target", "The 1-5 recommendation", "Buy-rating", "Number of analysts",
+        "Coverage gaps", "Upside %", "Rating moves", "The Buy rating",
+        "Why Strong Sell", "The Top 10", "The Losers",
+    ],
+    "Macro": [
+        "Interest rates", "Inflation", "Yield curve", "Recession",
+        "Geopolitical", "FX attribution", "Currency exposure",
+        "Market cap tiers", "GICS sectors", "Industry vs sector",
+    ],
+    "Behavioural": [
+        "Win rate alone", "Win/loss ratio", "Averaging down", "Selling winners",
+        "Holding losers", "Anchoring", "Confirmation bias", "FOMO",
+        "Recency bias", "Loss aversion", "Pyramid building", "Conviction sizing",
+    ],
+    "Trading": [
+        "Spread and slippage", "Stop loss", "2× ATR", "Trailing stop",
+        "Rebalancing", "Time horizon", "Trading commissions",
+        "Cost basis", "Capital gains", "Tax-loss harvesting", "Dividend yield",
+    ],
+    "Dashboard": [
+        "The loss-zone", "The WATCH", "Closed positions", "Why some positions",
+        "Weekly movers", "Industry outlook", "Top contributor",
+        "Renormalised contribution", "Why the hero", "Basket leading SPY",
+        "The news section", "Per-ticker news", "The sector chip filter",
+        "What this dashboard",
+    ],
+}
+
+
+def _pocket_lesson_category(title: str) -> str:
+    """Return the category bucket for a tip title via prefix match."""
+    for cat, prefixes in POCKET_LESSON_CATEGORIES.items():
+        for prefix in prefixes:
+            if title.startswith(prefix):
+                return cat
+    return "Concepts"
+
+
+# Inject the category into each lesson dict. Done at module load so the JS
+# payload always carries it; tip authoring stays a single edit to POCKET_LESSONS.
+for _lesson in POCKET_LESSONS:
+    _lesson["category"] = _pocket_lesson_category(_lesson["title"])
+del _lesson
+
 # Universe — large-cap reference list for the industry outlook section.
 # Refreshed monthly (file-mtime TTL); daily builds reuse cached results.
 UNIVERSE_CSV = ROOT / "universe.csv"
@@ -2517,6 +2799,108 @@ def render_industry_attribution(rows: list[dict], basket_avg: float) -> str:
 </section>"""
 
 
+def compute_currency_exposure(returns: pd.DataFrame, meta: pd.DataFrame) -> list[dict]:
+    """v1.9 #3: aggregate open-position cost basis by currency.
+
+    Each open position contributes its `total_invested` (already in base ccy)
+    to its native currency bucket. Returns a list of dicts sorted by share desc:
+
+        [{"ccy": "USD", "ccy_symbol": "$", "invested": 12345.0,
+          "share": 0.62, "n": 14}, ...]
+
+    Empty list when there are no open positions.
+    """
+    if returns.empty:
+        return []
+    open_pos = returns[returns.status == "open"]
+    if open_pos.empty:
+        return []
+    buckets: dict[str, dict] = {}
+    for tkr, r in open_pos.iterrows():
+        ccy = ticker_currency(meta, tkr) or BASE_CCY
+        invested = float(r.total_invested) if pd.notna(r.total_invested) else 0.0
+        if invested <= 0:
+            continue
+        b = buckets.setdefault(ccy, {"ccy": ccy, "invested": 0.0, "n": 0})
+        b["invested"] += invested
+        b["n"] += 1
+    total = sum(b["invested"] for b in buckets.values())
+    if total <= 0:
+        return []
+    out = []
+    for ccy, b in buckets.items():
+        out.append({
+            "ccy": ccy,
+            "ccy_symbol": CCY_SYMBOLS.get(ccy, ccy + " "),
+            "invested": b["invested"],
+            "share": b["invested"] / total,
+            "n": b["n"],
+        })
+    out.sort(key=lambda x: -x["share"])
+    return out
+
+
+def render_currency_exposure(rows: list[dict]) -> str:
+    """v1.9 #3: render the currency exposure section -- a horizontal stacked
+    bar plus a small legend. Highlights single-currency concentration (>= 80%)
+    in the muted note line; a balanced split renders the same UI without the
+    warning.
+    """
+    if not rows or len(rows) < 1:
+        return ""
+    # Distinct hue per currency, cycled deterministically. Major currencies get
+    # stable colors for visual familiarity.
+    HUES = {
+        "GBP": "#34d399", "USD": "#f59e0b", "EUR": "#60a5fa",
+        "JPY": "#a78bfa", "CHF": "#f472b6", "HKD": "#f87171",
+        "CAD": "#34d399", "AUD": "#fbbf24",
+    }
+    FALLBACK = ["#94a3b8", "#cbd5e1", "#64748b", "#475569"]
+    fb_iter = iter(FALLBACK)
+    for r in rows:
+        r["color"] = HUES.get(r["ccy"], next(fb_iter, "#94a3b8"))
+    # Stacked bar
+    segments = []
+    for r in rows:
+        pct = r["share"] * 100
+        segments.append(
+            f'<div class="ccy-seg" style="width:{pct:.2f}%;background:{r["color"]}" '
+            f'title="{r["ccy"]}: {pct:.1f}% &middot; {r["n"]} position{"s" if r["n"] != 1 else ""}"></div>'
+        )
+    seg_html = "".join(segments)
+    # Legend
+    legend = []
+    for r in rows:
+        legend.append(
+            f'<div class="ccy-legend-row">'
+            f'<span class="ccy-legend-swatch" style="background:{r["color"]}"></span>'
+            f'<span class="ccy-legend-ccy">{r["ccy"]}</span>'
+            f'<span class="ccy-legend-share">{r["share"] * 100:.1f}%</span>'
+            f'<span class="ccy-legend-n">{r["n"]} pos</span>'
+            f'</div>'
+        )
+    legend_html = "".join(legend)
+    # Concentration note
+    top = rows[0]
+    if top["share"] >= 0.80:
+        note = (f'<span class="ccy-note">High concentration in {top["ccy"]} '
+                f'({top["share"] * 100:.0f}% of cost basis) &mdash; a stronger '
+                f'home currency materially drags total return.</span>')
+    elif len(rows) == 1:
+        note = (f'<span class="ccy-note">All open positions are in {top["ccy"]}.</span>')
+    else:
+        note = (f'<span class="ccy-note">{len(rows)} currencies in basket. '
+                f'Top exposure: {top["ccy"]} at {top["share"] * 100:.0f}%.</span>')
+    return f"""<section class="ccy-exposure-section">
+  <div class="ccy-head-row">
+    <h3>Currency exposure</h3>
+    <p class="muted">{note}</p>
+  </div>
+  <div class="ccy-bar">{seg_html}</div>
+  <div class="ccy-legend">{legend_html}</div>
+</section>"""
+
+
 def render_basket_diversification(data: dict | None, meta: pd.DataFrame) -> str:
     """Three-panel + histogram view of pairwise correlation across open positions.
 
@@ -2928,11 +3312,42 @@ def _modal_polyline_d(rebased_values: list[float]) -> dict:
             x_tick_idx.append(0)
         else:
             x_tick_idx.append(int(round((i / (x_tick_count - 1)) * (n - 1))))
+    # v1.9 #2: per-segment color. Split the polyline into same-sign runs at
+    # zero crossings so the JS render can color above-baseline portions green
+    # and below-baseline portions red. Crossing x is linearly interpolated
+    # against the rebased values so the color flip lands exactly on the
+    # baseline, not the next data point. Single-segment outputs (positions
+    # that never cross zero) are the common case for clean winners.
+    segments: list[dict] = []
+    if n >= 1:
+        cur_above = rebased_values[0] >= 0
+        cur_pts: list[tuple[float, float]] = [(xs[0], ys[0])]
+        for i in range(1, n):
+            prev_v, cur_v = rebased_values[i - 1], rebased_values[i]
+            x_prev, x_cur = xs[i - 1], xs[i]
+            if (prev_v >= 0) == (cur_v >= 0):
+                cur_pts.append((x_cur, ys[i]))
+            else:
+                denom = abs(prev_v) + abs(cur_v)
+                t = abs(prev_v) / denom if denom > 0 else 0.5
+                x_cross = x_prev + t * (x_cur - x_prev)
+                cur_pts.append((x_cross, zero_y))
+                segments.append({
+                    "pts": " ".join(f"{x:.1f},{y:.1f}" for x, y in cur_pts),
+                    "above": cur_above,
+                })
+                cur_above = cur_v >= 0
+                cur_pts = [(x_cross, zero_y), (x_cur, ys[i])]
+        segments.append({
+            "pts": " ".join(f"{x:.1f},{y:.1f}" for x, y in cur_pts),
+            "above": cur_above,
+        })
     # Slimmed payload: JS reconstructs xs/ys/area-path at render time
     # (cheap, sub-millisecond) which keeps the payload ~600 KB smaller across
     # the basket. Tick x-coords are derived in JS from `_x(idx)` mirror.
     return {
         "points": points,
+        "segments": segments,
         "zero_y": float(zero_y),
         "y_ticks": y_ticks,
         "x_tick_idx": x_tick_idx,
@@ -3282,6 +3697,9 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
                                                        lookback_days=126)
     diversification_html = render_basket_diversification(diversification_data, meta) \
         if diversification_data else ""
+    # v1.9 #3: currency exposure
+    ccy_exposure_rows = compute_currency_exposure(returns, meta)
+    ccy_exposure_html = render_currency_exposure(ccy_exposure_rows)
 
     latest_date = prices.index[-1].strftime("%d %b %Y")
     built = datetime.now(timezone.utc).strftime("%d %b %Y &middot; %H:%M UTC")
@@ -3722,6 +4140,8 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
         basket_first_date=first_purchase,
     )
     aux_json = json.dumps(aux_payload, separators=(",", ":"))
+    # v1.9 Pocket Lesson: bake the curated tip pool into the page payload.
+    pocket_lessons_json = json.dumps(POCKET_LESSONS, separators=(",", ":"), ensure_ascii=False)
 
     # ---- Customizable module stack -----------------------------------------
     # Each top-level content section is wrapped as a draggable/hideable
@@ -3746,6 +4166,7 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
         ("analyst", "Re-entry ideas", analyst_html),
         ("detractors", "Exit strategy", detractors_html),
         ("diversification", "Basket diversification", diversification_html),
+        ("ccy_exposure", "Currency exposure", ccy_exposure_html),
         ("regret", "Regret tracker", regret_html),
     ]
     _modules = [(mid, label, html) for (mid, label, html) in _module_defs if html and html.strip()]
@@ -3789,6 +4210,8 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     if build_health:
         bh_ok      = build_health.get("succeeded", 0)
         bh_total   = build_health.get("attempted", 0)
+        bh_held    = build_health.get("n_held", bh_total)
+        bh_watch   = build_health.get("n_watch_only", 0)
         bh_failed  = build_health.get("failed", []) or []
         bh_retries = build_health.get("retries_recovered", 0)
         bh_seconds = build_health.get("build_seconds", 0)
@@ -3798,9 +4221,19 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
             if bh_failed else ""
         )
         bh_retry_html = f" &middot; {bh_retries} retry-recovered" if bh_retries else ""
+        # v1.9 D1: render breakdown so "187/187" reads as "185 held + 2 watch".
+        # The basket eyebrow / position count elsewhere uses `n_held` -- this
+        # makes the two numbers reconcile at a glance.
+        if bh_watch > 0:
+            bh_count_html = (
+                f'<span class="{bh_status_cls}">{bh_ok}/{bh_total}</span> tickers '
+                f'<span class="bh-breakdown">({bh_held} held + {bh_watch} watch-only)</span>'
+            )
+        else:
+            bh_count_html = f'<span class="{bh_status_cls}">{bh_ok}/{bh_total}</span> tickers'
         build_health_html = (
             f'<div class="build-health">'
-            f'Build: <span class="{bh_status_cls}">{bh_ok}/{bh_total}</span> tickers'
+            f'Build: {bh_count_html}'
             f"{bh_retry_html} &middot; {bh_seconds}s{bh_failed_html}"
             f'</div>'
         )
@@ -3812,6 +4245,10 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<!-- v1.9: inline SVG favicon so we silence the favicon.ico 404 without
+     adding a binary file to the repo. Minimal line-chart glyph in the
+     accent color -- looks reasonable at 16x16 in the tab. -->
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%230b0e17'/%3E%3Cpolyline points='5,22 11,17 16,20 21,11 27,6' fill='none' stroke='%23f59e0b' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
 <title>Portfolio &middot; since {first_purchase_str}</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -3937,6 +4374,84 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
   .palette-toggle button:hover{{color:var(--text);border-color:var(--text-dim)}}
   .palette-toggle button.active{{background:var(--accent);color:var(--ink);
     border-color:var(--accent);font-weight:600}}
+
+  /* v1.9 Pocket Lesson: the topbar toggle uses .layout-toggle base styles
+     (already defined) plus an aria-pressed=true state for the "on" visual.
+     The card itself sits as a slim block under the topbar. */
+  .pocket-lesson-btn[aria-pressed="true"]{{
+    background:var(--accent);color:var(--ink);border-color:var(--accent);font-weight:600;
+  }}
+  /* Card is collapsed-by-default (max-height 0). The .is-open class triggers
+     the slide-down: margin + max-height + opacity all transition together so
+     the rest of the dashboard is smoothly pushed down (or back up). We
+     deliberately don't use the [hidden] attribute -- it short-circuits to
+     display:none which can't transition. aria-hidden carries the
+     accessibility signal instead. */
+  .pocket-lesson-wrap{{
+    margin:0;max-height:0;overflow:hidden;opacity:0;
+    transition:max-height 0.35s ease, margin 0.35s ease, opacity 0.25s ease;
+  }}
+  .pocket-lesson-wrap.is-open{{
+    margin:14px 0 18px;max-height:320px;opacity:1;
+  }}
+  @media (prefers-reduced-motion: reduce) {{
+    .pocket-lesson-wrap{{transition:none}}
+  }}
+  .pocket-lesson-card{{
+    border:1px solid var(--border);border-left:3px solid var(--accent);
+    background:linear-gradient(180deg, var(--ink-soft), var(--surface));
+    border-radius:10px;padding:14px 18px;
+    display:flex;flex-direction:column;gap:6px;
+  }}
+  .pocket-lesson-head{{
+    display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;
+  }}
+  .pocket-lesson-eyebrow{{
+    font-family:var(--font-mono);font-size:9.5px;letter-spacing:0.14em;
+    text-transform:uppercase;color:var(--accent);font-weight:600;
+  }}
+  .pocket-lesson-title{{
+    font-family:var(--font-ui);font-size:14.5px;font-weight:600;color:var(--text);
+  }}
+  .pocket-lesson-body{{
+    margin:0;font-family:var(--font-ui);font-size:13px;line-height:1.55;
+    color:var(--text-dim);max-width:78ch;
+  }}
+  .pocket-lesson-actions{{
+    display:flex;align-items:center;gap:12px;margin-top:4px;
+  }}
+  .pocket-lesson-next{{
+    background:transparent;border:1px solid var(--border);color:var(--text-dim);
+    padding:4px 11px;border-radius:5px;cursor:pointer;
+    font-family:var(--font-mono);font-size:10px;letter-spacing:0.06em;text-transform:uppercase;
+    transition:all 0.15s;
+  }}
+  .pocket-lesson-next:hover{{color:var(--text);border-color:var(--accent)}}
+  .pocket-lesson-counter{{
+    font-family:var(--font-mono);font-size:9.5px;letter-spacing:0.06em;
+    color:var(--text-dim);opacity:0.7;
+  }}
+  /* v1.9 #7: category filter chips + per-tip category pill. The pill sits
+     in the head row as a small badge; the filter row above the actions lets
+     users narrow the pool. Active chip uses the accent color. */
+  .pocket-lesson-cat-pill{{
+    font-family:var(--font-mono);font-size:9px;letter-spacing:0.08em;
+    text-transform:uppercase;color:var(--accent);
+    border:1px solid var(--accent);border-radius:3px;padding:1px 6px;
+    opacity:0.85;
+  }}
+  .pocket-lesson-filters{{
+    display:flex;flex-wrap:wrap;gap:4px;margin-top:6px;
+  }}
+  .pocket-lesson-chip{{
+    background:transparent;border:1px solid var(--border);color:var(--text-dim);
+    padding:3px 8px;border-radius:4px;cursor:pointer;
+    font-family:var(--font-mono);font-size:9.5px;letter-spacing:0.06em;text-transform:uppercase;
+    transition:all 0.12s;
+  }}
+  .pocket-lesson-chip:hover{{color:var(--text);border-color:var(--text-dim)}}
+  .pocket-lesson-chip.active{{background:var(--accent);color:var(--ink);border-color:var(--accent);font-weight:600}}
+
   .container{{position:relative}}
 
   /* ---- Customizable module layout ---- */
@@ -4139,6 +4654,7 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     margin-top:24px}}
   .build-health .bh-fail{{color:var(--down)}}
   .build-health .bh-ok{{color:var(--up)}}
+  .build-health .bh-breakdown{{opacity:0.6;font-size:9.5px;margin-left:2px}}
   .build-info .live{{
     display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--up);
     margin-right:8px;box-shadow:0 0 0 0 var(--up);animation:pulse 2.4s ease-out infinite;vertical-align:1px;
@@ -4468,6 +4984,31 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     background:linear-gradient(180deg,var(--surface) 0%,var(--ink-soft) 100%);
     border:1px solid var(--border);border-radius:12px;padding:18px 20px;
   }}
+
+  /* v1.9 #3: currency exposure section */
+  .ccy-exposure-section{{
+    background:linear-gradient(180deg,var(--surface) 0%,var(--ink-soft) 100%);
+    border:1px solid var(--border);border-radius:12px;padding:18px 20px;
+  }}
+  .ccy-head-row{{display:flex;justify-content:space-between;align-items:baseline;gap:16px;margin-bottom:12px}}
+  .ccy-head-row h3{{margin:0;font-family:var(--font-display);font-size:18px;letter-spacing:-0.01em;font-weight:600}}
+  .ccy-head-row p{{margin:0;font-size:11.5px;text-align:right;max-width:520px}}
+  .ccy-note{{}}
+  .ccy-bar{{
+    display:flex;width:100%;height:18px;border-radius:4px;overflow:hidden;
+    border:1px solid var(--border);background:var(--ink-soft);
+  }}
+  .ccy-seg{{height:100%;transition:filter 0.15s}}
+  .ccy-seg:hover{{filter:brightness(1.15)}}
+  .ccy-legend{{
+    display:flex;flex-wrap:wrap;gap:14px;margin-top:10px;
+    font-family:var(--font-mono);font-size:11px;color:var(--text-dim);
+  }}
+  .ccy-legend-row{{display:flex;align-items:center;gap:6px}}
+  .ccy-legend-swatch{{width:10px;height:10px;border-radius:2px;display:inline-block}}
+  .ccy-legend-ccy{{color:var(--text);font-weight:600}}
+  .ccy-legend-share{{color:var(--text);font-feature-settings:'tnum'}}
+  .ccy-legend-n{{opacity:0.65}}
   .div-head h3{{margin:0 0 4px;font-family:var(--font-display);font-size:18px;
     font-weight:400;color:var(--text);letter-spacing:-0.01em}}
   .div-head h3 .muted{{color:var(--text-dim);font-size:14px;margin-left:4px}}
@@ -4943,6 +5484,10 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
           title="Restore the default order and show all sections">Reset</button>
   <button class="layout-toggle desktop-mode-btn" id="desktop-mode-btn" type="button" aria-pressed="false"
           title="Force the full desktop layout (the page becomes horizontally scrollable on phones)">Desktop view</button>
+  <!-- v1.9 Pocket Lesson: quick toggle for the educational tip card.
+       State persisted in localStorage as `pocketLessonOn`. -->
+  <button class="layout-toggle pocket-lesson-btn" id="pocket-lesson-btn" type="button" aria-pressed="false"
+          title="Show a short educational tip about a concept this dashboard surfaces">Pocket lesson</button>
   <div class="palette-toggle" role="tablist" aria-label="Color palette">
     <button data-palette="default" aria-pressed="true">Default</button>
     <button data-palette="softdark">Soft Dark</button>
@@ -4950,6 +5495,29 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     <button data-palette="bloomberg">Amber</button>
   </div>
 </div>
+
+<!-- v1.9 Pocket Lesson card. Sits just below the topbar. Default state is
+     collapsed (no `.is-open` class). JS reads localStorage on load and adds
+     the class only if the user previously enabled it. Toggle from the topbar
+     button slides the card open/closed via a max-height CSS transition. -->
+<section class="pocket-lesson-wrap" id="pocket-lesson-wrap" aria-hidden="true" aria-label="Pocket lesson — investment concept of the moment">
+  <div class="pocket-lesson-card">
+    <div class="pocket-lesson-head">
+      <span class="pocket-lesson-eyebrow">Pocket lesson</span>
+      <span class="pocket-lesson-title" id="pocket-lesson-title">&mdash;</span>
+      <span class="pocket-lesson-cat-pill" id="pocket-lesson-cat-pill"></span>
+    </div>
+    <p class="pocket-lesson-body" id="pocket-lesson-body">&mdash;</p>
+    <div class="pocket-lesson-filters" id="pocket-lesson-filters" role="tablist" aria-label="Filter by category">
+      <!-- JS populates with one chip per category + an All chip -->
+    </div>
+    <div class="pocket-lesson-actions">
+      <button type="button" class="pocket-lesson-next" id="pocket-lesson-next"
+              title="Show a different tip">Next tip &rarr;</button>
+      <span class="pocket-lesson-counter" id="pocket-lesson-counter"></span>
+    </div>
+  </div>
+</section>
 
 <!-- One-time discovery tooltip for the Edit-layout button. Position is
      anchored absolutely (CSS) so its place in the DOM doesn't matter for
@@ -5094,6 +5662,11 @@ const PORTFOLIO = {portfolio_json};
 // T11/T12/T14/T15: pre-shaped drill-down data for click-to-expand modals
 // (industries, sectors, correlation pairs, weekly movers).
 const AUX_DATA = {aux_json};
+
+// v1.9 Pocket Lesson: array of {{title, body}} tips, baked at build time from
+// the POCKET_LESSONS list in build.py. JS picks one at random on each page
+// load; a Next-tip button rotates without reloading.
+const POCKET_LESSONS = {pocket_lessons_json};
 
 // ---- Helpers
 function fmtMoney(v, sym) {{
@@ -5794,7 +6367,19 @@ function renderBigChart(ticker) {{
     return `<text x="${{x.toFixed(1)}}" y="${{(labelY + 32).toFixed(1)}}" fill="#6b7185" font-size="16" font-family="Geist Mono, monospace" text-anchor="middle">${{fmtDate(dates[idx])}}</text>`;
   }}).join('');
   html += `<path d="${{areaD}}" fill="url(#${{gradId}})"/>`;
-  html += `<polyline points="${{chart.points}}" fill="none" stroke="${{color}}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
+  // v1.9 #2: per-segment color on the modal polyline. Render each
+  // same-sign run in its own color so below-baseline periods are visibly red
+  // even when the position's overall total is positive. Falls back to the
+  // single-color polyline if segments are missing (defensive for any payload
+  // older than v1.9).
+  if (Array.isArray(chart.segments) && chart.segments.length > 0) {{
+    for (const seg of chart.segments) {{
+      const segColor = seg.above ? '#34d399' : '#f87171';
+      html += `<polyline points="${{seg.pts}}" fill="none" stroke="${{segColor}}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
+    }}
+  }} else {{
+    html += `<polyline points="${{chart.points}}" fill="none" stroke="${{color}}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
+  }}
   html += `<line class="crosshair" x1="0" y1="${{MODAL_VB_PAD_T}}" x2="0" y2="${{labelY}}" stroke="${{color}}" stroke-width="0.8" stroke-dasharray="2 3" opacity="0"/>`;
   html += `<circle class="dot" cx="0" cy="0" r="6" fill="${{color}}" stroke="${{color}}" opacity="0"/>`;
 
@@ -6136,6 +6721,107 @@ document.getElementById('hero-chart').addEventListener('click', (e) => {{
     apply(next);
     try {{ localStorage.setItem(KEY, next ? '1' : '0'); }} catch (e) {{}}
   }});
+}})();
+
+// v1.9 Pocket Lesson: random tip on load + Next-tip rotation + topbar toggle.
+// State: `pocketLessonOn` in localStorage ('1' / '0'). Default is OFF -- the
+// card is collapsed until the user opens it from the topbar button. Once
+// they toggle, the choice persists.
+// The card transitions in/out via the .is-open class (max-height + margin +
+// opacity), so the rest of the page smoothly slides to make/yield space.
+(function setupPocketLesson() {{
+  const STORAGE_KEY = 'pocketLessonOn';
+  const CAT_KEY = 'pocketLessonCategory';
+  const btn = document.getElementById('pocket-lesson-btn');
+  const wrap = document.getElementById('pocket-lesson-wrap');
+  const titleEl = document.getElementById('pocket-lesson-title');
+  const bodyEl = document.getElementById('pocket-lesson-body');
+  const counterEl = document.getElementById('pocket-lesson-counter');
+  const nextBtn = document.getElementById('pocket-lesson-next');
+  const catPillEl = document.getElementById('pocket-lesson-cat-pill');
+  const filtersEl = document.getElementById('pocket-lesson-filters');
+  if (!btn || !wrap || !Array.isArray(POCKET_LESSONS) || POCKET_LESSONS.length === 0) return;
+
+  // Active category filter ('*' means all). Persisted so the user's choice
+  // survives reloads alongside the visibility state.
+  let activeCategory = '*';
+  try {{ activeCategory = localStorage.getItem(CAT_KEY) || '*'; }} catch (e) {{}}
+  // Track currentIdx so Next can avoid showing the same tip twice in a row.
+  let currentIdx = -1;
+
+  function eligibleIndices() {{
+    if (activeCategory === '*') return POCKET_LESSONS.map((_, i) => i);
+    const out = [];
+    for (let i = 0; i < POCKET_LESSONS.length; i++) {{
+      if (POCKET_LESSONS[i].category === activeCategory) out.push(i);
+    }}
+    return out.length ? out : POCKET_LESSONS.map((_, i) => i);   // fallback: all
+  }}
+  function pickRandomTip() {{
+    const pool = eligibleIndices();
+    if (pool.length === 1) return pool[0];
+    let idx;
+    do {{ idx = pool[Math.floor(Math.random() * pool.length)]; }}
+    while (idx === currentIdx);
+    return idx;
+  }}
+  function renderTip(idx) {{
+    const tip = POCKET_LESSONS[idx];
+    if (!tip) return;
+    currentIdx = idx;
+    titleEl.textContent = tip.title || '';
+    bodyEl.textContent = tip.body || '';
+    catPillEl.textContent = tip.category || '';
+    const pool = eligibleIndices();
+    const posInPool = pool.indexOf(idx) + 1;
+    counterEl.textContent = activeCategory === '*'
+      ? `Tip ${{idx + 1}} of ${{POCKET_LESSONS.length}}`
+      : `${{posInPool}} of ${{pool.length}} in ${{activeCategory}}`;
+  }}
+
+  // Build the filter chips dynamically from the categories actually present.
+  function buildChips() {{
+    const cats = new Set();
+    for (const l of POCKET_LESSONS) if (l.category) cats.add(l.category);
+    // Order: All first, then the rest alphabetically -- stable across rebuilds.
+    const ordered = ['*'].concat(Array.from(cats).sort());
+    filtersEl.innerHTML = ordered.map(c => {{
+      const label = c === '*' ? `All ${{POCKET_LESSONS.length}}` : c;
+      const cls = c === activeCategory ? 'pocket-lesson-chip active' : 'pocket-lesson-chip';
+      return `<button type="button" class="${{cls}}" data-cat="${{c}}">${{label}}</button>`;
+    }}).join('');
+    filtersEl.querySelectorAll('.pocket-lesson-chip').forEach(chip => {{
+      chip.addEventListener('click', () => {{
+        activeCategory = chip.dataset.cat;
+        try {{ localStorage.setItem(CAT_KEY, activeCategory); }} catch (e) {{}}
+        filtersEl.querySelectorAll('.pocket-lesson-chip').forEach(c =>
+          c.classList.toggle('active', c.dataset.cat === activeCategory));
+        renderTip(pickRandomTip());
+      }});
+    }});
+  }}
+  buildChips();
+
+  function setEnabled(on, opts) {{
+    opts = opts || {{}};
+    btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+    wrap.classList.toggle('is-open', on);
+    wrap.setAttribute('aria-hidden', on ? 'false' : 'true');
+    if (on && currentIdx < 0) renderTip(pickRandomTip());
+    if (!opts.silent) {{
+      try {{ localStorage.setItem(STORAGE_KEY, on ? '1' : '0'); }} catch (e) {{}}
+    }}
+  }}
+
+  let initial = false;
+  try {{
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if (saved === '1') initial = true;
+  }} catch (e) {{}}
+  setEnabled(initial, {{silent: true}});
+
+  btn.addEventListener('click', () => setEnabled(btn.getAttribute('aria-pressed') !== 'true'));
+  nextBtn.addEventListener('click', () => renderTip(pickRandomTip()));
 }})();
 
 (function setupPalette() {{
@@ -6495,6 +7181,63 @@ document.getElementById('hero-chart').addEventListener('click', (e) => {{
   }});
 }})();
 
+// v1.9 #1: Drawdown sparkline hover. Mirrors setupAlphaHover() but drawdown
+// values are bounded [min_dd, 0] (never above peak), so the head pill renders
+// a plain "-X.X%" with no sign-flip styling -- always var(--down).
+(function setupDrawdownHover() {{
+  const wrap = document.getElementById('dd-sparkline-wrap');
+  const svg  = document.getElementById('dd-sparkline-svg');
+  const latestEl = document.getElementById('dd-sparkline-latest');
+  if (!wrap || !svg || !latestEl) return;
+  const dates  = (svg.dataset.dates  || '').split(',').filter(Boolean);
+  const values = (svg.dataset.values || '').split(',').map(parseFloat);
+  if (!dates.length || dates.length !== values.length) return;
+  const cross = svg.querySelector('.dd-cross');
+  const dot   = svg.querySelector('.dd-dot');
+  const vb = svg.viewBox.baseVal;
+  const padX = 2, padY = 3;
+  // Match the build-side _dx / _dy mapping (DH-2*padY active height, value
+  // floor = min(values + [0])). Important: values are <= 0, so y=padY is the
+  // 0% top of the chart and y=DH-padY is the worst drawdown.
+  const ddMin = Math.min(...values, 0);
+  const ddRange = Math.max(Math.abs(ddMin), 1e-9);
+  const n = values.length;
+  const xAt = (i) => padX + i / Math.max(n - 1, 1) * (vb.width - 2 * padX);
+  const yAt = (v) => padY + (-v) / ddRange * (vb.height - 2 * padY);
+  const defaultText = latestEl.dataset.defaultText;
+
+  function relMonth(dateStr) {{
+    const d = new Date(dateStr + 'T00:00:00');
+    if (isNaN(d.getTime())) return dateStr;
+    const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    return `${{d.getDate()}} ${{months[d.getMonth()]}} ${{String(d.getFullYear()).slice(-2)}}`;
+  }}
+
+  svg.addEventListener('mousemove', (e) => {{
+    const rect = svg.getBoundingClientRect();
+    const vbX = (e.clientX - rect.left) / rect.width * vb.width;
+    let best = 0, bestDist = Infinity;
+    for (let i = 0; i < n; i++) {{
+      const d = Math.abs(xAt(i) - vbX);
+      if (d < bestDist) {{ bestDist = d; best = i; }}
+    }}
+    const v = values[best];
+    cross.setAttribute('x1', xAt(best));
+    cross.setAttribute('x2', xAt(best));
+    cross.setAttribute('opacity', '0.6');
+    dot.setAttribute('cx', xAt(best));
+    dot.setAttribute('cy', yAt(v));
+    dot.setAttribute('opacity', '1');
+    latestEl.textContent = `${{relMonth(dates[best])}} · ${{v.toFixed(1)}}%`;
+  }});
+
+  svg.addEventListener('mouseleave', () => {{
+    cross.setAttribute('opacity', '0');
+    dot.setAttribute('opacity', '0');
+    latestEl.textContent = defaultText;
+  }});
+}})();
+
 // ---- Live news refresh via Cloudflare Worker --------------------------
 // The static news box is rendered server-side at build time as a fallback.
 // If NEWS_WORKER_URL is set, fetch fresh items on page load and swap them in.
@@ -6814,9 +7557,17 @@ def main(demo: bool = False) -> None:
     # "attempted" is the held+watch universe (OHLCV is the gate — anything
     # missing here cascades). Meta/analyst/news failures are extra colour.
     all_failed = ohlcv_failed | meta_failed | analyst_failed | news_failed
+    # v1.9 D1: split the count so the footer matches the basket size users see
+    # elsewhere on the page. "attempted" is the full fetch (held + watch); the
+    # extra `held` / `watch_only` fields let the footer render the breakdown
+    # clearly ("185 held + 2 watch") rather than a confusing total.
+    n_watch_only = len(watch_tickers - txn_tickers)
+    n_held = len(ticker_list) - n_watch_only
     build_health = {
         "attempted": len(ticker_list),
         "succeeded": len(ticker_list) - len(ohlcv_failed),
+        "n_held": n_held,
+        "n_watch_only": n_watch_only,
         "failed": sorted(all_failed),
         "retries_recovered": retries_recovered,
         "build_seconds": int(time.time() - t0),

@@ -29,7 +29,7 @@ to optionally fetch live news via the Cloudflare Worker).
 CI rebuilds `demo.html` daily so the sample is always against current
 yfinance closes.
 
-![Hero chart with vs-SPY area shading and demo banner](docs/assets/demo-hero.jpeg)
+![Hero chart with vs-SPY area shading, segmented alpha sparkline and drawdown inset](docs/assets/demo-hero.jpeg)
 
 > **Not financial advice.** This dashboard is a personal **benchmarking
 > exercise** — a tool the author built to track and reflect on their own
@@ -251,6 +251,18 @@ with a non-trivial day move (&gt; 1%), an amber chip pinned just under the
 hero subtitle calls it out: `DELL +32.5% 4.9× vol`. Up to 3 chips; clicking
 one opens the ticker modal. Hides cleanly when nothing qualifies.
 
+### Pocket lesson card (opt-in)
+
+A small educational card that you can toggle from the topbar. When on,
+it shows one of 100 short 3–4 sentence lessons tied to a concept the
+dashboard actually surfaces — TWR, Sharpe, drawdown, alpha, RSI, sector
+concentration, the 2&times; ATR stop, and so on. Pick a category
+(Returns, Risk, Behavioural, Macro, Technical, Analyst, Trading,
+Diversification, Dashboard) to narrow the pool, then click **Next tip**
+to rotate. Off by default; preferences persist in `localStorage`.
+
+![Pocket lesson card with category filter chips](docs/assets/demo-pocket-lesson.jpeg)
+
 ### Decision-flow ordering
 
 The vertical order is deliberate — research → context → details → action:
@@ -368,7 +380,7 @@ yfinance batch per build, same lifecycle as the close-only cache). The
 close-only `prices_cache.parquet` is left untouched — everything else in the
 pipeline still reads its existing shape.
 
-![Modal showing signal, FX attribution, performance row, quant signals, and recent news](docs/assets/demo-modal.jpeg)
+![Modal showing signal, FX attribution, performance row, quant signals, recent news, and a per-segment colored chart with green-above-zero / red-below-zero rendering](docs/assets/demo-modal.jpeg)
 
 ### Per-ticker recent news (in the modal)
 
@@ -462,6 +474,17 @@ from yfinance, FX rates are pulled separately, and `convert_to_base()`
 applies daily FX to produce a base-currency price series. London-listed
 pence-quoted symbols (GBp / GBX) are divided by 100. The hero chart's FX
 bars surface this layer of the math directly.
+
+### Currency exposure breakdown
+
+A horizontal stacked bar groups your open-position cost basis by native
+currency, so you can see at a glance how much of the basket is exposed
+to each FX line. When one currency dominates above 80%, the section
+prints an explicit concentration warning. Useful as a reality check
+against the "I just hold international stocks" framing — most baskets
+are 70–90% USD by cost basis even when they look diversified by name.
+
+![Currency exposure stacked bar showing USD, GBP, EUR concentration](docs/assets/demo-ccy-exposure.jpeg)
 
 ### 4-palette theming
 

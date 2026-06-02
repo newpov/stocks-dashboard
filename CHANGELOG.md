@@ -14,6 +14,69 @@ than a barely-working prototype.
 
 ---
 
+## v1.9 — Educational layer + polish · 2 June 2026
+
+A new opt-in educational layer (Pocket lesson card) gives 100
+beginner-friendly explainers tied to dashboard concepts, plus a
+currency exposure section and a sweep of polish: drawdown sparkline
+hover, per-segment colour on the modal chart, build-health footer
+breakdown, and a silenced favicon 404.
+
+### Added
+- **Pocket lesson card**: opt-in toggleable card with 100 hand-curated
+  3&ndash;4 sentence lessons tied to dashboard concepts &mdash; TWR,
+  Sharpe, drawdown, alpha, RSI, sector concentration, the 2&times; ATR
+  stop, and more. Category filter chips (Returns / Risk / Behavioural /
+  Technical / Analyst / Macro / Trading / Diversification / Dashboard /
+  Concepts) narrow the pool; random pick on load + Next-tip rotation.
+  Default off; preference persists in `localStorage`.
+- **Currency exposure section**: horizontal stacked bar showing
+  open-position cost basis split by FX currency, with a per-currency
+  legend and a concentration warning above 80%. Useful as a reality
+  check against the "I just hold international stocks" framing &mdash;
+  most baskets are 70&ndash;90% USD by cost basis even when they look
+  diversified by name.
+- **Drawdown sparkline hover**: crosshair + dot + date/value tooltip
+  mirroring the alpha-sparkline hover.
+
+### Changed
+- **Per-segment colour on the modal chart**: each per-ticker modal
+  polyline now splits at every zero crossing &mdash; green where the
+  position was above its baseline, red where it was below. Interpolation
+  lands the colour flip exactly on the baseline. Closed losers that
+  recovered (and now total positive) show the period-by-period story at
+  a glance rather than hiding under a single "green = profitable" stroke.
+- **Build-health footer breakdown**: the footer reads
+  `Build: 187/187 tickers (185 held + 2 watch-only)` instead of the bare
+  `187/187` that didn't reconcile with the basket size shown elsewhere.
+
+### Fixed
+- **Favicon 404**: every page load was logging a single
+  `favicon.ico 404` console error. Replaced with an inline SVG
+  data-URL favicon (small line-chart glyph in the accent colour);
+  no new file, no build pipeline change.
+
+### Internal
+- New helpers: `compute_currency_exposure()`, `render_currency_exposure()`,
+  `_pocket_lesson_category()`, plus a `segments` field added to the
+  `_modal_polyline_d()` payload.
+- `POCKET_LESSONS` constant: 100 entries authored inline, retro-tagged
+  with categories at module load via title-prefix mapping
+  (`POCKET_LESSON_CATEGORIES`).
+- README screenshots refreshed end-to-end against v1.8/v1.9 visuals:
+  hero, modal, outlook+news, edit-layout. Added pocket-lesson and
+  currency-exposure shots.
+- `docs/index.html` grows from ~2.18 MB to ~2.44 MB (+12%) on the
+  combined feature additions.
+
+### Deferred to later
+- Lazy-loaded modal data &mdash; spec written, held for v2.0 audit
+  pass when the structural changes can land together (see local
+  `lazy-modal-spec.md`).
+- Dividend tracking, sector heatmap.
+
+---
+
 ## v1.8 — Tighter and broader · 1 June 2026
 
 The polish debt from v1.7 closes (T1&ndash;T3), the universe layer widens
