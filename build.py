@@ -38,6 +38,7 @@ TRANSACTIONS_CSV = ROOT / "transactions.csv"
 LOG_XLSX = ROOT / "log.xlsx"           # Trading 212-style real transaction log
 TICKERS_CSV = ROOT / "tickers.csv"  # legacy fallback
 OUT_HTML = ROOT / "docs" / "index.html"
+HEAVY_JSON = ROOT / "docs" / "data" / "payload.json"  # v2.0 lazy-modal sidecar
 DEMO_OUT_HTML = ROOT / "demo.html"   # standalone self-contained demo at repo root
 SORTABLE_VENDOR = ROOT / "docs" / "vendor" / "Sortable.min.js"
 CACHE_PARQUET = ROOT / "data" / "prices_cache.parquet"
@@ -3360,6 +3361,36 @@ def _modal_polyline_d(rebased_values: list[float]) -> dict:
     }
 
 
+# v2.0 lazy-modal: fields kept inline in docs/index.html (needed at first paint
+# by the main table, sort/filter chips, contributors panel). Everything NOT in
+# this set moves to docs/data/payload.json, fetched on idle and merged into
+# DATA[tkr] on first modal-open.
+# Conservative: includes a few fields (status, contribution) that the modal
+# also uses but which the main-table render path needs at startup. Cost of
+# duplication ~10 KB; cost of missing one = broken table at first paint.
+LIGHT_KEYS: frozenset[str] = frozenset({
+    "name", "sector", "industry", "currency",
+    "weight", "total", "ytd", "w1", "m1", "m3",
+    "status", "signal", "signal_tone", "signal_detail",
+    "contribution",
+})
+
+
+def split_payload(full: dict) -> tuple[dict, dict]:
+    """Split the per-ticker payload into light (inline) + heavy (sidecar).
+
+    Light dict carries only LIGHT_KEYS that exist on each entry (handles
+    watchlist entries gracefully — they may omit modal-only fields).
+    Heavy dict carries everything else."""
+    light, heavy = {}, {}
+    for tkr, d in full.items():
+        light[tkr] = {k: d[k] for k in LIGHT_KEYS if k in d}
+        heavy_entry = {k: v for k, v in d.items() if k not in LIGHT_KEYS}
+        if heavy_entry:
+            heavy[tkr] = heavy_entry
+    return light, heavy
+
+
 def build_data_payload(returns: pd.DataFrame, prices: pd.DataFrame,
                        meta: pd.DataFrame, contrib: pd.DataFrame,
                        signals: pd.DataFrame,
@@ -4127,7 +4158,24 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     for tkr, entry in watchlist_payload.items():
         if tkr not in data_dict:
             data_dict[tkr] = entry
-    data_json = json.dumps(data_dict, separators=(",", ":"))
+    # v2.0 lazy-modal split: demo.html stays self-contained (everything inline).
+    # docs/index.html ships light fields inline + a sidecar payload.json with
+    # modal-only fields, fetched on requestIdleCallback after first paint.
+    build_timestamp = int(time.time())
+    if demo_mode:
+        data_json = json.dumps(data_dict, separators=(",", ":"))
+        heavy_url_js = "null"
+    else:
+        light, heavy = split_payload(data_dict)
+        HEAVY_JSON.parent.mkdir(parents=True, exist_ok=True)
+        HEAVY_JSON.write_text(
+            json.dumps(heavy, separators=(",", ":")), encoding="utf-8"
+        )
+        heavy_kb = HEAVY_JSON.stat().st_size / 1024
+        print(f"Wrote {HEAVY_JSON} ({heavy_kb:.1f} KB) "
+              f"-- lazy-modal sidecar, {len(heavy)} tickers")
+        data_json = json.dumps(light, separators=(",", ":"))
+        heavy_url_js = json.dumps(f"data/payload.json?v={build_timestamp}")
     # JSON-encode the Worker URL so quoting is always correct in the embedded JS,
     # and an unset URL becomes the literal `""` (falsy in the JS branch).
     news_worker_url_js = json.dumps(NEWS_WORKER_URL or "")
@@ -5419,6 +5467,14 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     color:var(--text-dim);font-style:italic;text-align:center}}
   .modal-chart-wrap{{position:relative;width:100%;height:340px;background:var(--ink-soft);border:1px solid var(--border);border-radius:10px;padding:16px}}
   .modal-chart{{width:100%;height:100%;display:block}}
+  /* v2.0 lazy-modal: spinner shown in the chart area while the sidecar
+     payload is being fetched on first modal-open. Hidden once HEAVY merges
+     into DATA[tkr]. Subsequent opens reuse the cache -- no spinner. */
+  .modal-loading{{position:absolute;inset:16px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;background:var(--ink-soft);border-radius:8px;z-index:3;pointer-events:none}}
+  .modal-loading[hidden]{{display:none}}
+  .modal-spinner{{width:28px;height:28px;border:2.5px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:modalSpin 0.8s linear infinite}}
+  .modal-loading-text{{font-family:var(--font-mono);font-size:11px;color:var(--text-dim);letter-spacing:0.04em;text-transform:uppercase}}
+  @keyframes modalSpin{{to{{transform:rotate(360deg)}}}}
   .modal-tip{{position:absolute;background:var(--ink);border:1px solid var(--accent);border-radius:6px;
     padding:8px 12px;font-family:var(--font-mono);font-size:11.5px;color:var(--text);pointer-events:none;
     white-space:nowrap;transform:translate(-50%,-100%);margin-top:-10px;z-index:2;
@@ -5639,6 +5695,10 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     <div class="modal-chart-wrap">
       <svg class="modal-chart" viewBox="0 0 {MODAL_VB_W} {MODAL_VB_H}" preserveAspectRatio="none"></svg>
       <div class="modal-tip" hidden></div>
+      <div class="modal-loading" hidden>
+        <div class="modal-spinner"></div>
+        <div class="modal-loading-text">Loading chart…</div>
+      </div>
     </div>
   </div>
 </div>
@@ -5661,6 +5721,42 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
 {sortable_script_tag}
 <script>
 const DATA = {data_json};
+// v2.0 lazy-modal: when non-null, points at docs/data/payload.json with modal-
+// only fields for every ticker (~1.5 MB). Fetched on requestIdleCallback after
+// first paint; merged into DATA[tkr] on first modal-open. For demo.html this
+// is null and DATA already contains every field (single-file build).
+const HEAVY_URL = {heavy_url_js};
+
+// v2.0 lazy-modal: deferred load of per-ticker modal payload. When HEAVY_URL
+// is non-null (real-data build), fetch once on requestIdleCallback after first
+// paint and memoise the Promise; merge into DATA[tkr] on first openModal() so
+// the existing modal render code keeps reading fields off `d` unchanged.
+// Demo.html sets HEAVY_URL = null and DATA already contains every field.
+let _heavyPromise = null;
+function loadHeavy() {{
+  if (_heavyPromise) return _heavyPromise;
+  if (!HEAVY_URL) {{ _heavyPromise = Promise.resolve({{}}); return _heavyPromise; }}
+  _heavyPromise = fetch(HEAVY_URL)
+    .then(r => r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)))
+    .catch(err => {{
+      console.warn('[lazy-modal] payload fetch failed:', err);
+      _heavyPromise = null;   // allow retry on next modal-open
+      return null;
+    }});
+  return _heavyPromise;
+}}
+// Prefetch on idle so the common path -- user clicks a ticker within 5-30s of
+// first paint -- finds the payload already cached. requestIdleCallback waits
+// until the main thread AND network are idle, then the {{timeout:4000}}
+// guarantees the fetch runs even on a hyper-busy page.
+if (HEAVY_URL) {{
+  if (window.requestIdleCallback) {{
+    window.requestIdleCallback(() => loadHeavy(), {{timeout: 4000}});
+  }} else {{
+    setTimeout(() => loadHeavy(), 2000);
+  }}
+}}
+
 const PORTFOLIO = {portfolio_json};
 // T11/T12/T14/T15: pre-shaped drill-down data for click-to-expand modals
 // (industries, sectors, correlation pairs, weekly movers).
@@ -6141,9 +6237,31 @@ const modalChartWrap = modal.querySelector('.modal-chart-wrap');
 let currentTicker = null;
 let chartPoints = null;
 
-function openModal(ticker) {{
-  const d = DATA[ticker];
+async function openModal(ticker) {{
+  let d = DATA[ticker];
   if (!d) return;
+  // v2.0 lazy-modal: if HEAVY hasn't been fetched/merged into this ticker yet,
+  // open the modal with a light-only header + chart-area spinner, then await
+  // the payload. On the COMMON path (prefetch completed during idle), this
+  // resolves synchronously and the user sees no delay. On the cold path
+  // (~400-650ms on 4G), the spinner makes the wait feel intentional.
+  if (HEAVY_URL && !d.__hydrated) {{
+    modal.querySelector('.modal-ticker').textContent = ticker;
+    modal.querySelector('.modal-name').textContent = d.name || ticker;
+    modal.querySelector('.modal-industry').textContent = d.industry || d.sector || '';
+    const _pctEarly = modal.querySelector('.modal-pct');
+    _pctEarly.textContent = fmtPct(d.total, true);
+    _pctEarly.className = 'modal-pct ' + (d.total >= 0 ? 'pos' : 'neg');
+    const loadingEl = modal.querySelector('.modal-loading');
+    if (loadingEl) loadingEl.hidden = false;
+    modal.removeAttribute('hidden');
+    document.body.classList.add('modal-open');
+    const heavy = await loadHeavy();
+    if (heavy && heavy[ticker]) Object.assign(DATA[ticker], heavy[ticker]);
+    DATA[ticker].__hydrated = true;
+    d = DATA[ticker];
+    if (loadingEl) loadingEl.hidden = true;
+  }}
   const tickerEl = modal.querySelector('.modal-ticker');
   const ccyBadge = (d.currency && d.currency !== '{BASE_CCY}') ?
     ` <span class="badge-ccy">${{d.currency}}</span>` : '';

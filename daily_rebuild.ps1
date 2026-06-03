@@ -1,5 +1,6 @@
 # Local daily rebuild - runs build.py against log.xlsx (real basket) and pushes
-# the refreshed docs/index.html + data/ caches to GitHub.
+# the refreshed docs/index.html + docs/data/payload.json (v2.0 sidecar) +
+# data/ caches to GitHub.
 #
 # Intended to be triggered by Windows Task Scheduler ~once a day, after the
 # GitHub Actions cron has run (08:00 UTC) so this rebuild benefits from the
@@ -26,7 +27,8 @@ Set-Location $repo
 
 # 0. Pre-flight: pull --rebase refuses to run if the working tree has any
 #    unstaged changes. Classify what is dirty:
-#      - SAFE to discard: docs/index.html, data/*, daily_rebuild.log
+#      - SAFE to discard: docs/index.html, docs/data/* (v2.0 sidecar payload),
+#        data/*, daily_rebuild.log
 #        (the script regenerates these anyway)
 #      - UNSAFE: anything else (build.py, README, .gitignore, etc.)
 #        Aborting protects in-progress code edits from being silently wiped.
@@ -39,6 +41,7 @@ foreach ($line in $dirty) {
     # Porcelain format: "XY path" where X/Y are status chars and path follows.
     $path = $line.Substring(3).Trim()
     $isSafe = ($path -eq "docs/index.html") `
+              -or ($path -like "docs/data/*") `
               -or ($path -like "data/*") `
               -or ($path -eq "daily_rebuild.log")
     if ($isSafe) { $safe += $path } else { $unsafe += $path }
@@ -51,7 +54,7 @@ if ($unsafe.Count -gt 0) {
 if ($safe.Count -gt 0) {
     Write-Log "discarding stale build outputs (will be regenerated):"
     $safe | ForEach-Object { Write-Log "  $_" }
-    git checkout -- docs/index.html data/ 2>&1 | ForEach-Object { Write-Log $_ }
+    git checkout -- docs/index.html docs/data/ data/ 2>&1 | ForEach-Object { Write-Log $_ }
 }
 
 # 1. Pull bot's overnight data/ refresh and demo.html rebuild
@@ -73,8 +76,12 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 # 3. Stage only the files that should change from a real-data rebuild
-Write-Log "--- staging docs/index.html data/ ---"
-git add docs/index.html data/ 2>&1 | ForEach-Object { Write-Log $_ }
+#    v2.0: docs/data/payload.json (modal-only fields, ~1 MB sidecar) is
+#    written by every build and must stay in sync with docs/index.html's
+#    cache-bust query (?v={build_timestamp}). Staging the directory means
+#    new sidecars get picked up automatically without further edits here.
+Write-Log "--- staging docs/index.html docs/data/ data/ ---"
+git add docs/index.html docs/data/ data/ 2>&1 | ForEach-Object { Write-Log $_ }
 
 # 4. Skip the commit if nothing changed (e.g. weekend with no price moves)
 $staged = git diff --staged --name-only

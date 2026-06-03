@@ -14,6 +14,94 @@ than a barely-working prototype.
 
 ---
 
+## v2.0 — Lazy-loaded modal data + code-review fixes · 2 June 2026
+
+The dashboard had grown to a 2.44 MB single-file payload by the end of
+v1.9. v2.0 splits that into a 1.38 MB lean shell + a 1.07 MB sidecar
+payload fetched on idle &mdash; the browser parses 43% fewer bytes
+before first paint. Modal opens stay instant (the sidecar is usually
+already cached by the time the user clicks). Paired with two fixes
+surfaced by a code-review pass against the v1.9 baseline.
+
+### Added
+- **Lazy-loaded modal data**: per-ticker fields used only inside the
+  ticker-detail modal (chart polyline, transactions, FX attribution,
+  P&amp;L breakdown, news, quant signals) now live in
+  `docs/data/payload.json` rather than inline. The page ships only the
+  light fields needed by the main table (`name`, `sector`, `total`,
+  `ytd`, `signal`, &hellip;), then `requestIdleCallback` prefetches the
+  sidecar after first paint. First modal-open merges the heavy fields
+  into `DATA[tkr]` &mdash; subsequent opens are instant via Promise
+  memoisation. Cold-path fallback (user clicks before prefetch resolves)
+  shows a brief loading spinner in the chart area. Cache-busted with
+  `?v={build_timestamp}` so post-rebuild visitors always see fresh data.
+- **Spinner + "Loading chart…" overlay** inside `.modal-chart-wrap` for
+  the cold-path case, animated via a CSS `@keyframes modalSpin`.
+
+### Fixed
+- **Empty-contributors crash (H1)**: `main()` printed
+  `Contributors: top {contrib.iloc[0].name}` without guarding for an
+  empty `contrib` DataFrame. Triggers only when every position is closed
+  (no open positions left). Render path was already guarded; only the
+  stdout log was exposed. Now prints `Contributors: none (no open
+  positions)` instead of `IndexError`-ing.
+- **YTD silently wrong for tickers with &lt;1y of history (M1)**: the
+  fallback when `ytd_sub` was empty used `avg_buy_price`, which means
+  "YTD" displayed return-since-buy rather than return-since-Jan-1
+  &mdash; a misleading number for any future recent-IPO ticker. Changed
+  the fallback to `NaN` so the column renders as `&mdash;` instead. No
+  current basket ticker hits the fallback (every position predates
+  `START_DATE = 2024-10-14`); the fix is forward-looking.
+
+### Internal
+- **Code-review subagent pass** against the v1.9 baseline using the
+  `code-reviewer` subagent from the Claude Code [`feature-dev`
+  plugin](https://github.com/anthropics/claude-code) (official
+  marketplace `claude-plugins-official`). Other Claude Code users can
+  enable it via the in-app plugin manager (`/plugin`) and then dispatch
+  it on any repo via the `Agent` tool with
+  `subagent_type: "feature-dev:code-reviewer"`. The pass surfaced 4
+  findings (1 HIGH, 3 MEDIUM), 2 fixed (H1, M1), 2 deferred (Atom feed
+  link extraction in the Worker &mdash; no current Atom feeds, dead
+  path; `yfinance` single-pair MultiIndex handling &mdash; doesn't
+  trigger on the pinned 1.4.0). Privacy audit: clean across the board
+  &mdash; `shares = 1.0` convention holds, `r.weight` resolves to price
+  not invested capital, no author-name strings in code paths.
+- **New constants**: `HEAVY_JSON` (sidecar path), `LIGHT_KEYS`
+  (frozenset of fields kept inline).
+- **New helpers**: `split_payload(full) -&gt; (light, heavy)` runs at
+  render time to partition the per-ticker payload dict.
+- **`HEAVY_URL` JS const** controls the lazy/inline branch &mdash;
+  non-null for `docs/index.html`, `null` for `demo.html` (which keeps
+  the single-file model so forkers can copy one file and run).
+- **CI workflow unchanged** &mdash; per the v1.5 architecture decision,
+  CI only rebuilds `demo.html` + `data/*.parquet`. The new
+  `docs/data/payload.json` is committed by the author on feature
+  rebuilds, same publishing pattern as `docs/index.html`. Expected repo
+  growth ~15 MB/year (1 MB per shipped feature × ~10 ships).
+- **`daily_rebuild.ps1` updated for v2.0**: the local scheduled-task
+  script that auto-rebuilds + auto-pushes nightly now classifies
+  `docs/data/*` as "safe to discard before rebuild" (otherwise the
+  pre-flight check would abort on a modified `payload.json`) and stages
+  `docs/data/` alongside `docs/index.html` + `data/` for the nightly
+  commit. Without this, the daily auto-refresh would have broken on the
+  first run after the v2.0 push.
+- **`docs/index.html`**: 2444 KB &rarr; 1378 KB. **Initial-paint
+  parsing cost**: ~200 ms &rarr; ~80 ms estimated. Total wire bytes
+  basically unchanged (sidecar adds back what HTML lost).
+
+### Deferred
+- **Atom feed link extraction** in `worker/index.js` (no current Atom
+  feeds in `FEEDS`).
+- **`download_fx` MultiIndex defensiveness** in `build.py` (the
+  pinned `yfinance 1.4.0` doesn't trigger the edge case).
+- **Structural refactor of `build.py`** into modules &mdash; deferred
+  again; the file is now ~7220 lines and pushes against the threshold
+  where a split starts paying off.
+- **Dividend tracking, sector heatmap** &mdash; still in the backlog.
+
+---
+
 ## v1.9 — Educational layer + polish · 2 June 2026
 
 A new opt-in educational layer (Pocket lesson card) gives 100
