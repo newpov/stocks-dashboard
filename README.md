@@ -1,5 +1,6 @@
 # Stocks dashboard
 
+[![Version](https://img.shields.io/github/v/tag/newpov/stocks-dashboard?label=version&color=f59e0b)](https://github.com/newpov/stocks-dashboard/tags)
 [![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](LICENSE)
 [![Demo](https://img.shields.io/badge/demo-download%20%26%20open-blue.svg)](demo.html)
 [![Changelog](https://img.shields.io/badge/changelog-versions-purple.svg)](CHANGELOG.md)
@@ -262,6 +263,20 @@ Diversification, Dashboard) to narrow the pool, then click **Next tip**
 to rotate. Off by default; preferences persist in `localStorage`.
 
 ![Pocket lesson card with category filter chips](docs/assets/demo-pocket-lesson.jpeg)
+
+### Quick quiz (v2.1)
+
+A 50-question finance-knowledge quiz, opened from the topbar 🧠 icon.
+Five categories complementary to the Pocket Lesson topics:
+**Market mechanics**, **Corporate actions**, **Beyond equities**,
+**Derivatives**, **History &amp; regs**. Each question is medium
+difficulty with 3 plausible options and a 1-sentence explanation on
+answer. Correct answers flash green; the monthly score (e.g. `7/10`)
+pops with a small animation. State (which questions you've seen, monthly
+counters) persists in `localStorage`; the seen-set recycles when 90%
+of the pool has been answered so the experience never dead-ends.
+
+![Quiz modal showing a correct answer (green highlight + explanation) for a Market mechanics question about Regulation SHO](docs/assets/demo-quiz.jpeg)
 
 ### Decision-flow ordering
 

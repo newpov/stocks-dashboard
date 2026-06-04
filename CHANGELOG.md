@@ -14,6 +14,129 @@ than a barely-working prototype.
 
 ---
 
+## v2.1 — Quiz feature, modal axis polish, closed-list signal triage · 3 June 2026
+
+A UX-polish release that also extends the v1.9 educational layer with a
+50-question finance-knowledge quiz (5 categories, medium difficulty,
+practical tone). Four other friction points noticed during day-to-day use
+get closed, including the visible text-stretch in the modal chart axis
+labels (the visual cost of v1.8 T1's `preserveAspectRatio="none"`
+decision — now isolated rather than reverted).
+
+### Added
+- **Finance-knowledge quiz** (`Quiz` button in the top-right cluster).
+  50 medium-difficulty questions across 5 categories complementary to
+  the Pocket Lesson topics: **Market mechanics** (settlement, order
+  types, dark pools, IPO mechanics, exchange structure), **Corporate
+  actions** (splits, spinoffs, M&amp;A, rights, buybacks, DRIP, tender,
+  ex-div), **Beyond equities** (yield curve, credit spreads, ratings,
+  ETF vs MF, commodities, TIPS, callable bonds, money market),
+  **Derivatives** (covered call, Greeks, IV, futures vs forwards,
+  straddle, cash-secured put, put-call parity), **History &amp; regs**
+  (1929, 1987, 2008, Glass-Steagall, circuit breakers, Dodd-Frank,
+  MiFID II, SEC, FCA, Sarbanes-Oxley). Each question is 3-option
+  multiple choice with a 1-sentence explanation revealed on answer.
+  Correct answers flash green via a `@keyframes flashCorrect` pulse;
+  the monthly score (e.g. `7/10`) bumps with a `@keyframes scorePop`
+  scale + color punch. State (seen set, monthly counters) persists in
+  `localStorage` as `quizSeen` + `quizMonthly`, with auto-reset of
+  monthly counters on each calendar-month flip and seen-set recycle
+  when 90%+ of the pool has been answered. Authoring cost: 10 questions
+  per category, balanced topic coverage within each.
+- **HTML overlay for modal chart axis labels.** Y-axis percentages,
+  x-axis dates, and the `B` / `S` characters inside transaction markers
+  now render via an `.modal-chart-labels` div positioned absolutely on
+  top of the SVG, with label positions computed in CSS percentages
+  mapped from the same viewBox coordinates the SVG uses. The SVG keeps
+  geometry (polyline, grid lines, baseline, area gradient, hover
+  crosshair, transaction circles); HTML carries everything text-bearing.
+  Result: axis labels render at native browser DPI instead of inheriting
+  the SVG's ~1.93× non-uniform horizontal stretch. v1.8 T1's
+  precomputed-geometry win (resize-free chart, ~150-300ms saved on first
+  modal-open) is preserved — only the visible cost (distorted text) was
+  isolated and fixed.
+- **Closed-positions default sort by Signal** (col 4). Clicking the
+  Closed filter chip now re-sorts the table by Signal instead of the
+  Open-mode default (Since-baseline, col 9). Like-signal rows group
+  together for fast pattern-spotting — eight consecutive "Trending up"
+  closed positions at the top of the list make it obvious which exit
+  pattern recurs most often. Switching back to Open restores the
+  original sort. Sector chips don't trigger the resort; only the status
+  chips do.
+- **Industry attribution bar labels**: each bar in the Industry
+  attribution table now carries an inline numeric label at its tip
+  (e.g. `+29.88`). Short bars place the label outside (right of the
+  bar tip, color-matched to the fill); long bars (~30%+ of the
+  half-width, typically the top 1–2 contributors) flip the label
+  INSIDE the bar in dark text on the bright fill, so the dominant
+  contributor's number never overflows the scroll container. The
+  Contrib column still carries the exact `pp` figure for tabular reading.
+- **Quant signal hover interpretations**: each of the five modal quant
+  cells (VS 200D, ATR 14D, RSI 14D, 52W POS, Volume) now exposes a
+  native HTML `title` tooltip with a value-aware reading. RSI 82 →
+  "Overbought (>70) — strong recent buying; momentum may exhaust soon",
+  52W POS 100% → "Near 52-week high — potential resistance or strong
+  momentum signal", etc. Interpretation is generated client-side from
+  the value + threshold zones (zero bytes added to the per-ticker HEAVY
+  payload).
+
+### Changed
+- **Top-right control toolbar consolidated + iconified**: the four-button
+  palette switcher (Default / Soft Dark / Light / Amber) collapses to a
+  single button that cycles through the four palettes on each click. All
+  topbar buttons are now icon-only — a sliders glyph for Edit layout,
+  a brain for Pocket lesson, a question-mark-in-circle for Quiz, and a
+  filled circle in `var(--accent)` for Palette (the circle's color
+  follows the active palette so the active theme is visible at a
+  glance). Hovering any button slides a 150ms-faded `data-tooltip`
+  pseudo-element below with the human-readable name (e.g.
+  POCKET LESSON, QUIZ). Reset (undo arrow) and Desktop view (monitor)
+  also gain icons for visual consistency. Topbar horizontal footprint
+  drops ~67% vs the v2.0 text buttons. State persistence unchanged —
+  `stocks-dashboard-palette` localStorage key still holds the chosen
+  palette name across page loads. `aria-label` retained on every
+  button for screen-reader access.
+- **Industry-attribution label format**: dropped the redundant `+`
+  prefix from positive labels (color carries the sign), and labels now
+  anchor at the axis line on the side opposite the bar tip (positives
+  right-aligned to the left of axis, negatives left-aligned to the
+  right). Same-sign labels form a tight vertical column at the axis;
+  digit count (e.g. `1.49` vs `29.88`) is visible by horizontal extent
+  rather than label position. Bars and labels never overlap regardless
+  of magnitude — the v2.1 part-1's inside/outside conditional became
+  unnecessary and was removed.
+
+### Internal
+- New constant `QUIZ_POOL` (50 entries × ~250 bytes ≈ 12 KB inline so
+  the quiz works immediately on toolbar click without waiting for HEAVY
+  fetch). Schema: `{id, category, format, question, options[3], correct,
+  explanation}`.
+- New IIFE `setupQuiz()` carrying the state engine (load / save /
+  pickNext / recordAnswer) plus modal show/hide/answer wiring. ~150
+  lines including the rendering + animation triggers.
+- New helper `quantTitle(k, v)` in the modal render path builds the
+  threshold-aware interpretation strings on demand.
+- New CSS classes: `.modal-chart-labels` (axis-label overlay container),
+  `.y-tick`, `.x-tick`, `.txn-marker` (HTML label positioning), plus
+  refreshed `.ia-bar-label` / `.pos` / `.neg` (no longer needs inside
+  variants).
+- `renderBigChart` now builds `labelsHtml` alongside the SVG inner HTML
+  and writes to `.modal-chart-labels.innerHTML` after the SVG is set.
+  Cleared on every render so prior-ticker labels don't bleed into the
+  loading state.
+- The sort-on-mode-change logic in the chip-click handler checks for
+  the `.chips-sectors` parent class so sector-filter chip clicks don't
+  trigger a resort — only status chips do.
+
+### Deferred (v2.2 or later)
+- **`Purchased` → `Sold` column for closed positions** — user-flagged
+  consistency concern. Header label change per-filter is unusual UX;
+  needs a sit-down to decide between (a) per-filter header rewriting,
+  (b) a separate "Sold" column visible only in Closed mode, or (c) a
+  neutral "Last action" column with status-dependent date.
+
+---
+
 ## v2.0 — Lazy-loaded modal data + code-review fixes · 2 June 2026
 
 The dashboard had grown to a 2.44 MB single-file payload by the end of
@@ -39,6 +162,18 @@ surfaced by a code-review pass against the v1.9 baseline.
   the cold-path case, animated via a CSS `@keyframes modalSpin`.
 
 ### Fixed
+- **Desktop-mode toggle leaving the topbar off-screen** (pre-existing
+  bug since v1.7, surfaced during v2.1 verification). On viewports
+  &le; 900px wide, clicking the "Desktop view" icon sets
+  `body.force-desktop` which gives the page `min-width: 1100px` —
+  making it wider than the viewport. The topbar was positioned
+  `right: 28px` from the (now 1100px) container's right edge,
+  which is ~120px past the viewport edge on a 950px window,
+  so the controls became invisible. Fixed by switching the
+  topbar to `position: fixed` only when `body.force-desktop`
+  is active, anchoring it to the viewport rather than the
+  container. Tapping the same icon again exits desktop view
+  normally.
 - **Empty-contributors crash (H1)**: `main()` printed
   `Contributors: top {contrib.iloc[0].name}` without guarding for an
   empty `contrib` DataFrame. Triggers only when every position is closed

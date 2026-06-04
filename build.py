@@ -338,7 +338,280 @@ for _lesson in POCKET_LESSONS:
     _lesson["category"] = _pocket_lesson_category(_lesson["title"])
 del _lesson
 
-# Universe — large-cap reference list for the industry outlook section.
+# v2.1: 50-question quiz pool (medium difficulty, practical tone) covering
+# finance knowledge COMPLEMENTARY to the dashboard's own teaching — Pocket
+# Lesson covers what the dashboard surfaces; QUIZ_POOL covers what it doesn't:
+# market mechanics, corporate actions, fixed income / commodities / REITs,
+# derivatives, financial history & regulation. 10 questions per category,
+# all 3-option multiple choice with a 1-sentence explanation on reveal.
+# Schema (per entry):
+#   id          - stable integer id (used by the seen-set in localStorage)
+#   category    - one of the 5 category labels (used by category filter chips)
+#   format      - "cloze" (fill-in-blank) or "direct" (full question)
+#   question    - the question text (ends with `___` for cloze)
+#   options     - list of 3 strings; one is correct, two are plausible distractors
+#   correct     - 0-indexed position of the correct option
+#   explanation - 1-sentence reveal text shown after the user answers
+QUIZ_POOL: list[dict] = [
+    # ---- Market mechanics ----
+    {"id": 1, "category": "Market mechanics", "format": "cloze",
+     "question": "T+1 settlement, adopted by US exchanges in May 2024, means a stock trade settles ___.",
+     "options": ["The same business day (T+0)", "One business day after execution", "Two business days after execution"],
+     "correct": 1,
+     "explanation": "Before May 2024 US settlement was T+2; the shift to T+1 cuts counterparty risk but tightens cash-management timelines on both sides of the trade."},
+    {"id": 2, "category": "Market mechanics", "format": "direct",
+     "question": "A market maker's bid-ask spread on a thinly-traded stock is typically wider than on a heavily-traded one because:",
+     "options": ["They charge higher commissions on low-volume names", "Inventory risk grows when they can't quickly offload positions", "Exchange listing fees scale with daily volume"],
+     "correct": 1,
+     "explanation": "Wider spreads compensate the market maker for holding inventory in low-liquidity names where unwinding a position can take days rather than seconds."},
+    {"id": 11, "category": "Market mechanics", "format": "cloze",
+     "question": "When you place a 'limit buy' order at £50 on a stock trading at £52, your order ___.",
+     "options": ["Executes immediately at the next available offer", "Waits in the order book until the price drops to £50 or lower", "Cancels automatically if the stock doesn't reach £50 within 1 minute"],
+     "correct": 1,
+     "explanation": "Limit orders set a maximum acceptable price for buys; they trade off 'may not execute' for 'won't pay more than you specified'."},
+    {"id": 12, "category": "Market mechanics", "format": "direct",
+     "question": "After-hours trading carries elevated risk primarily because:",
+     "options": ["Exchanges charge higher fees outside regular session", "Spreads widen and liquidity thins, amplifying price impact", "Trades don't settle until the next business day"],
+     "correct": 1,
+     "explanation": "After-hours sessions have a fraction of regular-hours volume; small orders can move prices significantly because counterparties are scarce."},
+    {"id": 13, "category": "Market mechanics", "format": "cloze",
+     "question": "Dark pools are private trading venues that ___.",
+     "options": ["Operate only outside regular market hours", "Hide order details until after execution to reduce market impact", "Exclude retail investors by regulation"],
+     "correct": 1,
+     "explanation": "Large institutional orders route through dark pools to avoid signaling intent; the trade prints publicly only after execution."},
+    {"id": 14, "category": "Market mechanics", "format": "direct",
+     "question": "To short a stock in the US, your broker typically must first:",
+     "options": ["Receive regulatory approval from the SEC for each transaction", "Locate shares available to borrow", "Hold the stock in their own proprietary inventory"],
+     "correct": 1,
+     "explanation": "Regulation SHO's 'locate' requirement prevents naked shorting; brokers must confirm borrow availability before allowing the short sale."},
+    {"id": 15, "category": "Market mechanics", "format": "cloze",
+     "question": "A margin call is triggered when ___.",
+     "options": ["Your broker decides to reduce leverage limits unilaterally", "Your account equity falls below the maintenance margin requirement", "You exceed the maximum number of trades allowed per day"],
+     "correct": 1,
+     "explanation": "Margin calls force you to add cash, deposit securities, or close positions to restore equity above the maintenance threshold (typically 25-30% for US equities)."},
+    {"id": 16, "category": "Market mechanics", "format": "direct",
+     "question": "The key difference between a stop-loss and a stop-limit order is that:",
+     "options": ["Stop-loss orders convert to market orders once triggered", "Stop-limit orders execute instantly at any price", "Stop-loss orders are only available during regular hours"],
+     "correct": 0,
+     "explanation": "Once triggered, a stop-loss becomes a market order (fills at next available price, even if much worse); a stop-limit becomes a limit order (may not fill if price gaps through)."},
+    {"id": 17, "category": "Market mechanics", "format": "cloze",
+     "question": "In an IPO, the underwriter's 'greenshoe' option lets them ___.",
+     "options": ["Cancel the IPO if subscription falls below a threshold", "Sell up to 15% more shares than originally planned if demand is strong", "Lock up insider shares for an extended period"],
+     "correct": 1,
+     "explanation": "The greenshoe (overallotment option) stabilizes post-IPO prices by giving underwriters a way to cover their short position when the stock trades above the offer price."},
+    {"id": 18, "category": "Market mechanics", "format": "direct",
+     "question": "NYSE differs structurally from NASDAQ primarily because:",
+     "options": ["NYSE uses Designated Market Makers; NASDAQ uses competing dealers", "NASDAQ requires higher minimum listing standards than NYSE", "NYSE only lists US companies; NASDAQ lists international"],
+     "correct": 0,
+     "explanation": "NYSE has a single Designated Market Maker per stock providing continuous two-sided quotes; NASDAQ is a network of multiple competing market makers per security."},
+    # ---- Corporate actions ----
+    {"id": 3, "category": "Corporate actions", "format": "direct",
+     "question": "After a 1-for-4 reverse stock split, you held 200 shares at £5 each (£1,000 total). Post-split your position is:",
+     "options": ["50 shares at £20 each", "800 shares at £1.25 each", "200 shares at £20 each"],
+     "correct": 0,
+     "explanation": "Reverse splits consolidate share count while proportionally raising price-per-share; total position value is unchanged at the moment of the split."},
+    {"id": 4, "category": "Corporate actions", "format": "cloze",
+     "question": "A 'special dividend' differs from a regular dividend mainly because ___.",
+     "options": ["It's paid in stock rather than cash", "It's a one-time distribution outside the normal quarterly schedule", "It's taxed at a higher rate than regular dividends"],
+     "correct": 1,
+     "explanation": "Special dividends typically come from one-time events (asset sale, accumulated cash) and don't signal a permanent increase in the recurring yield."},
+    {"id": 19, "category": "Corporate actions", "format": "cloze",
+     "question": "After a 3-for-1 forward stock split, your 100-share position at £60 (£6,000 cost basis) becomes ___.",
+     "options": ["300 shares at £20 with cost basis £20/share", "100 shares at £180 with cost basis £60/share", "300 shares at £60 with cost basis £20/share"],
+     "correct": 0,
+     "explanation": "Forward splits multiply share count and divide price-per-share proportionally; total position value and total cost basis are unchanged, only per-share basis changes."},
+    {"id": 20, "category": "Corporate actions", "format": "direct",
+     "question": "When Company A spins off Subsidiary B as a separate public company, your cost basis is typically:",
+     "options": ["Reallocated between A and B based on their relative fair market values", "Reset to zero on A and applied entirely to B", "Unchanged on A, with B's basis set to first-day closing price"],
+     "correct": 0,
+     "explanation": "Cost basis is split proportionally between the surviving entity and spinoff per the IRS-published allocation (often relative market caps on the distribution date)."},
+    {"id": 21, "category": "Corporate actions", "format": "cloze",
+     "question": "In an all-cash M&A deal at £50/share, your 100 shares of the target company are ___.",
+     "options": ["Automatically converted to acquirer shares at the exchange ratio", "Cashed out at £50/share, typically triggering a taxable event", "Held in escrow until the deal closes 12 months later"],
+     "correct": 1,
+     "explanation": "All-cash deals are realization events; your basis is compared to cash received and any gain/loss is reportable in that tax year, regardless of whether you wanted to sell."},
+    {"id": 22, "category": "Corporate actions", "format": "direct",
+     "question": "A rights issue at a 20% discount to current market typically causes:",
+     "options": ["Existing shareholders to receive new shares automatically as a stock dividend", "The stock to trade lower after issuance, even for non-participants", "The company's total equity to decrease by 20%"],
+     "correct": 1,
+     "explanation": "Rights issues dilute share count; non-participating shareholders see their stake shrink, and the post-issue 'theoretical ex-rights price' sits below the pre-issue price."},
+    {"id": 23, "category": "Corporate actions", "format": "cloze",
+     "question": "A company buying back 5% of its outstanding shares typically causes EPS to ___.",
+     "options": ["Decrease by approximately 5%", "Increase by approximately 5% (assuming flat earnings)", "Remain unchanged, since net income is unaffected"],
+     "correct": 1,
+     "explanation": "Buybacks shrink the EPS denominator; with constant net income, EPS rises by about 1/(1-buyback%) - 1, roughly 5.3% for a 5% reduction."},
+    {"id": 24, "category": "Corporate actions", "format": "direct",
+     "question": "A DRIP (Dividend Reinvestment Plan) does what?",
+     "options": ["Defers dividend taxes until shares are sold", "Automatically uses cash dividends to purchase additional shares", "Pays dividends in stock instead of cash for tax efficiency"],
+     "correct": 1,
+     "explanation": "DRIPs reinvest cash dividends into more shares (often fractional), compounding the holding; the dividend is still taxable in the year received."},
+    {"id": 25, "category": "Corporate actions", "format": "cloze",
+     "question": "A tender offer differs from open-market buybacks because the company ___.",
+     "options": ["Offers a fixed price (often above market) to repurchase a specified number of shares", "Buys shares anonymously through a broker over many months", "Issues new shares at a discount to existing holders"],
+     "correct": 0,
+     "explanation": "Tender offers are time-bound public offers at a premium; shareholders choose whether to tender, and if oversubscribed the company prorates the purchase."},
+    {"id": 26, "category": "Corporate actions", "format": "direct",
+     "question": "The 'ex-dividend date' is the date on which:",
+     "options": ["The dividend is paid to shareholders of record", "New buyers are NOT entitled to the upcoming dividend", "The company's board approves the dividend amount"],
+     "correct": 1,
+     "explanation": "You must own the stock BEFORE the ex-dividend date to receive the dividend; on the ex-date the stock typically opens lower by approximately the dividend amount."},
+    # ---- Beyond equities ----
+    {"id": 5, "category": "Beyond equities", "format": "direct",
+     "question": "A bond with 7-year duration loses approximately how much of its market value if yields rise by 1%?",
+     "options": ["1%", "7%", "14%"],
+     "correct": 1,
+     "explanation": "Duration measures price sensitivity: a 1% yield change moves a 7-year-duration bond by roughly 7% in the opposite direction, ignoring convexity."},
+    {"id": 6, "category": "Beyond equities", "format": "cloze",
+     "question": "A REIT must distribute at least ___ of its taxable income to shareholders annually to maintain its pass-through tax status.",
+     "options": ["50%", "75%", "90%"],
+     "correct": 2,
+     "explanation": "The 90% distribution rule is why REITs typically offer higher dividend yields than common stocks but retain little internally for growth reinvestment."},
+    {"id": 27, "category": "Beyond equities", "format": "cloze",
+     "question": "A yield curve inversion (short-term yields above long-term) has historically preceded ___.",
+     "options": ["Equity bull markets within 6 months", "Recessions within 12-24 months", "Currency devaluations of the home country"],
+     "correct": 1,
+     "explanation": "Most US recessions since 1955 have been preceded by yield curve inversions (typically 2y/10y or 3m/10y), though the lag varies and false signals do occur."},
+    {"id": 28, "category": "Beyond equities", "format": "direct",
+     "question": "A 'credit spread' on a corporate bond represents:",
+     "options": ["The bid-ask spread on the bond", "The yield premium over a comparable-maturity government bond", "The difference between the bond's coupon and current yield"],
+     "correct": 1,
+     "explanation": "The credit spread compensates investors for default risk; spreads widen sharply during stress (2008, 2020) and narrow during calm conditions."},
+    {"id": 29, "category": "Beyond equities", "format": "cloze",
+     "question": "A corporate bond rated BB+ by S&P is classified as ___.",
+     "options": ["Investment grade, top tier", "High yield / 'junk', just below investment grade", "Default imminent"],
+     "correct": 1,
+     "explanation": "Investment grade ends at BBB-/Baa3; BB+ is the highest non-investment-grade rating, signaling speculative credit quality and typically wider spreads."},
+    {"id": 30, "category": "Beyond equities", "format": "direct",
+     "question": "A key structural difference between ETFs and mutual funds is:",
+     "options": ["ETFs trade intraday at market prices; mutual funds price once daily at NAV", "ETFs guarantee liquidity for redemptions; mutual funds don't", "ETFs are tax-free; mutual funds aren't"],
+     "correct": 0,
+     "explanation": "ETFs have continuous market pricing with bid-ask spreads; mutual fund orders all execute at the single NAV computed after market close."},
+    {"id": 31, "category": "Beyond equities", "format": "cloze",
+     "question": "An oil futures market in 'contango' means that ___.",
+     "options": ["Spot prices are higher than futures prices", "Futures prices are higher than spot prices", "The market is closed due to regulatory action"],
+     "correct": 1,
+     "explanation": "Contango (futures > spot) is the normal state for storable commodities; it imposes a 'roll cost' on long-only futures-based ETFs as expiring contracts are replaced by more expensive ones."},
+    {"id": 32, "category": "Beyond equities", "format": "direct",
+     "question": "TIPS (Treasury Inflation-Protected Securities) protect against inflation by:",
+     "options": ["Paying a higher fixed coupon than nominal Treasuries", "Adjusting the principal upward with the CPI", "Maturing earlier when inflation exceeds 2%"],
+     "correct": 1,
+     "explanation": "TIPS principal is reset twice yearly using CPI; coupon payments (a fixed % of adjusted principal) rise with inflation, preserving real purchasing power."},
+    {"id": 33, "category": "Beyond equities", "format": "cloze",
+     "question": "A 'callable' bond gives the issuer the right to ___.",
+     "options": ["Demand additional collateral from the bondholder", "Redeem the bond before maturity at a specified price", "Convert the bond into common stock"],
+     "correct": 1,
+     "explanation": "Callable bonds compensate investors via higher yields; issuers typically call when rates fall (refinancing at lower rates), capping investor upside on the position."},
+    {"id": 34, "category": "Beyond equities", "format": "direct",
+     "question": "A money market fund that 'breaks the buck' has:",
+     "options": ["Frozen redemptions to prevent a run on the fund", "Fallen below $1.00 NAV per share, signaling losses", "Doubled its dividend yield unexpectedly"],
+     "correct": 1,
+     "explanation": "Money market funds target stable $1 NAV; breaking the buck (rare - notably the Reserve Primary Fund in 2008) means losses on the underlying short-term debt holdings."},
+    # ---- Derivatives ----
+    {"id": 7, "category": "Derivatives", "format": "direct",
+     "question": "You own 100 shares of a stock at £95 and sell one covered call at strike £100. Maximum profit on the combined position occurs when the stock at expiration is:",
+     "options": ["Below £95 (any drop)", "Exactly £100", "£120 or higher"],
+     "correct": 1,
+     "explanation": "At £100, the call expires worthless (you keep the premium) AND you captured the full £5/share stock appreciation; above £100 your stock gain is capped at £100."},
+    {"id": 8, "category": "Derivatives", "format": "cloze",
+     "question": "Theta on an option position represents ___.",
+     "options": ["Sensitivity to changes in the underlying stock's price", "The rate of value decay from time passing", "Sensitivity to changes in implied volatility"],
+     "correct": 1,
+     "explanation": "Theta is daily time decay - options lose extrinsic value as expiration approaches, so long-option holders 'pay theta' and short-option sellers 'collect theta'."},
+    {"id": 35, "category": "Derivatives", "format": "cloze",
+     "question": "Put-call parity says that for a given strike and expiration, a call's price relates to the put's price via ___.",
+     "options": ["Call + Put = Stock", "Call - Put = Stock - PV(Strike)", "Call × Put = Stock × Strike"],
+     "correct": 1,
+     "explanation": "Put-call parity (C - P = S - Ke^(-rT)) lets you replicate one option using the other plus the underlying; arbitrageurs enforce it tightly in liquid markets."},
+    {"id": 36, "category": "Derivatives", "format": "direct",
+     "question": "A delta of 0.6 on a call option means:",
+     "options": ["The option has a 60% chance of expiring in-the-money", "The option price moves approximately £0.60 for every £1 move in the underlying", "The option costs £0.60 per share"],
+     "correct": 1,
+     "explanation": "Delta measures price sensitivity to the underlying; deep in-the-money calls approach delta=1, at-the-money calls cluster near 0.5, and deep OTM calls approach 0."},
+    {"id": 37, "category": "Derivatives", "format": "cloze",
+     "question": "Gamma measures how much ___ changes as the underlying stock moves.",
+     "options": ["Time decay (theta)", "Delta", "Implied volatility"],
+     "correct": 1,
+     "explanation": "Gamma is the 'delta of delta'; it's highest for at-the-money options near expiration, meaning option exposure changes rapidly as the underlying moves around the strike."},
+    {"id": 38, "category": "Derivatives", "format": "direct",
+     "question": "Rising implied volatility on a stock typically causes:",
+     "options": ["Both call and put prices to rise simultaneously", "Calls to rise and puts to fall", "Options to become harder to exercise"],
+     "correct": 0,
+     "explanation": "Implied volatility reflects expected magnitude of future moves; higher IV raises the value of both upside (calls) and downside (puts) optionality."},
+    {"id": 39, "category": "Derivatives", "format": "cloze",
+     "question": "The key difference between futures and forwards is that futures ___.",
+     "options": ["Are traded on exchanges with daily mark-to-market settlement", "Can never result in physical delivery of the underlying", "Are only available to institutional investors"],
+     "correct": 0,
+     "explanation": "Futures are standardized exchange-traded contracts with daily settlement of gains/losses; forwards are bilateral OTC contracts with cash flows typically only at maturity."},
+    {"id": 40, "category": "Derivatives", "format": "direct",
+     "question": "A long straddle (buy call + buy put at same strike) is profitable when:",
+     "options": ["The stock stays within a narrow range around the strike", "The stock moves significantly in either direction, beyond the combined premium", "Implied volatility drops sharply after purchase"],
+     "correct": 1,
+     "explanation": "Long straddles bet on big moves regardless of direction; the trade pays off when the stock moves enough to exceed the cost of both options combined."},
+    {"id": 41, "category": "Derivatives", "format": "cloze",
+     "question": "Selling a cash-secured put on a stock at strike £50 obligates you to ___.",
+     "options": ["Buy 100 shares at £50 if assigned", "Sell 100 shares at £50 if assigned", "Pay the buyer £50 in cash immediately"],
+     "correct": 0,
+     "explanation": "Cash-secured puts require setting aside £5,000 (100 × £50) at trade time; if the stock falls below £50 at expiry, you're obligated to buy at the strike."},
+    {"id": 42, "category": "Derivatives", "format": "direct",
+     "question": "The 'intrinsic value' of a call option at strike £50 when the stock is £55 is:",
+     "options": ["£0 (intrinsic value is always zero for OTM options)", "£5 (max(stock - strike, 0))", "£55 (the current stock price)"],
+     "correct": 1,
+     "explanation": "Intrinsic value = max(S - K, 0) for calls; the rest of an option's price (extrinsic value) reflects time, volatility, and the other Greeks."},
+    # ---- History & regs ----
+    {"id": 9, "category": "History & regs", "format": "direct",
+     "question": "The 1933 Glass-Steagall Act primarily:",
+     "options": ["Created the SEC to regulate stock exchanges", "Separated commercial banking from investment banking", "Required public companies to file annual 10-K reports"],
+     "correct": 1,
+     "explanation": "Glass-Steagall walled off deposit-taking banks from securities underwriting after the 1929 crash; it was substantially repealed by Gramm-Leach-Bliley in 1999."},
+    {"id": 10, "category": "History & regs", "format": "cloze",
+     "question": "US exchange 'Level 1' circuit breakers halt all trading when the S&P 500 drops ___ from the previous close.",
+     "options": ["5%", "7%", "10%"],
+     "correct": 1,
+     "explanation": "Level 1 (7%) triggers a 15-minute pause; Levels 2 (13%) and 3 (20%) add longer halts, all designed to slow panic-selling cascades during volatility spikes."},
+    {"id": 43, "category": "History & regs", "format": "cloze",
+     "question": "Black Monday (October 19, 1987) saw the Dow Jones Industrial Average drop ___ in a single session.",
+     "options": ["Approximately 10%", "Approximately 22%", "Approximately 35%"],
+     "correct": 1,
+     "explanation": "The 22.6% single-day drop remains the largest in DJIA history; portfolio insurance and program trading accelerated the cascade, prompting later introduction of circuit breakers."},
+    {"id": 44, "category": "History & regs", "format": "direct",
+     "question": "The 2008 Global Financial Crisis was triggered most directly by:",
+     "options": ["A sovereign debt default by a major European country", "The collapse of subprime mortgage-backed securities and Lehman Brothers' bankruptcy", "A sudden Fed rate hike to 6%"],
+     "correct": 1,
+     "explanation": "The MBS collapse exposed leveraged positions across the financial system; Lehman's September 2008 failure crystallized counterparty fears and froze interbank lending."},
+    {"id": 45, "category": "History & regs", "format": "cloze",
+     "question": "The Dodd-Frank Act (2010) was primarily aimed at ___.",
+     "options": ["Reducing tax rates on capital gains", "Increasing regulation of financial institutions and creating the CFPB", "Privatizing Fannie Mae and Freddie Mac"],
+     "correct": 1,
+     "explanation": "Dodd-Frank introduced the Volcker Rule (limiting proprietary trading by banks), stress tests for large institutions, and the Consumer Financial Protection Bureau."},
+    {"id": 46, "category": "History & regs", "format": "direct",
+     "question": "MiFID II (EU regulation, 2018) primarily targeted:",
+     "options": ["Transparency in trading and unbundling of research from execution costs", "A ban on short-selling EU-listed equities", "Harmonization of dividend tax rates across member states"],
+     "correct": 0,
+     "explanation": "MiFID II forced firms to separately price research and execution, reducing implicit subsidies and increasing pre/post-trade transparency across asset classes."},
+    {"id": 47, "category": "History & regs", "format": "cloze",
+     "question": "The SEC's primary mission is to ___.",
+     "options": ["Set interest rates and conduct monetary policy", "Protect investors, maintain fair markets, and facilitate capital formation", "Regulate commercial banking activities"],
+     "correct": 1,
+     "explanation": "The SEC enforces securities laws (disclosure, anti-fraud, market structure); monetary policy is the Federal Reserve; banking regulation is OCC/FDIC."},
+    {"id": 48, "category": "History & regs", "format": "direct",
+     "question": "The UK's Financial Conduct Authority (FCA) regulates:",
+     "options": ["Only retail banking deposits", "Conduct of financial services firms and UK securities markets", "Energy and utility pricing"],
+     "correct": 1,
+     "explanation": "The FCA supervises about 50,000 financial firms; prudential regulation of large banks/insurers sits with the Prudential Regulation Authority (PRA), part of the Bank of England."},
+    {"id": 49, "category": "History & regs", "format": "cloze",
+     "question": "The 1929 stock market crash was significantly amplified by ___.",
+     "options": ["Widespread use of high margin (leverage) by retail investors", "A sudden collapse in gold prices", "Federal Reserve emergency liquidity withdrawal"],
+     "correct": 0,
+     "explanation": "Investors routinely bought stocks with 10% down and 90% margin loans; when prices fell, margin calls forced selling, which dropped prices further, triggering more calls."},
+    {"id": 50, "category": "History & regs", "format": "direct",
+     "question": "The Sarbanes-Oxley Act (2002) was enacted primarily in response to:",
+     "options": ["The dot-com bubble's collapse", "Major accounting fraud at Enron and WorldCom", "The 9/11 terrorist attacks' impact on markets"],
+     "correct": 1,
+     "explanation": "SOX imposed strict accounting controls, CEO/CFO certification of financial statements, and criminal penalties for fraud; it also created the PCAOB to oversee auditors."},
+]
+assert len(QUIZ_POOL) == 50, f"QUIZ_POOL has {len(QUIZ_POOL)} entries (expected 50)"
+
+# Universe - large-cap reference list for the industry outlook section.
 # Refreshed monthly (file-mtime TTL); daily builds reuse cached results.
 UNIVERSE_CSV = ROOT / "universe.csv"
 UNIVERSE_CACHE = ROOT / "data" / "universe_outlook_cache.parquet"
@@ -2762,10 +3035,25 @@ def render_industry_attribution(rows: list[dict], basket_avg: float) -> str:
         # Bar: width % proportional to |contribution| / max_abs.
         # Positive bars sit right of the zero axis (col 5); negative left.
         bar_pct = abs(r["contribution_pp"]) / max_abs * 50  # max half-width 50%
+        # v2.1 #5: numeric label anchored to the axis line, ALWAYS on the side
+        # OPPOSITE the bar tip. Positives -> label left-of-axis right-aligned;
+        # negatives -> label right-of-axis left-aligned. Two payoffs:
+        #   (a) all labels of the same sign form a tight vertical column at
+        #       the axis line, so digit count (1.49 vs 29.88) is visible by
+        #       horizontal extent at a glance
+        #   (b) bars and labels never overlap, no inside/outside conditional,
+        #       label visibility never depends on bar magnitude.
+        # Sign-aware format: positives drop the redundant "+" (color = sign);
+        # negatives keep the "-" because magnitude + sign in mono is clearer.
         if r["contribution_pp"] >= 0:
+            contrib_label = f"{r['contribution_pp']:.2f}"
             bar_style = f'left:50%;width:{bar_pct:.1f}%;background:var(--up);'
+            label_style = 'right:50%;text-align:right;padding-right:6px;'
         else:
+            contrib_label = f"{r['contribution_pp']:.2f}"  # already includes "-"
             bar_style = f'left:{50 - bar_pct:.1f}%;width:{bar_pct:.1f}%;background:var(--down);'
+            label_style = 'left:50%;text-align:left;padding-left:6px;'
+        label_cls = f"ia-bar-label {contrib_cls}"
         body.append(
             f'<tr class="attribution-row-clickable" data-industry="{_esc(r["industry"])}" '
             f'title="Click to see every open position in {_esc(r["industry"])}">'
@@ -2776,7 +3064,8 @@ def render_industry_attribution(rows: list[dict], basket_avg: float) -> str:
             f'<td class="num {contrib_cls} ia-contrib">{r["contribution_pp"]:+.2f} pp</td>'
             f'<td class="num {vs_cls} ia-vs">{r["vs_basket"]:+.1f} pp</td>'
             f'<td class="ia-bar"><div class="ia-bar-axis"></div>'
-            f'<div class="ia-bar-fill" style="{bar_style}"></div></td>'
+            f'<div class="ia-bar-fill" style="{bar_style}"></div>'
+            f'<span class="{label_cls}" style="{label_style}">{contrib_label}</span></td>'
             f'</tr>'
         )
     return f"""<section class="attribution-section">
@@ -4193,6 +4482,9 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     aux_json = json.dumps(aux_payload, separators=(",", ":"))
     # v1.9 Pocket Lesson: bake the curated tip pool into the page payload.
     pocket_lessons_json = json.dumps(POCKET_LESSONS, separators=(",", ":"), ensure_ascii=False)
+    # v2.1 Quiz: 50-question pool, inline (~12 KB) so it's available immediately
+    # on toolbar-button click without waiting for HEAVY fetch.
+    quiz_pool_json = json.dumps(QUIZ_POOL, separators=(",", ":"), ensure_ascii=False)
 
     # ---- Customizable module stack -----------------------------------------
     # Each top-level content section is wrapped as a draggable/hideable
@@ -4369,6 +4661,43 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
   .layout-toggle:hover,.layout-reset:hover{{color:var(--text);border-color:var(--text-dim)}}
   .layout-toggle.active{{background:var(--accent);color:var(--ink);
     border-color:var(--accent);font-weight:600}}
+  /* v2.1: icon-only variant of the topbar buttons. Fixed-size square button
+     with the SVG icon centered; tooltip slides in below on hover. Saves
+     horizontal space (28px vs ~80px+ per text label) so the topbar fits
+     more controls without crowding. Keeps the .layout-toggle base styling
+     so .active state (accent bg) still works for toggle buttons. */
+  .icon-btn{{
+    width:36px;height:32px;padding:0;
+    display:inline-flex;align-items:center;justify-content:center;
+    position:relative;
+  }}
+  /* Re-assert the [hidden] override -- our .icon-btn display:inline-flex has
+     higher specificity than the UA default [hidden]{{display:none}}, so the
+     Reset button would stay visible without this. */
+  .icon-btn[hidden]{{display:none}}
+  .icon-btn svg{{width:18px;height:18px;display:block;stroke:currentColor}}
+  /* Palette icon uses fill (currentColor) since it's a solid swatch
+     representing the active accent. */
+  .palette-cycle-btn svg{{color:var(--accent)}}
+  /* Tooltip: data-tooltip drives a CSS pseudo-element. Slides in 3px on
+     hover with a 150ms fade. position:fixed-ish via absolute against the
+     .icon-btn -- which is already position:relative. */
+  .icon-btn[data-tooltip]::after{{
+    content:attr(data-tooltip);
+    position:absolute;top:calc(100% + 6px);left:50%;
+    transform:translate(-50%,-3px);
+    background:var(--surface-2);border:1px solid var(--border);
+    border-radius:4px;padding:4px 9px;
+    font-family:var(--font-mono);font-size:10px;letter-spacing:0.06em;
+    text-transform:uppercase;color:var(--text);white-space:nowrap;
+    opacity:0;pointer-events:none;
+    transition:opacity 0.15s ease,transform 0.15s ease;
+    z-index:50;
+  }}
+  .icon-btn:hover[data-tooltip]::after,
+  .icon-btn:focus-visible[data-tooltip]::after{{
+    opacity:1;transform:translate(-50%,0);
+  }}
   /* Desktop-view toggle: only visible on narrow viewports (where the mobile
      media queries activate). When toggled on (`body.force-desktop`), the body
      gets a min-width so the desktop layout always renders -- the page becomes
@@ -4380,6 +4709,11 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
   }}
   body.force-desktop{{min-width:1100px}}
   body.force-desktop .desktop-mode-btn{{display:inline-block !important}}
+  /* v2.1: when force-desktop pushes the page wider than the viewport, the
+     topbar (position:absolute right:28px) lands off-screen because right is
+     measured from the now-1100px container's edge. Switch to position:fixed
+     so the controls stay at top-right of the VIEWPORT regardless of scroll. */
+  body.force-desktop .topbar{{position:fixed;top:18px;right:28px}}
   /* Pulse halo around the Edit-layout button while the discovery hint is up.
      box-shadow keeps it paint-only — the button's layout box never grows so
      nothing nearby reflows. */
@@ -4502,6 +4836,72 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
   }}
   .pocket-lesson-chip:hover{{color:var(--text);border-color:var(--text-dim)}}
   .pocket-lesson-chip.active{{background:var(--accent);color:var(--ink);border-color:var(--accent);font-weight:600}}
+
+  /* v2.1 Quiz modal. Reuses the ticker modal's overlay/animation scheme so
+     the open/close feel matches. Sized to be skim-friendly (max-width 640px,
+     auto height up to viewport) since each question is short. The "correct
+     answer" flash and score pop are CSS keyframes triggered by JS class
+     toggles -- pure paint, no layout impact. */
+  .quiz-modal-card{{max-width:640px;padding:32px 36px 26px}}
+  .quiz-head{{display:flex;align-items:center;gap:10px;margin-bottom:14px}}
+  .quiz-eyebrow{{font-family:var(--font-mono);font-size:10px;letter-spacing:0.18em;
+    text-transform:uppercase;color:var(--text-dim);font-weight:600}}
+  .quiz-cat-pill{{font-family:var(--font-mono);font-size:9.5px;letter-spacing:0.08em;
+    text-transform:uppercase;color:var(--accent);
+    border:1px solid var(--accent);border-radius:3px;padding:1px 6px;opacity:0.85}}
+  .quiz-question{{font-family:var(--font-ui);font-size:16px;line-height:1.55;
+    color:var(--text);margin:0 0 18px 0;font-weight:500}}
+  .quiz-options{{display:flex;flex-direction:column;gap:8px;margin-bottom:14px}}
+  .quiz-option{{background:var(--ink-soft);border:1px solid var(--border);
+    color:var(--text);padding:11px 16px;border-radius:8px;cursor:pointer;
+    font-family:var(--font-ui);font-size:13.5px;text-align:left;
+    transition:background 0.12s,border-color 0.12s,color 0.12s;
+    line-height:1.4}}
+  .quiz-option:hover:not(:disabled){{border-color:var(--text-dim);background:var(--surface-2)}}
+  .quiz-option:disabled{{cursor:default;opacity:0.7}}
+  /* Reveal state: correct answer turns green & flashes; the picked-wrong
+     answer turns red; other answers fade. */
+  .quiz-option.correct{{background:rgba(52,211,153,0.18);border-color:var(--up);
+    color:var(--up);opacity:1;animation:flashCorrect 0.65s ease-out}}
+  .quiz-option.incorrect{{background:rgba(248,113,113,0.14);border-color:var(--down);
+    color:var(--down);opacity:1}}
+  .quiz-option.dimmed{{opacity:0.45}}
+  @keyframes flashCorrect{{
+    0%   {{background:rgba(52,211,153,0.55);transform:scale(1.0)}}
+    35%  {{background:rgba(52,211,153,0.40);transform:scale(1.015)}}
+    100% {{background:rgba(52,211,153,0.18);transform:scale(1.0)}}
+  }}
+  .quiz-reveal{{padding:12px 14px;background:var(--ink-soft);border:1px solid var(--border);
+    border-radius:8px;margin-bottom:14px}}
+  .quiz-reveal[hidden]{{display:none}}
+  .quiz-reveal-verdict{{font-family:var(--font-mono);font-size:10.5px;
+    letter-spacing:0.12em;text-transform:uppercase;font-weight:600;margin-bottom:6px}}
+  .quiz-reveal-verdict.pos{{color:var(--up)}}
+  .quiz-reveal-verdict.neg{{color:var(--down)}}
+  .quiz-reveal-text{{font-family:var(--font-ui);font-size:12.5px;line-height:1.5;color:var(--text-2)}}
+  .quiz-foot{{display:flex;align-items:center;justify-content:space-between;
+    margin-top:6px;padding-top:14px;border-top:1px solid var(--border)}}
+  .quiz-score{{font-family:var(--font-mono);font-size:11px;letter-spacing:0.06em;
+    color:var(--text-dim);text-transform:uppercase}}
+  .quiz-score-num{{color:var(--text);font-weight:600;font-size:12px;
+    display:inline-block;margin-left:4px;transform-origin:center}}
+  .quiz-score-num.pop{{animation:scorePop 0.5s cubic-bezier(0.34,1.56,0.64,1)}}
+  @keyframes scorePop{{
+    0%   {{transform:scale(1.0);color:var(--text)}}
+    35%  {{transform:scale(1.35);color:var(--up)}}
+    100% {{transform:scale(1.0);color:var(--text)}}
+  }}
+  .quiz-next{{background:var(--accent);border:1px solid var(--accent);color:var(--ink);
+    padding:7px 16px;border-radius:6px;cursor:pointer;font-family:var(--font-mono);
+    font-size:11px;letter-spacing:0.08em;text-transform:uppercase;font-weight:600;
+    transition:opacity 0.15s,transform 0.1s}}
+  .quiz-next:hover:not(:disabled){{transform:translateY(-1px)}}
+  .quiz-next:disabled{{opacity:0.3;cursor:not-allowed}}
+  @media (max-width:600px){{
+    .quiz-modal-card{{padding:22px 18px 18px;max-width:none;border-radius:0;max-height:100vh}}
+    .quiz-question{{font-size:14.5px}}
+    .quiz-option{{font-size:12.5px;padding:10px 12px}}
+  }}
 
   .container{{position:relative}}
 
@@ -5025,6 +5425,14 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     background:linear-gradient(90deg,rgba(255,255,255,0.02) 0%,transparent 50%,rgba(255,255,255,0.02) 100%)}}
   .ia-bar-axis{{position:absolute;top:4px;bottom:4px;left:50%;width:1px;background:var(--text-dim);opacity:0.4}}
   .ia-bar-fill{{position:absolute;top:8px;bottom:8px;border-radius:2px;opacity:0.7}}
+  /* v2.1 #5: numeric label anchored at the axis line, opposite side from the
+     bar tip. Same-sign labels form a vertical column; mono font + right- or
+     left-align lets the eye scan digit count by horizontal extent. */
+  .ia-bar-label{{position:absolute;top:50%;transform:translateY(-50%);
+    font-family:var(--font-mono);font-size:10.5px;line-height:1;
+    white-space:nowrap;font-weight:500;letter-spacing:0.02em;opacity:0.9}}
+  .ia-bar-label.pos{{color:var(--up)}}
+  .ia-bar-label.neg{{color:var(--down)}}
   @media (max-width:900px){{
     .ia-bar{{display:none}}
     .ia-table th,.ia-table td{{padding:8px 6px;font-size:11.5px}}
@@ -5467,6 +5875,21 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     color:var(--text-dim);font-style:italic;text-align:center}}
   .modal-chart-wrap{{position:relative;width:100%;height:340px;background:var(--ink-soft);border:1px solid var(--border);border-radius:10px;padding:16px}}
   .modal-chart{{width:100%;height:100%;display:block}}
+  /* v2.1 #1: axis-label HTML overlay. Sits above the SVG at inset:16px so its
+     bounding box matches the SVG's pixel rect (which fills the chart-wrap minus
+     the 16px padding). Labels position via CSS percentages mapped from viewBox
+     coords -- so text renders at native browser DPI, immune to the SVG's
+     preserveAspectRatio="none" horizontal stretch. */
+  .modal-chart-labels{{position:absolute;inset:16px;pointer-events:none;z-index:1}}
+  .modal-chart-labels .y-tick{{position:absolute;transform:translate(-100%,-50%);
+    font-family:var(--font-mono);font-size:10.5px;color:#6b7185;
+    padding-right:8px;white-space:nowrap;line-height:1}}
+  .modal-chart-labels .x-tick{{position:absolute;transform:translate(-50%,0);
+    font-family:var(--font-mono);font-size:10.5px;color:#6b7185;
+    padding-top:4px;white-space:nowrap;line-height:1}}
+  .modal-chart-labels .txn-marker{{position:absolute;transform:translate(-50%,-50%);
+    font-family:var(--font-mono);font-size:11px;font-weight:700;color:#0b0e17;
+    line-height:1}}
   /* v2.0 lazy-modal: spinner shown in the chart area while the sidecar
      payload is being fetched on first modal-open. Hidden once HEAVY merges
      into DATA[tkr]. Subsequent opens reuse the cache -- no spinner. */
@@ -5537,22 +5960,61 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
 <div class="container">
 
 <div class="topbar">
-  <button class="layout-toggle" id="edit-layout-btn" type="button" aria-pressed="false"
-          title="Reorder or hide sections; saved in your browser">Edit layout</button>
-  <button class="layout-reset" id="reset-layout-btn" type="button" hidden
-          title="Restore the default order and show all sections">Reset</button>
-  <button class="layout-toggle desktop-mode-btn" id="desktop-mode-btn" type="button" aria-pressed="false"
-          title="Force the full desktop layout (the page becomes horizontally scrollable on phones)">Desktop view</button>
+  <!-- v2.1: icon-only topbar. Each button shows a single SVG glyph + a
+       data-tooltip that slides in on hover with the human-readable name.
+       Saves ~70% horizontal space vs the v2.0 text labels. -->
+  <button class="layout-toggle icon-btn" id="edit-layout-btn" type="button" aria-pressed="false"
+          aria-label="Edit layout" data-tooltip="Edit layout">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <line x1="4" y1="6" x2="13" y2="6"/><line x1="19" y1="6" x2="20" y2="6"/><circle cx="16" cy="6" r="2"/>
+      <line x1="4" y1="12" x2="7" y2="12"/><line x1="13" y1="12" x2="20" y2="12"/><circle cx="10" cy="12" r="2"/>
+      <line x1="4" y1="18" x2="15" y2="18"/><circle cx="18" cy="18" r="2"/>
+    </svg>
+  </button>
+  <button class="layout-reset icon-btn" id="reset-layout-btn" type="button" hidden
+          aria-label="Reset layout" data-tooltip="Reset layout">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M3 7v6h6"/>
+      <path d="M21 17a9 9 0 0 0-15-6.7L3 13"/>
+    </svg>
+  </button>
+  <button class="layout-toggle icon-btn desktop-mode-btn" id="desktop-mode-btn" type="button" aria-pressed="false"
+          aria-label="Force desktop view" data-tooltip="Desktop view">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <rect x="2" y="3" width="20" height="14" rx="2"/>
+      <line x1="8" y1="21" x2="16" y2="21"/>
+      <line x1="12" y1="17" x2="12" y2="21"/>
+    </svg>
+  </button>
   <!-- v1.9 Pocket Lesson: quick toggle for the educational tip card.
        State persisted in localStorage as `pocketLessonOn`. -->
-  <button class="layout-toggle pocket-lesson-btn" id="pocket-lesson-btn" type="button" aria-pressed="false"
-          title="Show a short educational tip about a concept this dashboard surfaces">Pocket lesson</button>
-  <div class="palette-toggle" role="tablist" aria-label="Color palette">
-    <button data-palette="default" aria-pressed="true">Default</button>
-    <button data-palette="softdark">Soft Dark</button>
-    <button data-palette="light">Light</button>
-    <button data-palette="bloomberg">Amber</button>
-  </div>
+  <button class="layout-toggle icon-btn pocket-lesson-btn" id="pocket-lesson-btn" type="button" aria-pressed="false"
+          aria-label="Pocket lesson" data-tooltip="Pocket lesson">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/>
+      <path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/>
+    </svg>
+  </button>
+  <!-- v2.1 Quiz: opens the finance-knowledge quiz modal. State (seen set,
+       monthly score) persisted in localStorage as `quizSeen` + `quizMonthly`. -->
+  <button class="layout-toggle icon-btn quiz-btn" id="quiz-btn" type="button"
+          aria-label="Quiz — 5 categories, 50 questions" data-tooltip="Quiz">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <circle cx="12" cy="12" r="10"/>
+      <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/>
+      <line x1="12" y1="17" x2="12.01" y2="17"/>
+    </svg>
+  </button>
+  <!-- v2.1: 4 palette buttons collapsed to a single cycling button. Click
+       advances Default -> Soft Dark -> Light -> Amber -> Default. The icon
+       is a filled circle in var(--accent) so the active palette is visible
+       at a glance; data-tooltip carries the palette name (updated by JS). -->
+  <button class="layout-toggle icon-btn palette-cycle-btn" id="palette-cycle-btn" type="button"
+          data-palette="default" aria-label="Cycle color palette" data-tooltip="Default">
+    <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      <circle cx="12" cy="12" r="8.5"/>
+    </svg>
+  </button>
 </div>
 
 <!-- v1.9 Pocket Lesson card. Sits just below the topbar. Default state is
@@ -5694,6 +6156,7 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     </div>
     <div class="modal-chart-wrap">
       <svg class="modal-chart" viewBox="0 0 {MODAL_VB_W} {MODAL_VB_H}" preserveAspectRatio="none"></svg>
+      <div class="modal-chart-labels"></div>
       <div class="modal-tip" hidden></div>
       <div class="modal-loading" hidden>
         <div class="modal-spinner"></div>
@@ -5715,6 +6178,38 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
       <div class="info-modal-sub muted"></div>
     </div>
     <div class="info-modal-body"></div>
+  </div>
+</div>
+
+<!-- v2.1 Quiz modal. Opens via the topbar Quiz button; closed by ESC, the X
+     button, or clicking the backdrop. Renders one question at a time from
+     QUIZ_POOL with 3 answer buttons; on answer reveal, the correct option
+     flashes green and the explanation appears below. "Next" cycles to a
+     fresh question. Score + seen-set persist via localStorage. -->
+<div class="modal quiz-modal" id="quiz-modal" hidden role="dialog" aria-modal="true">
+  <div class="modal-card quiz-modal-card" role="document">
+    <button class="modal-close" id="quiz-modal-close" aria-label="Close">&times;</button>
+    <div class="quiz-head">
+      <div class="quiz-eyebrow">Quick quiz</div>
+      <div class="quiz-cat-pill" id="quiz-cat-pill"></div>
+    </div>
+    <div class="quiz-question" id="quiz-question">&mdash;</div>
+    <div class="quiz-options" id="quiz-options" role="radiogroup" aria-label="Answer choices">
+      <!-- JS injects 3 <button class="quiz-option"> here -->
+    </div>
+    <div class="quiz-reveal" id="quiz-reveal" hidden>
+      <div class="quiz-reveal-verdict" id="quiz-reveal-verdict"></div>
+      <div class="quiz-reveal-text" id="quiz-reveal-text"></div>
+    </div>
+    <div class="quiz-foot">
+      <div class="quiz-score">
+        This month: <span class="quiz-score-num" id="quiz-score-num">0/0</span>
+      </div>
+      <div class="quiz-actions">
+        <button type="button" class="quiz-next" id="quiz-next" disabled
+                title="Show another question">Next &rarr;</button>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -5766,6 +6261,13 @@ const AUX_DATA = {aux_json};
 // the POCKET_LESSONS list in build.py. JS picks one at random on each page
 // load; a Next-tip button rotates without reloading.
 const POCKET_LESSONS = {pocket_lessons_json};
+
+// v2.1 Quiz: 50-question pool, 5 categories x 10 questions. Schema:
+//   {{id, category, format ("cloze"|"direct"), question, options[3], correct, explanation}}
+// State (seen set, monthly score) persisted via two localStorage keys:
+//   "quizSeen"    - JSON array of seen question ids
+//   "quizMonthly" - JSON {{month, answered, correct}} resetting on calendar month
+const QUIZ_POOL = {quiz_pool_json};
 
 // ---- Helpers
 function fmtMoney(v, sym) {{
@@ -6206,6 +6708,19 @@ document.querySelectorAll('.panel').forEach(panel => {{
       group.querySelectorAll('.chip').forEach(c => c.classList.remove('active'));
       chip.classList.add('active');
       applyFilter(panel);
+      // v2.1 #3: Apply default sort for the new status-filter mode. Closed
+      // positions default to Signal (col 4) so like-signal rows group together
+      // for fast triage ("which closed names exited on Strong uptrend?"); every
+      // other mode falls back to Since-baseline (col 9), the original default.
+      // Only fires for status chips -- sector-filter chips keep current sort.
+      if (!group.classList.contains('chips-sectors')) {{
+        const newMode = chip.dataset.filter;
+        const defaultCol = (newMode === 'closed') ? 4 : 9;
+        if (sortState.col !== defaultCol) {{
+          const targetTh = document.querySelector(`#ret-table th[data-col="${{defaultCol}}"]`);
+          if (targetTh) targetTh.click();
+        }}
+      }}
       // v1.8.1 B5: reset scroll to top when filter changes -- otherwise the
       // user is mid-list in "Open" and switching to "Closed" leaves them at
       // an arbitrary scroll position in a now-different dataset.
@@ -6358,6 +6873,42 @@ async function openModal(ticker) {{
     range52w_pct:    {{ val: rng, meta: rngMeta }},
     vol_ratio:       {{ val: vol, meta: volMeta }},
   }};
+  // v2.1 #2: value-aware tooltip explaining each quant signal. Built from the
+  // numeric value + threshold zone so the user sees "RSI 81 — overbought" not
+  // just an abstract definition. Interpretation strings are generated here in
+  // JS rather than baked per-ticker into HEAVY (saves ~5 KB × 187 tickers).
+  function quantTitle(k, v) {{
+    if (!isNum(v)) return 'No data — typically <200 days of price history or missing FX rate.';
+    if (k === 'sma200_dist_pct') {{
+      const dir = v >= 0 ? 'above' : 'below';
+      return `Price is ${{Math.abs(v).toFixed(1)}}% ${{dir}} the 200-day moving average. ` +
+             `Long-term trend ${{v >= 0 ? 'up' : 'down'}}; persistent moves below the SMA200 often signal sustained weakness.`;
+    }}
+    if (k === 'atr14_gbp') {{
+      return `Average True Range over 14 days = {BASE_SYMBOL}${{v.toFixed(2)}}. ` +
+             `Typical daily price swing in absolute terms. A common stop-loss buffer is 2× ATR below entry for long positions.`;
+    }}
+    if (k === 'rsi14') {{
+      const zone = v >= 70 ? 'Overbought (>70) — strong recent buying; momentum may exhaust soon.' :
+                   v <= 30 ? 'Oversold (<30) — heavy recent selling; price may rebound.' :
+                   'Neutral (30–70) — no clear momentum signal.';
+      return `RSI(14) = ${{v.toFixed(0)}}. ${{zone}}`;
+    }}
+    if (k === 'range52w_pct') {{
+      const zone = v >= 75 ? 'Near 52-week high — potential resistance or strong momentum signal.' :
+                   v <= 25 ? 'Near 52-week low — potential support level or value zone.' :
+                   'Mid-range.';
+      return `At ${{v.toFixed(0)}}% of the 52-week price range (0% = year low, 100% = year high). ${{zone}}`;
+    }}
+    if (k === 'vol_ratio') {{
+      const zone = v >= 2.0 ? 'Unusual — > 2× typical, often news-driven.' :
+                   v >= 1.3 ? 'Elevated — above-average activity.' :
+                   v >= 0.7 ? 'Roughly typical.' :
+                   'Quiet — below-average activity.';
+      return `Recent volume = ${{v.toFixed(1)}}× the 50-day average. ${{zone}}`;
+    }}
+    return '';
+  }}
   modal.querySelectorAll('[data-qkey]').forEach(el => {{
     const k = el.dataset.qkey;
     const entry = qMap[k];
@@ -6365,6 +6916,7 @@ async function openModal(ticker) {{
     el.textContent = entry.val;
     el.className = 'modal-stat-val';
     const v = q[k];
+    el.setAttribute('title', quantTitle(k, v));
     if (!isNum(v)) {{ el.classList.add('dim'); return; }}
     if (k === 'sma200_dist_pct') el.classList.add(v >= 0 ? 'pos' : 'neg');
     else if (k === 'rsi14') {{
@@ -6449,6 +7001,10 @@ function _modalY(v, vmin, vmax) {{
 
 function renderBigChart(ticker) {{
   currentTicker = ticker;
+  // v2.1 #1: HTML overlay for axis labels (escapes the SVG viewBox stretch).
+  // Cleared first so prior-ticker labels don't bleed into the loading state.
+  const labelsEl = modal.querySelector('.modal-chart-labels');
+  if (labelsEl) labelsEl.innerHTML = '';
   const d = DATA[ticker];
   if (!d || !d.chart || !d.chart.points) {{
     modalSvg.innerHTML = '';
@@ -6474,19 +7030,29 @@ function renderBigChart(ticker) {{
   const firstX = xs[0], lastX = xs[n - 1];
   const areaD = `M ${{firstX.toFixed(1)}},${{labelY.toFixed(1)}} L ${{chart.points.replaceAll(' ', ' L ')}} L ${{lastX.toFixed(1)}},${{labelY.toFixed(1)}} Z`;
 
-  // Build SVG from precomputed geometry. Font sizes scale with the viewBox so
-  // they look tiny on widescreen unless we bump them — empirically a 1000x600
-  // box rendered at ~700x340 px asks for ~16-18 unit fonts to look right.
+  // Build SVG from precomputed geometry. v2.1 #1: text moved out of SVG into
+  // HTML overlay (`labelsHtml`) so it renders at native browser DPI without
+  // inheriting the SVG's non-uniform viewBox stretch. The SVG keeps grid
+  // lines, the zero baseline, the polyline, gradients, and crosshair geometry.
   let html = '';
-  html += chart.y_ticks.map(t =>
-    `<line x1="${{MODAL_VB_PAD_L}}" y1="${{t.y.toFixed(1)}}" x2="${{(MODAL_VB_PAD_L + MODAL_VB_INNER_W).toFixed(1)}}" y2="${{t.y.toFixed(1)}}" stroke="rgba(255,255,255,0.04)" stroke-width="1"/>` +
-    `<text x="${{(MODAL_VB_PAD_L - 8).toFixed(1)}}" y="${{(t.y + 6).toFixed(1)}}" fill="#6b7185" font-size="16" font-family="Geist Mono, monospace" text-anchor="end">${{t.v >= 0 ? '+' : ''}}${{t.v.toFixed(0)}}%</text>`
-  ).join('');
+  const labelsHtml = [];
+  // Y-axis: SVG line for the grid, HTML span for the percentage label.
+  const yTickXPct = ((MODAL_VB_PAD_L - 4) / MODAL_VB_W * 100).toFixed(3);
+  for (const t of chart.y_ticks) {{
+    html += `<line x1="${{MODAL_VB_PAD_L}}" y1="${{t.y.toFixed(1)}}" x2="${{(MODAL_VB_PAD_L + MODAL_VB_INNER_W).toFixed(1)}}" y2="${{t.y.toFixed(1)}}" stroke="rgba(255,255,255,0.04)" stroke-width="1"/>`;
+    const yPct = (t.y / MODAL_VB_H * 100).toFixed(3);
+    const sign = t.v >= 0 ? '+' : '';
+    labelsHtml.push(`<span class="y-tick" style="left:${{yTickXPct}}%;top:${{yPct}}%">${{sign}}${{t.v.toFixed(0)}}%</span>`);
+  }}
   html += `<line x1="${{MODAL_VB_PAD_L}}" y1="${{chart.zero_y.toFixed(1)}}" x2="${{(MODAL_VB_PAD_L + MODAL_VB_INNER_W).toFixed(1)}}" y2="${{chart.zero_y.toFixed(1)}}" stroke="rgba(255,255,255,0.18)" stroke-width="0.8" stroke-dasharray="3 3"/>`;
-  html += chart.x_tick_idx.map(idx => {{
+  // X-axis: pure HTML, no SVG text. Position is just below the chart area
+  // (labelY = chart's bottom edge, +12 viewBox-units of breathing room).
+  const xLabelTopPct = ((labelY + 12) / MODAL_VB_H * 100).toFixed(3);
+  for (const idx of chart.x_tick_idx) {{
     const x = _modalX(idx, n);
-    return `<text x="${{x.toFixed(1)}}" y="${{(labelY + 32).toFixed(1)}}" fill="#6b7185" font-size="16" font-family="Geist Mono, monospace" text-anchor="middle">${{fmtDate(dates[idx])}}</text>`;
-  }}).join('');
+    const xPct = (x / MODAL_VB_W * 100).toFixed(3);
+    labelsHtml.push(`<span class="x-tick" style="left:${{xPct}}%;top:${{xLabelTopPct}}%">${{fmtDate(dates[idx])}}</span>`);
+  }}
   html += `<path d="${{areaD}}" fill="url(#${{gradId}})"/>`;
   // v1.9 #2: per-segment color on the modal polyline. Render each
   // same-sign run in its own color so below-baseline periods are visibly red
@@ -6520,11 +7086,17 @@ function renderBigChart(ticker) {{
       const ly = labelY - 8;
       html += `<line x1="${{mx.toFixed(1)}}" y1="${{MODAL_VB_PAD_T}}" x2="${{mx.toFixed(1)}}" y2="${{labelY.toFixed(1)}}" stroke="${{mColor}}" stroke-width="0.7" stroke-dasharray="3 2" opacity="0.45"/>`;
       html += `<circle cx="${{mx.toFixed(1)}}" cy="${{ly.toFixed(1)}}" r="9" fill="${{mColor}}" stroke="#0b0e17" stroke-width="0.5"/>`;
-      html += `<text x="${{mx.toFixed(1)}}" y="${{(ly + 5).toFixed(1)}}" fill="#0b0e17" font-size="14" font-weight="700" text-anchor="middle" font-family="Geist Mono, monospace">${{label}}</text>`;
+      // v2.1 #1: the B/S character moves to the HTML overlay so it renders
+      // legibly inside the circle. The circle itself stays in SVG and stretches
+      // slightly into an ellipse, but at r=9 the distortion is barely visible.
+      const mxPct = (mx / MODAL_VB_W * 100).toFixed(3);
+      const lyPct = (ly / MODAL_VB_H * 100).toFixed(3);
+      labelsHtml.push(`<span class="txn-marker" style="left:${{mxPct}}%;top:${{lyPct}}%">${{label}}</span>`);
     }}
   }}
 
   modalSvg.innerHTML = html;
+  if (labelsEl) labelsEl.innerHTML = labelsHtml.join('');
   chartPoints = {{xs, ys, dates, prices, rebased, color}};
 }}
 
@@ -6945,22 +7517,185 @@ document.getElementById('hero-chart').addEventListener('click', (e) => {{
   nextBtn.addEventListener('click', () => renderTip(pickRandomTip()));
 }})();
 
+// v2.1: palette toggle collapsed from 4 buttons into 1 cycling button. Each
+// click advances through the ORDER list; label updates to the current palette
+// name. Persistence key + body-class scheme unchanged from v1.x for backwards
+// compat -- localStorage values "default" / "softdark" / "light" / "bloomberg"
+// still apply correctly.
 (function setupPalette() {{
   const PALETTE_KEY = 'stocks-dashboard-palette';
-  const buttons = document.querySelectorAll('.palette-toggle button');
+  const ORDER = ['default', 'softdark', 'light', 'bloomberg'];
+  const LABELS = {{default: 'Default', softdark: 'Soft Dark', light: 'Light', bloomberg: 'Amber'}};
+  const btn = document.getElementById('palette-cycle-btn');
+  if (!btn) return;
   function apply(name) {{
     document.body.classList.remove('palette-softdark','palette-light','palette-bloomberg');
     if (name && name !== 'default') document.body.classList.add('palette-' + name);
-    buttons.forEach(b => {{
-      const active = b.dataset.palette === name;
-      b.classList.toggle('active', active);
-      b.setAttribute('aria-pressed', String(active));
-    }});
+    // v2.1: button is icon-only; the human-readable name now lives in the
+    // data-tooltip attribute (which drives the CSS hover tooltip).
+    btn.dataset.tooltip = LABELS[name] || 'Default';
+    btn.dataset.palette = name;
     try {{ localStorage.setItem(PALETTE_KEY, name); }} catch (e) {{ /* private mode */ }}
   }}
   const saved = (() => {{ try {{ return localStorage.getItem(PALETTE_KEY); }} catch (e) {{ return null; }} }})();
-  apply(saved || 'default');
-  buttons.forEach(b => b.addEventListener('click', () => apply(b.dataset.palette)));
+  apply(ORDER.includes(saved) ? saved : 'default');
+  btn.addEventListener('click', () => {{
+    const current = btn.dataset.palette || 'default';
+    const next = ORDER[(ORDER.indexOf(current) + 1) % ORDER.length];
+    apply(next);
+  }});
+}})();
+
+// v2.1 Quiz feature. Opens via topbar Quiz button -> presents one question
+// at a time from QUIZ_POOL, with a 3-option choice. Picks the next question
+// uniformly at random from the "unseen" pool; recycles the pool when 90%+
+// has been seen. Monthly score (answered + correct) resets on each new
+// calendar month, tracked via the "month" key in quizMonthly.
+//
+// localStorage schema:
+//   "quizSeen"    : JSON array of seen question ids
+//   "quizMonthly" : JSON {{month: "YYYY-MM", answered: N, correct: M}}
+//
+// UX: correct answer gets a green flash + the explanation reveals; wrong
+// answer turns the picked button red + reveals correct in green + explanation.
+// "Next" button enables once the user has picked an answer.
+(function setupQuiz() {{
+  const openBtn = document.getElementById('quiz-btn');
+  const modal = document.getElementById('quiz-modal');
+  if (!openBtn || !modal || !Array.isArray(QUIZ_POOL) || QUIZ_POOL.length === 0) return;
+  const closeBtn = document.getElementById('quiz-modal-close');
+  const catPill = document.getElementById('quiz-cat-pill');
+  const qEl = document.getElementById('quiz-question');
+  const optsEl = document.getElementById('quiz-options');
+  const revealEl = document.getElementById('quiz-reveal');
+  const verdictEl = document.getElementById('quiz-reveal-verdict');
+  const explainEl = document.getElementById('quiz-reveal-text');
+  const scoreEl = document.getElementById('quiz-score-num');
+  const nextBtn = document.getElementById('quiz-next');
+
+  const SEEN_KEY = 'quizSeen';
+  const MONTHLY_KEY = 'quizMonthly';
+
+  // ---- State engine (load / save / pick / record) -----------------------
+  function nowMonth() {{
+    const d = new Date();
+    return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
+  }}
+  function loadState() {{
+    let seen = [], monthly = {{month: nowMonth(), answered: 0, correct: 0}};
+    try {{
+      const s = JSON.parse(localStorage.getItem(SEEN_KEY) || '[]');
+      if (Array.isArray(s)) seen = s.filter(x => typeof x === 'number');
+      const m = JSON.parse(localStorage.getItem(MONTHLY_KEY) || 'null');
+      if (m && typeof m === 'object' && typeof m.month === 'string') {{
+        monthly = {{month: m.month, answered: m.answered|0, correct: m.correct|0}};
+      }}
+    }} catch (e) {{ /* private mode or corrupted entries */ }}
+    // Monthly auto-reset on calendar month flip
+    if (monthly.month !== nowMonth()) {{
+      monthly = {{month: nowMonth(), answered: 0, correct: 0}};
+    }}
+    return {{seen, monthly}};
+  }}
+  function saveState(state) {{
+    try {{
+      localStorage.setItem(SEEN_KEY, JSON.stringify(state.seen));
+      localStorage.setItem(MONTHLY_KEY, JSON.stringify(state.monthly));
+    }} catch (e) {{ /* private mode -- silently degrade */ }}
+  }}
+  function pickNext(state) {{
+    // Recycle seen-set when 90%+ has been seen so the experience never dead-ends.
+    if (state.seen.length >= Math.floor(QUIZ_POOL.length * 0.9)) {{
+      state.seen = [];
+    }}
+    const unseen = QUIZ_POOL.filter(q => !state.seen.includes(q.id));
+    const pool = unseen.length > 0 ? unseen : QUIZ_POOL;
+    return pool[Math.floor(Math.random() * pool.length)];
+  }}
+
+  let state = loadState();
+  let currentQ = null;
+  let answered = false;
+
+  // ---- Rendering --------------------------------------------------------
+  function updateScore(animate) {{
+    scoreEl.textContent = state.monthly.correct + '/' + state.monthly.answered;
+    if (animate) {{
+      scoreEl.classList.remove('pop');
+      // Force reflow so the keyframe restarts. Tiny perf cost; fires once per answer.
+      void scoreEl.offsetWidth;
+      scoreEl.classList.add('pop');
+    }}
+  }}
+  function renderQuestion(q) {{
+    currentQ = q;
+    answered = false;
+    catPill.textContent = q.category;
+    qEl.textContent = q.question;
+    revealEl.hidden = true;
+    nextBtn.disabled = true;
+    optsEl.innerHTML = '';
+    q.options.forEach((opt, idx) => {{
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'quiz-option';
+      b.textContent = opt;
+      b.setAttribute('role', 'radio');
+      b.addEventListener('click', () => handleAnswer(idx));
+      optsEl.appendChild(b);
+    }});
+  }}
+  function handleAnswer(picked) {{
+    if (answered) return;
+    answered = true;
+    const correct = currentQ.correct;
+    const isCorrect = picked === correct;
+    // Disable all + mark states
+    Array.from(optsEl.children).forEach((btn, idx) => {{
+      btn.disabled = true;
+      if (idx === correct) {{
+        btn.classList.add('correct');
+      }} else if (idx === picked) {{
+        btn.classList.add('incorrect');
+      }} else {{
+        btn.classList.add('dimmed');
+      }}
+    }});
+    // Reveal explanation
+    verdictEl.textContent = isCorrect ? 'Correct' : 'Not quite';
+    verdictEl.className = 'quiz-reveal-verdict ' + (isCorrect ? 'pos' : 'neg');
+    explainEl.textContent = currentQ.explanation;
+    revealEl.hidden = false;
+    nextBtn.disabled = false;
+    // Persist state
+    if (!state.seen.includes(currentQ.id)) state.seen.push(currentQ.id);
+    state.monthly.answered++;
+    if (isCorrect) state.monthly.correct++;
+    saveState(state);
+    updateScore(isCorrect);
+  }}
+  function openQuiz() {{
+    state = loadState();   // re-read in case another tab updated
+    updateScore(false);
+    renderQuestion(pickNext(state));
+    modal.removeAttribute('hidden');
+    document.body.classList.add('modal-open');
+  }}
+  function closeQuiz() {{
+    modal.setAttribute('hidden', '');
+    document.body.classList.remove('modal-open');
+  }}
+
+  // ---- Wiring ----------------------------------------------------------
+  openBtn.addEventListener('click', openQuiz);
+  closeBtn.addEventListener('click', closeQuiz);
+  nextBtn.addEventListener('click', () => renderQuestion(pickNext(state)));
+  // Backdrop click closes (the modal's .modal pseudo-element acts as backdrop)
+  modal.addEventListener('click', (e) => {{ if (e.target === modal) closeQuiz(); }});
+  // ESC closes (only when the quiz modal is the topmost modal)
+  document.addEventListener('keydown', (e) => {{
+    if (e.key === 'Escape' && !modal.hasAttribute('hidden')) closeQuiz();
+  }});
 }})();
 
 // ---- Customizable module layout ---------------------------------------
@@ -7053,7 +7788,9 @@ document.getElementById('hero-chart').addEventListener('click', (e) => {{
   let sortable = null;
   function enterEdit() {{
     document.body.classList.add('edit-mode');
-    if (editBtn) {{ editBtn.textContent = 'Done'; editBtn.classList.add('active'); editBtn.setAttribute('aria-pressed', 'true'); }}
+    // v2.1 icon-button fix: update the data-tooltip (which the CSS hover
+    // tooltip reads) instead of textContent (which would wipe the SVG icon).
+    if (editBtn) {{ editBtn.dataset.tooltip = 'Done editing'; editBtn.classList.add('active'); editBtn.setAttribute('aria-pressed', 'true'); }}
     if (resetBtn) resetBtn.hidden = false;
     if (window.Sortable && !sortable) {{
       sortable = window.Sortable.create(stack, {{
@@ -7065,7 +7802,7 @@ document.getElementById('hero-chart').addEventListener('click', (e) => {{
   }}
   function exitEdit() {{
     document.body.classList.remove('edit-mode');
-    if (editBtn) {{ editBtn.textContent = 'Edit layout'; editBtn.classList.remove('active'); editBtn.setAttribute('aria-pressed', 'false'); }}
+    if (editBtn) {{ editBtn.dataset.tooltip = 'Edit layout'; editBtn.classList.remove('active'); editBtn.setAttribute('aria-pressed', 'false'); }}
     if (resetBtn) resetBtn.hidden = true;
     if (sortable) {{ sortable.destroy(); sortable = null; }}
   }}
