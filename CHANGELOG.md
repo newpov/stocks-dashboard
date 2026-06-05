@@ -14,6 +14,60 @@ than a barely-working prototype.
 
 ---
 
+## v2.2 — "Big Brain says" discovery board · 5 June 2026
+
+Turns the dashboard from a data display into a **decision surface**. A new
+top-of-stack module reads every metric the build already computes and surfaces
+the four names where the most is happening — leaning toward **discovery**
+(stocks the author doesn't own yet) rather than restating the current basket.
+Ships with the project's first automated test suite.
+
+### Added
+- **"Big Brain says" discovery board** — a full-width 2&times;2 of four
+  colour-coded cards, pinned at the top of the module stack. Two cards come
+  from a **universe-discovery lane** and two from the author's **live basket**;
+  a sold position can steal a basket slot when it out-signals an open one.
+  Each card carries a punchy one-line verdict, evidence "pills" (e.g.
+  `RSI 71`, `#2 weight`, `2.3x vol`, `target -9%`), and a best-effort **real
+  news headline** (title + publisher, linked out) when a recent one exists.
+  - **Signal-stacking engine.** Per ticker, ~18 flag detectors across five
+    domains (position, trend, flow, street, news) fire from the existing
+    `quant_metrics` / `signals` / `contrib` / `rating_moves` data. A stack
+    score sums flag weights and applies a **domain-diversity multiplier**
+    (`1 + 0.25 &times; (distinct_domains - 1)`, capped at 2.0), so a name
+    flagged across four different panels outranks one with four flags from a
+    single panel — surfacing cross-panel correlations a daily scan misses.
+  - **Universe shortlist + deepen.** The ~500-name reference universe is
+    pre-ranked on already-cached outlook fields (analyst upside &times;
+    coverage + 12-month momentum + recommendation); the top ~40 are then
+    "deepened" — OHLCV + news fetched, quant/signals computed — so unowned
+    names stack signals on equal footing. Cached to
+    `data/bb_universe_ohlcv_cache.parquet` (TTL-style reuse) to keep builds
+    fast. A `beats_your_sector` relational flag ("outpacing every semi you
+    own") keeps idea cards distinct from the Industry-outlook leaderboard.
+  - **Colour-coded card types**: red `Bleeding` / amber `Running hot` /
+    green for constructive held names; blue `Setup you're missing` (or the
+    neutral `On the radar` when no portfolio relationship is computed) for
+    unowned ideas; green `Ran without you` for sold names that kept climbing.
+    An ownership badge (`held` / `not owned` / `sold`) sits on every card.
+    The 2&times;2 collapses to a single column under 760px.
+  - **Privacy preserved.** Cards use shapes not amounts throughout — RSI, %,
+    pp, weight *rank*, volume ratio, holding-period days — never £ figures or
+    share counts, consistent with the rest of the dashboard.
+- **First automated tests** — `test_bigbrain.py` (38 `pytest` cases) locks the
+  pure Big Brain logic: flag detectors, the diversity-weighted scorer,
+  severity mapping, archetype matching, the two-lane 2+2 selection with
+  backfill, the universe shortlist ranking, the relational flag, and the
+  render markup. New `requirements-dev.txt` pins `pytest`.
+
+### Changed
+- **Module order**: `Rating moves` now sits directly under `Re-entry ideas`
+  (both are analyst-signal modules), and `Industry attribution` now sits
+  directly under `Basket diversification` (both are portfolio-level lenses).
+  Saved per-visitor layouts are unaffected; only the shipped default changed.
+
+---
+
 ## v2.1 — Quiz feature, modal axis polish, closed-list signal triage · 3 June 2026
 
 A UX-polish release that also extends the v1.9 educational layer with a

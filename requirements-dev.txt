@@ -1,0 +1,2 @@
+-r requirements.txt
+pytest>=8.0   # test_bigbrain.py — pure-logic unit tests for the Big Brain engine

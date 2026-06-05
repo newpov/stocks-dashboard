@@ -26,9 +26,16 @@ v1.7-plan.md
 v1.8-plan.md
 lazy-modal-spec.md
 big-brain-says-spec.md
+big-brain-rethink-spec.md
+big-brain-rethink-v2-spec.md
+big-brain-rethink-plan.md
+big-brain-rethink-v2-plan.md
 gemini tips.md
 audit_implement.md
 dashboard-audit.md
+
+# Brainstorming visual-companion mockups (local design scratch)
+.superpowers/
 
 # Local daily-rebuild log (run history; machine-specific)
 # Note: daily_rebuild.ps1 and setup_scheduled_task.ps1 ARE committed so the

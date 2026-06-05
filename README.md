@@ -106,7 +106,7 @@ falls back to build-time news cleanly.
                           ▼
                 ┌───────────────────────┐
                 │  docs/index.html      │  ← single self-contained file
-                │  (renders 9 modules)  │     ~1.5 MB, GitHub Pages serves
+                │  (renders 11 modules) │     ~1.5 MB, GitHub Pages serves
                 └───────────────────────┘     this as the live dashboard
                           │
         ┌─────────────────┴─────────────────┐
@@ -133,14 +133,21 @@ then context, then details, then actions:
 
 ```
 ┌─ Header ──────────────────────────────────────────────────────────────┐
-│ Edit-layout · Palette toggle · Desktop-view (on narrow viewports)    │
+│ Edit-layout · Palette toggle · Pocket lesson · Quiz · Desktop-view   │
 │ Hero subtitle: total + annualized return · TWR methodology           │
 │ Unusual-volume chips (when any open name >2× vol with >1% move)      │
 │ Hero chart (basket vs SPY with vs-SPY area shading + GBP/USD bars)   │
-│ 30-day rolling alpha sparkline (hover for date+value)                │
+│ 30-day rolling alpha sparkline + drawdown inset                      │
 │ 5 configurable stat cards (default: annualized / Sharpe / win rate / │
 │ win-loss ratio / avg upside; pick from 10 via edit-mode)             │
 └───────────────────────────────────────────────────────────────────────┘
+
+┌─ Big Brain says (discovery board) ────────────────────────────────────┐
+│ Full-width 2×2 of the 4 names where the most is happening. 2 universe│
+│ "ideas" you don't own + 2 from your basket (a sold name can compete).│
+│ Each card: 1-line verdict · evidence pills · a real news headline.  │
+│ Colour-coded: red bleeding / amber hot / green / blue idea.         │
+└──────────────────────────────────────────────────────────────────────┘
 
 ┌─ Industry outlook ─────────┬─ Market news ──────────────────────────┐
 │ 6 industries from universe │ Live finance headlines (Worker) or    │
@@ -150,17 +157,6 @@ then context, then details, then actions:
 │ card → info modal with     │                                       │
 │ every ticker in industry.  │                                       │
 └────────────────────────────┴───────────────────────────────────────┘
-
-┌─ Rating moves ───────────────────────────────────────────────────────┐
-│ Target-price changes ≥ 5% and recommendation shifts since the last  │
-│ build. Empty state on first build; populates on every subsequent    │
-│ build that hit any analyst-cache TTL.                               │
-└──────────────────────────────────────────────────────────────────────┘
-
-┌─ Industry attribution ───────────────────────────────────────────────┐
-│ Cost-weighted basket return decomposed by industry. Shows which     │
-│ sectors are pulling the basket up or down. Horizontal bars per row. │
-└──────────────────────────────────────────────────────────────────────┘
 
 ┌─ Main returns table ─────────────────────────────────────────────────┐
 │ All 185 positions. Columns: Ticker · Target · Upside · Analyst ·    │
@@ -175,11 +171,26 @@ then context, then details, then actions:
 │ technical signal pill. Highlights analyst/technical divergence.     │
 └──────────────────────────────────────────────────────────────────────┘
 
+┌─ Rating moves ───────────────────────────────────────────────────────┐
+│ Target-price changes ≥ 5% and recommendation shifts since the last  │
+│ build. Sits directly under Re-entry ideas as the analyst-signal pair.│
+└──────────────────────────────────────────────────────────────────────┘
+
 ┌─ Exit strategy (top detractors) ─────────────────────────────────────┐
 │ Top 8 open positions dragging basket return down. Columns include   │
 │ technical signal, analyst recommendation, and a **suggested action**│
 │ from a 3×3 heuristic: HOLD / TRIM / MONITOR / REVIEW THESIS / EXIT /│
 │ CUT LOSS.                                                           │
+└──────────────────────────────────────────────────────────────────────┘
+
+┌─ Basket diversification ─────────────────────────────────────────────┐
+│ Pairwise correlations across open positions: avg ρ (concentration   │
+│ score), most-correlated pairs, best diversifiers, and a histogram.  │
+└──────────────────────────────────────────────────────────────────────┘
+
+┌─ Industry attribution ───────────────────────────────────────────────┐
+│ Cost-weighted basket return decomposed by industry. Sits directly   │
+│ under diversification as the portfolio-level pair. Horizontal bars. │
 └──────────────────────────────────────────────────────────────────────┘
 
 ┌─ Biggest regrets ──────────┬─ Lucky escapes ───────────────────────┐
@@ -252,6 +263,50 @@ with a non-trivial day move (&gt; 1%), an amber chip pinned just under the
 hero subtitle calls it out: `DELL +32.5% 4.9× vol`. Up to 3 chips; clicking
 one opens the ticker modal. Hides cleanly when nothing qualifies.
 
+### Big Brain says — the discovery board (v2.2)
+
+The first module under the hero. Where every other section *displays* a metric,
+Big Brain *interprets* them: it reads the data the build already computes and
+surfaces the **four names where the most is happening this week**, as a
+full-width 2×2 of colour-coded cards.
+
+It's deliberately **discovery-led**. Two of the four slots are reserved for a
+**universe-discovery lane** — names you *don't* own that are stacking signals —
+and two come from your live basket (a *sold* position can take a basket slot
+when it out-signals an open one). So the section answers "what should I be
+looking at, including things I'm missing?" rather than just restating the
+basket the rest of the page already covers.
+
+**How a name earns a card.** Per ticker, ~18 small flag detectors across five
+domains — *position* (weight rank, contribution), *trend* (RSI, 200-DMA
+distance, 52-week position), *flow* (volume ratio, weekly move, reversal),
+*street* (analyst target cuts/raises, upside), and *post-exit* (for sold
+names) — fire from the existing `quant_metrics` / `signals` / `contrib` /
+`rating_moves` data. A stack score sums the fired flags' weights and applies a
+**domain-diversity multiplier**, so a name lit up across four different panels
+ranks above one with four flags from a single panel. That multiplier is the
+point: it surfaces the cross-panel coincidences a daily scan would miss.
+
+**The universe lane** pre-ranks the ~500-name reference universe on
+already-cached outlook fields (analyst upside × coverage + 12-month momentum +
+recommendation), takes the top ~40, and "deepens" them — fetching OHLCV + news
+and computing the same quant/signals holdings use — so unowned names compete on
+equal footing. A `beats_your_sector` relational flag ("outpacing every semi you
+own") keeps idea cards genuinely distinct from the Industry-outlook leaderboard.
+
+**Each card** shows a one-line verdict in a confident, plain-English voice;
+evidence **pills** (`RSI 71`, `#2 weight`, `2.3× vol`, `target −9%`); an
+ownership badge (`held` / `not owned` / `sold`); and, when one is recent, a
+**real news headline** with publisher, linked out — the "why it's moving" in
+one click. Card colour encodes the type: red `Bleeding`, amber `Running hot`,
+green for constructive held names, blue `Setup you're missing` (or neutral
+`On the radar`) for unowned ideas, green `Ran without you` for sold names that
+kept climbing. The board collapses to a single column on mobile.
+
+Like the rest of the dashboard it uses **shapes, not amounts** — RSI, %, pp,
+weight *rank*, volume ratios, holding-period days — never £ figures or share
+counts. **It is build-time analytics, not financial advice.**
+
 ### Pocket lesson card (opt-in)
 
 A small educational card that you can toggle from the topbar. When on,
@@ -280,28 +335,30 @@ of the pool has been answered so the experience never dead-ends.
 
 ### Decision-flow ordering
 
-The vertical order is deliberate — research → context → details → action:
+The vertical order is deliberate — verdict → research → details → action →
+portfolio lens → retrospective:
 
-1. **Outlook + News** at top: "what should I read about today" — new
-   stocks and the market backdrop.
-2. **Rating moves**: "did analyst views shift since last build" — diffs
-   of this build's analyst cache vs the prior build, surfacing target-price
-   changes ≥ 5% and recommendation shifts.
-3. **Attribution**: "which of my sector bets are paying off" — situational
-   awareness of the basket as a whole.
-4. **Main table**: detailed per-stock view with sorting + filtering.
-5. **Re-entry ideas**: "of stocks I've held before, where do analysts see
+1. **Big Brain says**: "what should I look at first, including things I'm
+   missing" — the four highest-signal names (2 discovery + 2 basket).
+2. **Outlook + News**: "what should I read about today" — new stocks and the
+   market backdrop.
+3. **Main table**: detailed per-stock view with sorting + filtering.
+4. **Re-entry ideas**: "of stocks I've held before, where do analysts see
    most upside" — buy candidates.
+5. **Rating moves** (paired under Re-entry): "did analyst views shift since
+   last build" — target-price changes ≥ 5% and recommendation shifts.
 6. **Exit strategy**: "of my current losers, which should I cut" — sell
    candidates, with concrete 2× ATR suggested stops.
 7. **Basket diversification**: portfolio-level lens — pairwise correlations,
    most-correlated pairs (concentration risk), and best diversifiers.
-8. **Regrets / Lucky escapes**: retrospective — did I sell too early or
+8. **Industry attribution** (paired under diversification): "which of my
+   sector bets are paying off" — cost-weighted return by industry.
+9. **Regrets / Lucky escapes**: retrospective — did I sell too early or
    exit just in time.
 
-This ordering matches how the author actually reviews the portfolio: you
-read about the market first, look at how your sectors are doing, dig into
-specific positions, then decide what to buy or sell.
+This ordering matches how the author actually reviews the portfolio: lead with
+the can't-miss names, read the market, dig into specific positions, decide what
+to buy or sell, then step back to the portfolio-level and retrospective lenses.
 
 ### Click-to-expand drill-downs
 
@@ -551,14 +608,16 @@ pattern for the same reason.
 stocks-dashboard/
 ├── README.md                          ← this file
 ├── LICENSE                            ← MIT
-├── CHANGELOG.md                       ← version history (v1.0 → v1.7)
+├── CHANGELOG.md                       ← version history (v1.0 → v2.2)
 ├── demo.html                          ← standalone self-contained demo (CI-rebuilt daily)
 ├── build.py                           ← the build pipeline
+├── test_bigbrain.py                   ← pytest suite for the Big Brain engine
 ├── log.xlsx                           ← author's transaction log (private, gitignored)
 ├── transactions.csv                   ← public sample log used by demo.html
 ├── watchlist.csv                      ← optional watchlist tickers
 ├── universe.csv                       ← 150 large/mid/small US caps for industry outlook
-├── requirements.txt                   ← Python deps
+├── requirements.txt                   ← Python deps (runtime)
+├── requirements-dev.txt               ← + pytest (for test_bigbrain.py)
 ├── daily_rebuild.ps1                  ← optional Task Scheduler script for daily local rebuilds
 ├── setup_scheduled_task.ps1           ← one-shot installer for the scheduled task
 ├── .gitignore
@@ -576,7 +635,8 @@ stocks-dashboard/
 │   ├── analyst_cache.parquet          ← yf.info per ticker, 7-day TTL
 │   ├── prior_analyst_cache.parquet    ← previous build's analyst snapshot for rating-moves diff
 │   ├── ticker_news_cache.parquet      ← per-ticker news for the modal, 7-day TTL
-│   └── universe_outlook_cache.parquet ← universe.csv precomputed, 30-day TTL
+│   ├── universe_outlook_cache.parquet ← universe.csv precomputed, 30-day TTL
+│   └── bb_universe_ohlcv_cache.parquet ← Big Brain universe-shortlist OHLCV
 │
 ├── docs/
 │   ├── index.html                     ← generated dashboard (~1.5 MB)

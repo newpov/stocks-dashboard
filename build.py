@@ -43,6 +43,7 @@ DEMO_OUT_HTML = ROOT / "demo.html"   # standalone self-contained demo at repo ro
 SORTABLE_VENDOR = ROOT / "docs" / "vendor" / "Sortable.min.js"
 CACHE_PARQUET = ROOT / "data" / "prices_cache.parquet"
 OHLCV_CACHE = ROOT / "data" / "ohlcv_cache.parquet"  # full OHLCV for ATR / volume metrics
+BB_UNIVERSE_OHLCV_CACHE = ROOT / "data" / "bb_universe_ohlcv_cache.parquet"  # Big Brain universe shortlist OHLCV
 BENCHMARK_CACHE = ROOT / "data" / "benchmark_cache.parquet"
 META_CSV = ROOT / "data" / "meta.csv"
 WATCHLIST_CSV = ROOT / "watchlist.csv"
@@ -3194,6 +3195,549 @@ def render_currency_exposure(rows: list[dict]) -> str:
 </section>"""
 
 
+# --------------------------------------------------------------------------
+# v2.2 "Big Brain says" -- per-ticker signal-stacking engine
+# --------------------------------------------------------------------------
+# Ranks open positions by stacked, cross-panel signal strength and surfaces
+# the top 3 with a confident-punchy narrative + best-effort news citation.
+# Pure read-only over already-computed build artefacts -- no I/O, no extra
+# metric computation. See big-brain-rethink-spec.md.
+
+# v2.2 rethink: per-ticker signal-stacking engine. See big-brain-rethink-spec.md.
+BB_SEVERITY_RANK = {"warn": 0, "watch": 1, "info": 2}
+_BB_NEWS_FLURRY_DAYS = 7      # window for the news_flurry flag
+_BB_NEWS_CITE_DAYS = 14       # window for the best-effort citation
+_BB_TITLE_TAGS = {
+    "exhausted_winner": "Running hot",
+    "heavy_bleeder": "Big position bleeding",
+    "divergence": "Tape vs Street",
+    "crowded_strength": "Carrying the basket",
+    "quiet_breakout": "Breaking out",
+    "capitulation": "Washed out",
+    "catalyst": "Catalyst in the tape",
+    "ran_without_you": "Ran without you",
+    "missing_idea": "Setup you're missing",
+    "fallback": "Signals stacking",
+}
+
+
+def _bb_score(flags: list[dict]) -> tuple[float, float, int]:
+    """(score, raw, n_domains). score = raw weight sum * diversity multiplier,
+    where multiplier = 1 + 0.25*(distinct_domains-1), capped at 2.0."""
+    if not flags:
+        return 0.0, 0.0, 0
+    raw = float(sum(f["weight"] for f in flags))
+    n_domains = len({f["domain"] for f in flags})
+    mult = min(2.0, 1.0 + 0.25 * (n_domains - 1))
+    return raw * mult, raw, n_domains
+
+
+def _bb_severity(flags: list[dict]) -> str:
+    """Net weighted direction -> severity. Bearish on a big position is the
+    only 'warn'; any net-negative or single strong-bear flag is 'watch'."""
+    net = sum(f["weight"] * f["dir"] for f in flags)
+    has_top_weight = any(f["id"] == "top_weight" for f in flags)
+    strong_bear = any(f["dir"] == -1 and f["weight"] >= 2.0 for f in flags)
+    if net <= -2 and has_top_weight:
+        return "warn"
+    if net < 0 or strong_bear:
+        return "watch"
+    return "good"
+
+
+def _bb_match_archetype(ids: set[str]) -> str | None:
+    """Most-specific-first; first match wins. Operates on the set of fired
+    flag ids for one ticker."""
+    if "post_exit" in ids:
+        return "ran_without_you"
+    if "beats_your_sector" in ids:
+        return "missing_idea"
+    if {"near_high", "overbought"} <= ids and (
+            "fading_volume" in ids or "extended" in ids):
+        return "exhausted_winner"
+    if ("downtrend" in ids or "near_low" in ids) and "top_weight" in ids and (
+            "downgrade" in ids or "big_detractor" in ids):
+        return "heavy_bleeder"
+    if ("downgrade" in ids and "near_high" in ids) or (
+            "upgrade" in ids and "near_low" in ids):
+        return "divergence"
+    if {"top_weight", "big_contributor", "extended"} <= ids:
+        return "crowded_strength"
+    if "downtrend" not in ids and "unusual_volume" in ids and (
+            "upgrade" in ids or "big_upside" in ids):
+        return "quiet_breakout"
+    if {"oversold", "near_low", "big_detractor"} <= ids:
+        return "capitulation"
+    if {"unusual_volume", "big_move_1w", "news_flurry"} <= ids:
+        return "catalyst"
+    return None
+
+
+def _bb_num(x) -> float:
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        return float("nan")
+    return v
+
+
+def _bb_flags_for(tkr, row, q, signal, an, moves_for_tkr, news_items,
+                  weight_rank, is_top_contrib, is_bottom_contrib, now,
+                  beats_sector_gap=None, sector_name=""):
+    """Return the list of fired flag dicts for one open ticker. All inputs are
+    pre-sliced scalars/objects so this stays a pure, testable function.
+
+    q / an may be None. moves_for_tkr is a list of rating-move dicts for this
+    ticker. news_items is the parsed list for this ticker (possibly empty)."""
+    flags: list[dict] = []
+
+    def add(fid, domain, weight, direction, pill, frag):
+        flags.append({"id": fid, "domain": domain, "weight": weight,
+                      "dir": direction, "pill": pill, "frag": frag})
+
+    # ---- sold (closed only) ----
+    if str(row.get("status") or "").lower() == "closed":
+        pe = _bb_num(row.get("post_exit_pct"))
+        if pe == pe and pe >= 10:
+            add("post_exit", "position", 1.5, 0, f"+{pe:.0f}% since sold",
+                f"up {pe:.0f}% since you sold")
+        elif pe == pe and pe <= -10:
+            add("post_exit", "position", 1.0, 0, f"{pe:.0f}% since sold",
+                f"down {abs(pe):.0f}% since you sold — dodged it")
+
+    # ---- position ----
+    if weight_rank is not None and weight_rank <= 5:
+        w = 2.5 if weight_rank <= 3 else 2.0
+        add("top_weight", "position", w, 0,
+            f"#{int(weight_rank)} weight", f"your #{int(weight_rank)} weight")
+    if is_top_contrib:
+        add("big_contributor", "position", 1.5, 1,
+            "top contributor", "one of your biggest contributors")
+    if is_bottom_contrib:
+        add("big_detractor", "position", 1.5, -1,
+            "top detractor", "one of your biggest detractors")
+    total_pct = _bb_num(row.get("total_pct"))
+    bdate = row.get("baseline_date")
+    if total_pct == total_pct and total_pct > 50 and bdate is not None:
+        try:
+            held_days = (now.tz_convert(None) - pd.Timestamp(bdate)).days
+        except (TypeError, ValueError):
+            held_days = 0
+        if held_days > 365:
+            add("long_winner", "position", 1.0, 1,
+                f"+{total_pct:.0f}% / {held_days}d",
+                f"up {total_pct:.0f}% over {held_days} days held")
+
+    # ---- trend ----
+    rsi = _bb_num(q.get("rsi14")) if q is not None else float("nan")
+    ext = _bb_num(q.get("sma200_dist_pct")) if q is not None else float("nan")
+    r52 = _bb_num(q.get("range52w_pct")) if q is not None else float("nan")
+    if rsi == rsi and rsi >= 70:
+        w = 2.0 if rsi >= 78 else 1.5
+        add("overbought", "trend", w, -1, f"RSI {rsi:.0f}",
+            f"overbought at RSI {rsi:.0f}")
+    if rsi == rsi and rsi <= 30:
+        add("oversold", "trend", 1.5, 1, f"RSI {rsi:.0f}",
+            f"oversold at RSI {rsi:.0f}")
+    if ext == ext and ext >= 50:
+        w = 1.5 if ext >= 100 else 1.0
+        add("extended", "trend", w, -1, f"{ext:.0f}% >200DMA",
+            f"stretched {ext:.0f}% above its 200-day")
+    if r52 == r52 and r52 >= 90:
+        add("near_high", "trend", 1.0, 0, "near 52w high", "near its 52-week high")
+    if r52 == r52 and r52 <= 10:
+        add("near_low", "trend", 1.0, -1, "near 52w low", "near its 52-week low")
+    sig = str(signal or "").strip().lower()
+    if sig in ("strong downtrend", "trending down"):
+        add("downtrend", "trend", 1.0, -1, "downtrend", "in a downtrend")
+
+    # ---- flow ----
+    vr = _bb_num(q.get("vol_ratio")) if q is not None else float("nan")
+    if vr == vr and vr >= 2.0:
+        add("unusual_volume", "flow", 1.5, 0, f"{vr:.1f}x vol",
+            f"trading on {vr:.1f}x average volume")
+    if vr == vr and vr <= 0.6 and rsi == rsi and rsi >= 65:
+        add("fading_volume", "flow", 1.0, -1, f"{vr:.1f}x vol",
+            "running on thinning volume")
+    w1 = _bb_num(row.get("1w_pct"))
+    if w1 == w1 and abs(w1) >= 10:
+        add("big_move_1w", "flow", 1.0, 1 if w1 > 0 else -1,
+            f"{w1:+.0f}% 1w", f"moved {w1:+.0f}% this week")
+    m1 = _bb_num(row.get("1m_pct"))
+    m3 = _bb_num(row.get("3m_pct"))
+    if (m1 == m1 and m3 == m3 and abs(m1) >= 4 and abs(m3) >= 4
+            and (m1 > 0) != (m3 > 0)):
+        add("reversal", "flow", 1.0, 0, "reversal",
+            f"1m {m1:+.0f}% vs 3m {m3:+.0f}% — turning")
+
+    # ---- street ----
+    # rating_moves carries recommendation changes too, but their direction is
+    # not signed; we use only target-price moves (signed) for up/down flags.
+    target_moves = [m for m in moves_for_tkr if m.get("kind") == "target"]
+    cuts = [_bb_num(m.get("pct_change")) for m in target_moves
+            if _bb_num(m.get("pct_change")) <= -5]
+    raises = [_bb_num(m.get("pct_change")) for m in target_moves
+              if _bb_num(m.get("pct_change")) >= 5]
+    if cuts:
+        cut = min(cuts)
+        add("downgrade", "street", 2.0, -1, f"target {cut:+.0f}%",
+            f"the Street cut its target {cut:+.0f}%")
+    if raises:
+        rai = max(raises)
+        add("upgrade", "street", 1.5, 1, f"target {rai:+.0f}%",
+            f"the Street raised its target {rai:+.0f}%")
+    if an is not None:
+        tgt = _bb_num(an.get("target_mean"))
+        last = _bb_num(row.get("latest"))
+        if tgt == tgt and last == last and last > 0:
+            upside = (tgt / last - 1) * 100
+            if upside >= 25:
+                add("big_upside", "street", 1.0, 1, f"+{upside:.0f}% to target",
+                    f"{upside:.0f}% below the average analyst target")
+
+    # ---- relational (universe only) ----
+    if beats_sector_gap is not None and beats_sector_gap >= 10:
+        label = sector_name or "sector"
+        add("beats_your_sector", "relative", 1.5, 1,
+            f"+{beats_sector_gap:.0f}pp vs your {label}",
+            f"outpacing every {label} you own by {beats_sector_gap:.0f}pp")
+
+    return flags
+
+
+def _bb_sector_avg_returns(returns: pd.DataFrame, meta: pd.DataFrame) -> dict:
+    """Mean total_pct of OPEN holdings grouped by industry (fallback sector)."""
+    if returns is None or returns.empty:
+        return {}
+    op = returns[returns.status == "open"]
+    out: dict[str, list] = {}
+    for tkr, row in op.iterrows():
+        ind = ""
+        if meta is not None and tkr in meta.index:
+            ind = str(meta.loc[tkr, "industry"] or meta.loc[tkr, "sector"] or "").strip()
+        if not ind:
+            continue
+        v = _bb_num(row.get("total_pct"))
+        if v == v:
+            out.setdefault(ind, []).append(v)
+    return {k: sum(vs) / len(vs) for k, vs in out.items() if vs}
+
+
+def _bb_build_universe_observations(shortlist, quant_metrics, signals, analyst,
+                                    ticker_news, sector_avg, outlook):
+    """Stack-score deepened universe shortlist names -> idea observation dicts."""
+    now = pd.Timestamp.now(tz="UTC")
+    out = []
+    for tkr in shortlist:
+        q = quant_metrics.loc[tkr] if (quant_metrics is not None
+                                       and tkr in quant_metrics.index) else None
+        sig = (signals.loc[tkr, "signal"] if (signals is not None
+               and tkr in signals.index) else "")
+        an = analyst.loc[tkr] if (analyst is not None
+                                  and tkr in analyst.index) else None
+        items = []
+        if ticker_news is not None and tkr in ticker_news.index:
+            raw = ticker_news.loc[tkr, "items_json"]
+            try:
+                items = json.loads(raw) if isinstance(raw, str) and raw else []
+            except (TypeError, ValueError):
+                items = []
+        # relational gap vs the holder's sector
+        gap = None
+        sector_name = ""
+        if outlook is not None and tkr in outlook.index:
+            sector_name = str(outlook.loc[tkr].get("industry") or "").strip()
+            ret = _bb_num(outlook.loc[tkr].get("ret_12m"))
+            if sector_name in sector_avg and ret == ret:
+                gap = ret - sector_avg[sector_name]
+        row = pd.Series({"status": "universe", "latest": float("nan")})
+        flags = _bb_flags_for(
+            tkr, row, q, sig, an, [], items, weight_rank=None,
+            is_top_contrib=False, is_bottom_contrib=False, now=now,
+            beats_sector_gap=gap, sector_name=sector_name)
+        if not flags:
+            continue
+        score, raw, _ = _bb_score(flags)
+        archetype = _bb_match_archetype({f["id"] for f in flags})
+        tag, body = _bb_narrative(tkr, flags, archetype)
+        out.append({
+            "ticker": tkr, "ownership": "idea", "severity": "good",
+            # Neutral fallback tag: only an archetype (e.g. missing_idea from a
+            # beats_your_sector match) earns the "Setup you're missing" claim.
+            "title": tag if archetype else "On the radar", "body": body,
+            "pills": [f["pill"] for f in sorted(flags, key=lambda f: -f["weight"])],
+            "cite": _bb_news_cite(items, now), "score": score, "raw": raw,
+        })
+    out.sort(key=lambda c: (-c["score"], -c["raw"], c["ticker"]))
+    return out
+
+
+def _bb_news_cite(news_items: list[dict], now: pd.Timestamp) -> dict | None:
+    """Most-recent news item within _BB_NEWS_CITE_DAYS that has a title + link.
+    Returns {title, link, publisher} or None."""
+    best = None
+    best_ts = None
+    for it in news_items or []:
+        title = str(it.get("title") or "").strip()
+        link = str(it.get("link") or "").strip()
+        if not title or not link:
+            continue
+        ts = pd.to_datetime(it.get("published"), utc=True, errors="coerce")
+        if ts is None or ts != ts:
+            continue
+        if (now - ts).days > _BB_NEWS_CITE_DAYS:
+            continue
+        if best_ts is None or ts > best_ts:
+            best, best_ts = it, ts
+    if best is None:
+        return None
+    return {"title": str(best["title"]).strip(),
+            "link": str(best["link"]).strip(),
+            "publisher": str(best.get("publisher") or "").strip()}
+
+
+def _bb_universe_shortlist(universe_outlook: "pd.DataFrame | None",
+                           exclude: set[str], n: int = 40) -> list[str]:
+    """Pre-rank the universe by a cheap 'can't-miss' composite using cached
+    outlook fields only, excluding held/sold names. Returns top-n tickers."""
+    if universe_outlook is None or universe_outlook.empty:
+        return []
+    df = universe_outlook[~universe_outlook.index.isin(exclude)].copy()
+    if df.empty:
+        return []
+
+    def _norm(s):
+        s = pd.to_numeric(s, errors="coerce")
+        lo, hi = s.min(), s.max()
+        if pd.isna(lo) or hi == lo:
+            return s.fillna(0) * 0
+        return ((s - lo) / (hi - lo)).fillna(0)
+
+    upside = _norm(df.get("upside"))
+    momentum = _norm(df.get("ret_12m"))
+    coverage = _norm(df.get("num_analysts"))
+    rec = df.get("recommendation").fillna("").str.lower() if "recommendation" in df else ""
+    rec_bonus = rec.isin(["buy", "strong_buy"]).astype(float) * 0.2 if len(rec) else 0
+    score = upside * (0.6 + 0.4 * coverage) + 0.6 * momentum + rec_bonus
+    return list(score.sort_values(ascending=False).head(n).index)
+
+
+def _bb_narrative(tkr: str, flags: list[dict], archetype: str | None
+                  ) -> tuple[str, str]:
+    """Return (title_tag, body). Archetype -> bespoke punchy sentence; else a
+    fallback that lists the top fragments. Confident, specific, never advice."""
+    by_id = {f["id"]: f for f in flags}
+
+    def frag(fid, default=""):
+        return by_id[fid]["frag"] if fid in by_id else default
+
+    if archetype == "exhausted_winner":
+        body = (f"{tkr} is {frag('overbought', 'overbought')} "
+                f"{frag('near_high', 'near its highs')}. "
+                f"Momentum trains don't run forever.")
+    elif archetype == "heavy_bleeder":
+        street = (f" and {frag('downgrade')}" if "downgrade" in by_id else "")
+        body = (f"{tkr} is {frag('top_weight', 'a big position')} "
+                f"{frag('downtrend', 'heading the wrong way')}{street}. "
+                f"Thesis check, not hope.")
+    elif archetype == "divergence":
+        body = (f"{tkr}: the tape and the Street disagree. "
+                f"One of them is early.")
+    elif archetype == "crowded_strength":
+        body = (f"{tkr} is {frag('big_contributor', 'carrying the basket')} and "
+                f"{frag('extended', 'stretched above its 200-day')}. "
+                f"Great until it reverts.")
+    elif archetype == "quiet_breakout":
+        body = (f"{tkr} is breaking out — {frag('unusual_volume', 'heavy volume')} "
+                f"with the Street still onside. The market's noticing.")
+    elif archetype == "capitulation":
+        body = (f"{tkr} is {frag('oversold', 'washed out')}, "
+                f"{frag('near_low', 'near its lows')}. "
+                f"Value entry or falling knife.")
+    elif archetype == "catalyst":
+        body = (f"{tkr} {frag('big_move_1w', 'moved hard')} on "
+                f"{frag('unusual_volume', 'heavy volume')} — "
+                f"and the news backs it up.")
+    elif archetype == "ran_without_you":
+        body = (f"You sold {tkr} — {frag('post_exit', 'it moved after you left')}. "
+                f"Worth a look at whether the exit was early.")
+    elif archetype == "missing_idea":
+        body = (f"You don't own {tkr}, but it's {frag('beats_your_sector', 'outpacing your sector')} "
+                f"and {frag('unusual_volume', frag('overbought', 'stacking signals'))}. "
+                f"The one you're missing.")
+    else:
+        top = sorted(flags, key=lambda f: -f["weight"])[:3]
+        frags = [f["frag"] for f in top if f.get("frag")]
+        joined = "; ".join(frags) if frags else "multiple signals"
+        body = f"{tkr}: {len(flags)} signals stacking — {joined}."
+
+    tag = _BB_TITLE_TAGS.get(archetype or "fallback", _BB_TITLE_TAGS["fallback"])
+    return tag, body
+
+
+def compute_bigbrain_observations(
+    returns: pd.DataFrame,
+    meta: pd.DataFrame,
+    contrib: "pd.DataFrame | None" = None,
+    quant_metrics: "pd.DataFrame | None" = None,
+    signals: "pd.DataFrame | None" = None,
+    analyst: "pd.DataFrame | None" = None,
+    rating_moves: "list[dict] | None" = None,
+    ticker_news: "pd.DataFrame | None" = None,
+    universe_observations: "list[dict] | None" = None,
+) -> list[dict]:
+    """Discovery board engine. Two lanes: universe ideas (passed in, Phase 2)
+    and portfolio (open + sold). Returns up to 4: 2 per lane, backfilled."""
+    if returns is None or returns.empty:
+        portfolio: list[dict] = []
+    else:
+        now = pd.Timestamp.now(tz="UTC")
+        pool = returns[returns.status.isin(["open", "closed"])]
+        open_pos = returns[returns.status == "open"]
+        weight_rank = open_pos["weight"].rank(ascending=False, method="min") \
+            if not open_pos.empty else pd.Series(dtype=float)
+        top_contrib: set[str] = set()
+        bottom_contrib: set[str] = set()
+        if contrib is not None and not contrib.empty and "contribution_pp" in contrib:
+            c_open = contrib[contrib.index.isin(open_pos.index)]
+            top_contrib = set(c_open["contribution_pp"].nlargest(3).index)
+            bottom_contrib = set(c_open["contribution_pp"].nsmallest(3).index)
+        moves_by_tkr: dict[str, list] = {}
+        for m in (rating_moves or []):
+            moves_by_tkr.setdefault(m["ticker"], []).append(m)
+
+        def news_items(tkr):
+            if ticker_news is None or tkr not in ticker_news.index:
+                return []
+            raw = ticker_news.loc[tkr, "items_json"]
+            try:
+                return json.loads(raw) if isinstance(raw, str) and raw else []
+            except (TypeError, ValueError):
+                return []
+
+        portfolio = []
+        for tkr, row in pool.iterrows():
+            q = quant_metrics.loc[tkr] if (quant_metrics is not None
+                                           and tkr in quant_metrics.index) else None
+            sig = (signals.loc[tkr, "signal"] if (signals is not None
+                   and tkr in signals.index) else "")
+            an = analyst.loc[tkr] if (analyst is not None
+                                      and tkr in analyst.index) else None
+            items = news_items(tkr)
+            wr = int(weight_rank.get(tkr, 0)) or None
+            flags = _bb_flags_for(
+                tkr, row, q, sig, an, moves_by_tkr.get(tkr, []), items,
+                weight_rank=wr, is_top_contrib=tkr in top_contrib,
+                is_bottom_contrib=tkr in bottom_contrib, now=now)
+            if not flags:
+                continue
+            score, raw, _ = _bb_score(flags)
+            archetype = _bb_match_archetype({f["id"] for f in flags})
+            tag, body = _bb_narrative(tkr, flags, archetype)
+            portfolio.append({
+                "ticker": tkr,
+                "ownership": "sold" if row.get("status") == "closed" else "held",
+                "severity": _bb_severity(flags),
+                "title": tag, "body": body,
+                "pills": [f["pill"] for f in sorted(flags, key=lambda f: -f["weight"])],
+                "cite": _bb_news_cite(items, now),
+                "score": score, "raw": raw,
+            })
+        portfolio.sort(key=lambda c: (-c["score"], -c["raw"], c["ticker"]))
+
+    universe = list(universe_observations or [])
+    universe.sort(key=lambda c: (-c["score"], -c.get("raw", 0), c["ticker"]))
+    return _bb_merge_lanes(universe, portfolio, n=4, per_lane=2)
+
+
+def _bb_merge_lanes(universe: list[dict], portfolio: list[dict],
+                    n: int = 4, per_lane: int = 2) -> list[dict]:
+    """Take per_lane from each, then backfill remaining slots from whichever
+    lane still has candidates. Universe first (top row of the 2x2)."""
+    picked = universe[:per_lane] + portfolio[:per_lane]
+    if len(picked) < n:
+        rest = universe[per_lane:] + portfolio[per_lane:]
+        rest.sort(key=lambda c: (-c["score"], c["ticker"]))
+        picked += rest[: n - len(picked)]
+    return picked[:n]
+
+
+def _bb_deepen_universe(shortlist: list[str], meta: pd.DataFrame,
+                        fx: pd.DataFrame):
+    """Fetch OHLCV + news and compute quant/signals for the universe shortlist.
+    Returns (quant_metrics, signals, ticker_news_cache). Best-effort: failures
+    just shrink the idea pool, never break the build."""
+    if not shortlist:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+    try:
+        ohlcv, _failed, _r = download_ohlcv(shortlist)
+    except Exception as e:
+        print(f"WARN bb universe OHLCV failed: {e}", file=sys.stderr)
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+    if ohlcv.empty:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+    try:
+        ohlcv.to_parquet(BB_UNIVERSE_OHLCV_CACHE)
+    except Exception:
+        pass
+    prices_close = ohlcv.xs("Close", axis=1, level=1).copy()
+    meta2, _ = fetch_meta(list(prices_close.columns), meta)
+    quant = compute_quant_metrics(ohlcv, fx, meta2)
+    signals = compute_signals(prices_close)
+    news, _ = fetch_ticker_news(list(prices_close.columns), load_ticker_news_cache())
+    return quant, signals, news
+
+
+_BB_OWN_BADGE = {"held": "held", "sold": "sold", "idea": "not owned"}
+
+
+def render_bigbrain(observations: list[dict], as_of_str: str) -> str:
+    """v2 discovery board: 2x2 of colour-coded cards (idea / held / sold)."""
+    head = (
+        '<div class="bb-head">'
+        '<h3>Big Brain says</h3>'
+        '<span class="bb-sub">4 names punching above the noise this week</span>'
+        f'<span class="bb-asof">as of {as_of_str}</span>'
+        '</div>'
+    )
+    if not observations:
+        body = ('<p class="bb-empty">Quiet week &mdash; nothing notable '
+                'stacking across your basket or the market right now.</p>')
+        return f'<section class="bigbrain-section">{head}{body}</section>'
+    cards = []
+    for o in observations:
+        own = o.get("ownership", "held")
+        tier = "idea" if own == "idea" else ("good" if own == "sold" else o["severity"])
+        badge = _BB_OWN_BADGE.get(own, own)
+        pills = "".join(f'<span class="bb-pill">{_esc(p)}</span>'
+                        for p in o.get("pills", []))
+        # idea (universe) tickers have no modal payload -> not clickable
+        if own == "idea":
+            tkr_html = f'<span class="bb-ticker">{_esc(o["ticker"])}</span>'
+        else:
+            tkr_html = (f'<span class="bb-ticker ticker-clickable" '
+                        f'data-ticker="{_esc(o["ticker"])}">{_esc(o["ticker"])}</span>')
+        cite_html = ""
+        c = o.get("cite")
+        if c:
+            pub = f' &mdash; {_esc(c["publisher"])}' if c.get("publisher") else ""
+            title = _esc(c["title"][:80] + ("…" if len(c["title"]) > 80 else ""))
+            cite_html = (f'<a class="bb-cite" href="{_esc(c["link"])}" target="_blank" '
+                         f'rel="noopener noreferrer">&#8599; {title}{pub}</a>')
+        cards.append(
+            f'<div class="bb-card bb-tier-{tier}">'
+            f'<div class="bb-card-hd">{tkr_html}'
+            f'<span class="bb-badge">{_esc(badge)}</span>'
+            f'<span class="bb-tag">{_esc(o["title"])}</span></div>'
+            f'<div class="bb-card-bd">'
+            f'<div class="bb-body">{o["body"]}</div>'
+            f'<div class="bb-pills">{pills}</div>'
+            f'{cite_html}</div></div>'
+        )
+    return (f'<section class="bigbrain-section">{head}'
+            f'<div class="bb-grid">{"".join(cards)}</div></section>')
+
+
 def render_basket_diversification(data: dict | None, meta: pd.DataFrame) -> str:
     """Three-panel + histogram view of pairwise correlation across open positions.
 
@@ -3977,7 +4521,8 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
                 build_health: dict | None = None,
                 rating_moves: list[dict] | None = None,
                 prior_analyst_exists: bool = False,
-                unusual_vol: list[dict] | None = None) -> str:
+                unusual_vol: list[dict] | None = None,
+                bb_universe_obs: list[dict] | None = None) -> str:
     weekly = prices.resample("W-FRI").last().ffill()
     defs_html = render_svg_defs()
     table_html = render_table(returns, weekly, meta, signals,
@@ -4026,6 +4571,15 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
 
     latest_date = prices.index[-1].strftime("%d %b %Y")
     built = datetime.now(timezone.utc).strftime("%d %b %Y &middot; %H:%M UTC")
+
+    # v2.2 rethink: per-ticker signal-stacking. Pure post-processing over
+    # already-computed metrics; sits at the top of the module stack.
+    bigbrain_observations = compute_bigbrain_observations(
+        returns, meta, contrib=contrib, quant_metrics=quant_metrics,
+        signals=signals, analyst=analyst, rating_moves=rating_moves,
+        ticker_news=ticker_news, universe_observations=bb_universe_obs,
+    )
+    bigbrain_html = render_bigbrain(bigbrain_observations, latest_date)
 
     n_total = len(returns)
     n_open = int((returns.status == "open").sum()) if not returns.empty else 0
@@ -4495,20 +5049,19 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     # wrap a blank module.
     toolbar_html = render_toolbar(0, n_total, returns=returns, meta=meta)
     holdings_html = f'<section class="panel active" id="panel-0">{toolbar_html}{table_html}</section>'
-    # T9: rating-moves panel sits right after News in the default order so
-    # the analyst-watch signal lands near the headline market context.
-    # (Avoided putting it BETWEEN outlook + news -- those two pair into a
-    # side-by-side layout when adjacent, which an interloper would break.)
+    # Rating-moves panel sits directly under Re-entry ideas in the default
+    # order -- both are analyst-signal modules, so they read as a pair.
     rating_moves_html = render_rating_moves(rating_moves or [], prior_analyst_exists)
     _module_defs = [
+        ("bigbrain", "Big Brain says", bigbrain_html),
         ("outlook", "Industry outlook", industry_html),
         ("news", "News", news_html),
-        ("rating_moves", "Rating moves", rating_moves_html),
-        ("attribution", "Industry attribution", attribution_html),
         ("holdings", "Holdings", holdings_html),
         ("analyst", "Re-entry ideas", analyst_html),
+        ("rating_moves", "Rating moves", rating_moves_html),
         ("detractors", "Exit strategy", detractors_html),
         ("diversification", "Basket diversification", diversification_html),
+        ("attribution", "Industry attribution", attribution_html),
         ("ccy_exposure", "Currency exposure", ccy_exposure_html),
         ("regret", "Regret tracker", regret_html),
     ]
@@ -5289,6 +5842,59 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     .rm-to{{grid-area:to}}
     .rm-pct{{grid-area:pct;align-self:start}}
   }}
+  /* v2.2 Big Brain discovery board -- full-width 2x2, colour-coded by card
+     type. Tiers: warn=red, watch=amber, good=green, idea=blue. All theme-var
+     driven. */
+  .bigbrain-section{{
+    background:linear-gradient(180deg,var(--surface),var(--ink-soft));
+    border:1px solid var(--border);border-radius:13px;padding:18px 20px;
+  }}
+  .bb-head{{display:flex;align-items:baseline;gap:10px;margin-bottom:14px;flex-wrap:wrap}}
+  .bb-head h3{{margin:0;font-family:var(--font-display);font-size:20px;
+    font-weight:400;color:var(--text);letter-spacing:-0.01em}}
+  .bb-head h3::before{{content:"\\1F9E0";margin-right:8px;font-size:17px}}
+  .bb-sub{{font-family:var(--font-ui);font-size:14px;color:var(--text-2)}}
+  .bb-asof{{font-family:var(--font-mono);font-size:10px;color:var(--text-dim);
+    letter-spacing:.06em;text-transform:uppercase;margin-left:auto;align-self:center}}
+  .bb-empty{{font-family:var(--font-ui);font-size:13px;color:var(--text-dim);
+    font-style:italic;margin:4px 0 0;line-height:1.5}}
+  .bb-grid{{display:grid;grid-template-columns:repeat(2,1fr);gap:14px}}
+  .bb-card{{border:1px solid var(--border);border-radius:11px;overflow:hidden;
+    background:var(--surface)}}
+  .bb-card-hd{{padding:9px 14px;display:flex;align-items:center;gap:9px;
+    border-bottom:1px solid var(--border)}}
+  .bb-tier-warn .bb-card-hd{{background:linear-gradient(180deg,rgba(248,113,113,.20),transparent)}}
+  .bb-tier-watch .bb-card-hd{{background:linear-gradient(180deg,rgba(245,158,11,.20),transparent)}}
+  .bb-tier-good .bb-card-hd{{background:linear-gradient(180deg,rgba(52,211,153,.18),transparent)}}
+  .bb-tier-idea .bb-card-hd{{background:linear-gradient(180deg,rgba(139,155,255,.22),transparent)}}
+  .bb-ticker{{font-family:var(--font-mono);font-weight:700;font-size:15px;
+    letter-spacing:.04em;color:var(--text)}}
+  .bb-ticker.ticker-clickable{{cursor:pointer}}
+  .bb-ticker.ticker-clickable:hover{{color:var(--accent)}}
+  .bb-badge{{font-family:var(--font-mono);font-size:9px;letter-spacing:.08em;
+    text-transform:uppercase;color:var(--text-dim);border:1px solid var(--border);
+    border-radius:4px;padding:1px 5px}}
+  .bb-tag{{margin-left:auto;font-family:var(--font-mono);font-size:9.5px;
+    letter-spacing:.06em;text-transform:uppercase;font-weight:600;padding:3px 7px;
+    border-radius:5px;color:var(--text-dim)}}
+  .bb-tier-warn .bb-tag{{color:var(--down);background:rgba(248,113,113,.16)}}
+  .bb-tier-watch .bb-tag{{color:var(--accent);background:rgba(245,158,11,.16)}}
+  .bb-tier-good .bb-tag{{color:var(--up);background:rgba(52,211,153,.16)}}
+  .bb-tier-idea .bb-tag{{color:#8b9bff;background:rgba(139,155,255,.18)}}
+  .bb-card-bd{{padding:12px 15px 14px}}
+  .bb-body{{font-family:var(--font-ui);font-size:13.5px;line-height:1.55;
+    color:var(--text-2);margin:0 0 10px}}
+  .bb-body strong{{color:var(--text)}}
+  .bb-pills{{margin:0 0 2px}}
+  .bb-pill{{display:inline-block;font-family:var(--font-mono);font-size:10px;
+    font-weight:600;color:var(--text-dim);background:var(--surface-2);
+    border:1px solid var(--border);border-radius:4px;padding:2px 7px;margin:3px 4px 0 0}}
+  .bb-cite{{display:block;margin-top:10px;padding-top:10px;
+    border-top:1px dashed var(--border);font-family:var(--font-ui);font-size:12px;
+    color:var(--accent);text-decoration:none;line-height:1.4;
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
+  .bb-cite:hover{{text-decoration:underline}}
+  @media (max-width:760px){{ .bb-grid{{grid-template-columns:1fr}} }}
   /* Full-width analyst section (re-entry ideas) below the main table */
   section.analyst-section{{margin:22px 0 8px}}
 
@@ -8438,6 +9044,22 @@ def main(demo: bool = False) -> None:
     if all_failed:
         print(f"  failed: {', '.join(sorted(all_failed))}")
 
+    # v2.2 Big Brain: universe discovery lane (shortlist + deepen)
+    bb_universe_obs = []
+    try:
+        held_sold = set(returns.index.tolist()) if not returns.empty else set()
+        bb_shortlist = _bb_universe_shortlist(universe_outlook, exclude=held_sold, n=40)
+        if bb_shortlist:
+            bb_q, bb_sig, bb_news = _bb_deepen_universe(bb_shortlist, meta, fx)
+            bb_sector_avg = _bb_sector_avg_returns(returns, meta)
+            bb_universe_obs = _bb_build_universe_observations(
+                bb_shortlist, bb_q, bb_sig, None, bb_news,
+                sector_avg=bb_sector_avg, outlook=universe_outlook)
+            print(f"Big Brain: {len(bb_shortlist)} universe shortlisted, "
+                  f"{len(bb_universe_obs)} idea candidates")
+    except Exception as e:
+        print(f"WARN Big Brain universe lane skipped: {e}", file=sys.stderr)
+
     html = render_html(returns, prices, meta, basket, bench_series, contrib, transactions,
                        signals, prices_native, returns_native, untracked=untracked,
                        watchlist=watchlist, news_items=news_items, analyst=analyst,
@@ -8450,7 +9072,8 @@ def main(demo: bool = False) -> None:
                        build_health=build_health,
                        rating_moves=rating_moves,
                        prior_analyst_exists=PRIOR_ANALYST_CACHE.exists(),
-                       unusual_vol=unusual_vol)
+                       unusual_vol=unusual_vol,
+                       bb_universe_obs=bb_universe_obs)
 
     out_path = DEMO_OUT_HTML if demo else OUT_HTML
     out_path.parent.mkdir(parents=True, exist_ok=True)
