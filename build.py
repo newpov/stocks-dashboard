@@ -7378,8 +7378,14 @@ async function openModal(ticker) {{
     modal.removeAttribute('hidden');
     document.body.classList.add('modal-open');
     const heavy = await loadHeavy();
-    if (heavy && heavy[ticker]) Object.assign(DATA[ticker], heavy[ticker]);
-    DATA[ticker].__hydrated = true;
+    // Only mark hydrated when the fetch SUCCEEDED. loadHeavy() returns null
+    // only on fetch failure (e.g. a GitHub Pages redeploy window); leaving
+    // __hydrated unset in that case lets reopening the modal retry, instead
+    // of poisoning the ticker with a permanent light-only (blank) modal.
+    if (heavy) {{
+      if (heavy[ticker]) Object.assign(DATA[ticker], heavy[ticker]);
+      DATA[ticker].__hydrated = true;   // payload may simply lack this ticker -- fine
+    }}
     d = DATA[ticker];
     if (loadingEl) loadingEl.hidden = true;
   }}
@@ -8209,14 +8215,24 @@ document.getElementById('hero-chart').addEventListener('click', (e) => {{
       localStorage.setItem(MONTHLY_KEY, JSON.stringify(state.monthly));
     }} catch (e) {{ /* private mode -- silently degrade */ }}
   }}
+  let lastShownId = null;
   function pickNext(state) {{
     // Recycle seen-set when 90%+ has been seen so the experience never dead-ends.
     if (state.seen.length >= Math.floor(QUIZ_POOL.length * 0.9)) {{
       state.seen = [];
     }}
     const unseen = QUIZ_POOL.filter(q => !state.seen.includes(q.id));
-    const pool = unseen.length > 0 ? unseen : QUIZ_POOL;
-    return pool[Math.floor(Math.random() * pool.length)];
+    let pool = unseen.length > 0 ? unseen : QUIZ_POOL;
+    // Never show the same question twice in a row (across opens + Next clicks).
+    // `seen` only grows on ANSWER, so without this an open-without-answering
+    // re-rolls the same pool and can repeat the question you just saw.
+    if (pool.length > 1 && lastShownId !== null) {{
+      const filtered = pool.filter(q => q.id !== lastShownId);
+      if (filtered.length > 0) pool = filtered;
+    }}
+    const q = pool[Math.floor(Math.random() * pool.length)];
+    lastShownId = q.id;
+    return q;
   }}
 
   let state = loadState();
