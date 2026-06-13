@@ -618,6 +618,17 @@ UNIVERSE_CSV = ROOT / "universe.csv"
 UNIVERSE_CACHE = ROOT / "data" / "universe_outlook_cache.parquet"
 UNIVERSE_TTL_DAYS = 30
 
+# v2.3 Market expectations - prediction-market sentiment (Kalshi + Polymarket).
+PREDICTIONS_CSV = ROOT / "predictions.csv"
+PREDICTIONS_CACHE = ROOT / "data" / "predictions_cache.parquet"
+PRIOR_PREDICTIONS_CACHE = ROOT / "data" / "prior_predictions_cache.parquet"
+BIGBRAIN_LOG_CSV = ROOT / "data" / "bigbrain_log.csv"   # v2.3 Big Brain flag history
+KALSHI_API = "https://api.elections.kalshi.com/trade-api/v2"
+POLYMARKET_API = "https://gamma-api.polymarket.com"
+PRED_VOLUME_FLOOR = 1000.0   # drop thin/noisy markets (source-native volume units)
+PRED_MAX_ROWS = 8
+BB_MACRO_DELTA_PP = 8.0      # min |delta| (pp) for the Big Brain macro callout
+
 # How many candidates the analyst panel shows in total (the grid scrolls
 # internally past ~6 visible). Safety cap for very large closed-position lists.
 ANALYST_TOP_N = 50
@@ -982,6 +993,195 @@ def load_universe() -> list[str]:
             .replace("", pd.NA).dropna().drop_duplicates().tolist())
 
 
+def _pred_num(x) -> float:
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return float("nan")
+
+
+def load_prediction_themes() -> list[dict]:
+    """Read predictions.csv -> [{theme, source, key}]. Empty/missing -> []."""
+    if not PREDICTIONS_CSV.exists():
+        return []
+    df = pd.read_csv(PREDICTIONS_CSV, dtype=str).fillna("")
+    need = {"theme_label", "source", "series_or_tag"}
+    if not need.issubset(df.columns):
+        return []
+    out = []
+    for _, r in df.iterrows():
+        theme = str(r["theme_label"]).strip()
+        source = str(r["source"]).strip().lower()
+        key = str(r["series_or_tag"]).strip()
+        if theme and source and key:
+            out.append({"theme": theme, "source": source, "key": key})
+    return out
+
+
+def _pred_http_get_json(url: str, timeout: int = 12):
+    """Stdlib GET -> parsed JSON, or None on any error (best-effort)."""
+    import urllib.request
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "stocks-dashboard/1.0"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except Exception as e:
+        print(f"WARN predictions GET failed ({url}): {e}", file=sys.stderr)
+        return None
+
+
+def _parse_kalshi_market(m: dict, theme: str) -> dict | None:
+    yb = _pred_num(m.get("yes_bid_dollars"))
+    ya = _pred_num(m.get("yes_ask_dollars"))
+    if yb == yb and ya == ya and (yb > 0 or ya > 0):
+        prob = (yb + ya) / 2 * 100
+    elif yb == yb and yb > 0:
+        prob = yb * 100
+    else:
+        return None
+    ev = str(m.get("event_ticker") or "").strip()
+    return {
+        "theme": theme,
+        "question": str(m.get("title") or "").strip(),
+        "source": "kalshi",
+        "probability": prob,
+        "volume": _pred_num(m.get("volume_fp")) if m.get("volume_fp") is not None
+                  else (_pred_num(m.get("volume")) or 0.0),
+        "end_date": str(m.get("expiration_time") or ""),
+        "url": f"https://kalshi.com/markets/{ev}" if ev else None,
+    }
+
+
+def _kalshi_pick_active(markets: list[dict], theme: str) -> dict | None:
+    """Among a series' markets, pick the soonest market whose expiry is in the
+    future (the currently-relevant one), parse it, return the record."""
+    now = pd.Timestamp.now(tz="UTC")
+    best, best_ts = None, None
+    for m in markets:
+        ts = pd.to_datetime(m.get("expiration_time"), utc=True, errors="coerce")
+        if ts is None or ts != ts or ts < now:
+            continue
+        if best_ts is None or ts < best_ts:
+            best, best_ts = m, ts
+    if best is None:
+        return None
+    return _parse_kalshi_market(best, theme)
+
+
+def fetch_kalshi(themes: list[dict]) -> list[dict]:
+    """themes: [{theme, key(series_ticker)}]. One record per theme (active
+    market). Best-effort: a failed theme is skipped."""
+    out = []
+    for t in themes:
+        url = f"{KALSHI_API}/markets?series_ticker={t['key']}&status=open&limit=200"
+        data = _pred_http_get_json(url)
+        markets = (data or {}).get("markets") if isinstance(data, dict) else None
+        if not markets:
+            continue
+        rec = _kalshi_pick_active(markets, t["theme"])
+        if rec:
+            out.append(rec)
+    return out
+
+
+def _parse_polymarket_market(m: dict, theme: str) -> dict | None:
+    prices = m.get("outcomePrices")
+    if isinstance(prices, str):
+        try:
+            prices = json.loads(prices)
+        except (TypeError, ValueError):
+            prices = None
+    if not isinstance(prices, list) or not prices:
+        return None
+    p = _pred_num(prices[0])
+    if p != p:
+        return None
+    slug = str(m.get("slug") or "").strip()
+    return {
+        "theme": theme,
+        "question": str(m.get("question") or "").strip(),
+        "source": "polymarket",
+        "probability": p * 100,
+        "volume": _pred_num(m.get("volume")) or 0.0,
+        "end_date": str(m.get("endDate") or ""),
+        "url": f"https://polymarket.com/event/{slug}" if slug else None,
+    }
+
+
+def fetch_polymarket(themes: list[dict]) -> list[dict]:
+    """themes: [{theme, key(slug)}]. One record per theme. Best-effort."""
+    out = []
+    for t in themes:
+        url = f"{POLYMARKET_API}/markets?slug={t['key']}&closed=false"
+        data = _pred_http_get_json(url)
+        markets = data if isinstance(data, list) else (
+            data.get("data") if isinstance(data, dict) else None)
+        if not markets:
+            continue
+        rec = _parse_polymarket_market(markets[0], t["theme"])
+        if rec:
+            out.append(rec)
+    return out
+
+
+def fetch_predictions(themes: list[dict]) -> list[dict]:
+    """Route themes by source, fetch each, apply the volume floor, return
+    records sorted by probability desc (the final sort is by |delta| at render
+    time)."""
+    kal = [t for t in themes if t["source"] == "kalshi"]
+    pol = [t for t in themes if t["source"] == "polymarket"]
+    records = []
+    if kal:
+        records += fetch_kalshi(kal)
+    if pol:
+        records += fetch_polymarket(pol)
+    records = [r for r in records if _pred_num(r.get("volume")) >= PRED_VOLUME_FLOOR]
+    records.sort(key=lambda r: -r["probability"])
+    return records[:PRED_MAX_ROWS]
+
+
+def save_predictions_cache(records: list[dict]) -> None:
+    try:
+        PREDICTIONS_CACHE.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(records).to_parquet(PREDICTIONS_CACHE)
+    except Exception as e:
+        print(f"WARN couldn't write predictions cache: {e}", file=sys.stderr)
+
+
+def load_predictions_cache(path=None) -> list[dict]:
+    path = path or PREDICTIONS_CACHE
+    if not path.exists():
+        return []
+    try:
+        return pd.read_parquet(path).to_dict("records")
+    except Exception:
+        return []
+
+
+def snapshot_prior_predictions() -> None:
+    """Copy current predictions cache to prior before the live fetch overwrites
+    it. Skipped silently if absent (first build)."""
+    if not PREDICTIONS_CACHE.exists():
+        return
+    try:
+        PRIOR_PREDICTIONS_CACHE.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(PREDICTIONS_CACHE, PRIOR_PREDICTIONS_CACHE)
+    except Exception as e:
+        print(f"WARN couldn't snapshot prior predictions: {e}", file=sys.stderr)
+
+
+def compute_prediction_moves(prior: list[dict], current: list[dict]) -> list[dict]:
+    """Attach delta_pp (current-prior probability) per theme. None when the
+    theme had no prior snapshot."""
+    prior_by = {r["theme"]: _pred_num(r.get("probability")) for r in (prior or [])}
+    rows = []
+    for r in current:
+        p = prior_by.get(r["theme"])
+        delta = (r["probability"] - p) if (p is not None and p == p) else None
+        rows.append({**r, "delta_pp": delta})
+    return rows
+
+
 def _universe_cache_is_fresh(ttl_days: int = UNIVERSE_TTL_DAYS) -> bool:
     if not UNIVERSE_CACHE.exists():
         return False
@@ -1283,13 +1483,27 @@ def fetch_analyst_data(tickers: list[str], cache: pd.DataFrame,
     return combined, failed
 
 
+def _analyst_snapshot_due(prior_path, now_ts: float, max_age_days: float = 6.0) -> bool:
+    """True when the prior snapshot is missing or older than max_age_days.
+    Keeps a ~weekly-stable baseline so rating-moves measure against a
+    meaningful reference instead of resetting to 'current' every build."""
+    if not prior_path.exists():
+        return True
+    age_days = (now_ts - prior_path.stat().st_mtime) / 86400
+    return age_days >= max_age_days
+
+
 def snapshot_prior_analyst() -> None:
-    """T9: copy the current ANALYST_CACHE to PRIOR_ANALYST_CACHE before this
-    build's fetch_analyst_data overwrites it. Called from main() right before
-    the fetch. Safe to skip silently if the cache doesn't exist yet (first
-    build) -- compute_rating_moves handles the missing-prior case."""
+    """Copy the current ANALYST_CACHE to PRIOR_ANALYST_CACHE as the rating-moves
+    baseline -- but only when the prior is missing or >~6 days old. Overwriting
+    it every build (the old behaviour) reset the baseline to 'current' each run,
+    so moves only ever flashed for a single build. A stable ~weekly baseline
+    lets target/rec changes actually accumulate and show. compute_rating_moves
+    handles the missing-prior (first build) case."""
     if not ANALYST_CACHE.exists():
         return
+    if not _analyst_snapshot_due(PRIOR_ANALYST_CACHE, datetime.now(timezone.utc).timestamp()):
+        return   # keep the stable baseline
     try:
         PRIOR_ANALYST_CACHE.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(ANALYST_CACHE, PRIOR_ANALYST_CACHE)
@@ -3662,6 +3876,127 @@ def _bb_merge_lanes(universe: list[dict], portfolio: list[dict],
     return picked[:n]
 
 
+def log_bigbrain_flags(observations: list[dict], date_str: str,
+                       prices: dict, path=None) -> None:
+    """Append today's surfaced Big Brain cards to the flag log (real build
+    only). De-duped per (date, ticker). Columns: date, ticker, ownership,
+    price, label."""
+    path = path or BIGBRAIN_LOG_CSV
+    if not observations:
+        return
+    cols = ["date", "ticker", "ownership", "price", "label"]
+    try:
+        existing = pd.read_csv(path, dtype=str) if path.exists() else pd.DataFrame(columns=cols)
+    except Exception:
+        existing = pd.DataFrame(columns=cols)
+    seen = set(zip(existing.get("date", []), existing.get("ticker", [])))
+    new_rows = []
+    for o in observations:
+        tkr = o.get("ticker")
+        if not tkr or (date_str, tkr) in seen:
+            continue
+        pr = prices.get(tkr)
+        new_rows.append({"date": date_str, "ticker": tkr,
+                         "ownership": o.get("ownership", ""),
+                         "price": "" if pr is None else f"{float(pr):.4f}",
+                         "label": o.get("title", "")})
+    if not new_rows:
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pd.concat([existing, pd.DataFrame(new_rows)], ignore_index=True).to_csv(path, index=False)
+    except Exception as e:
+        print(f"WARN couldn't write bigbrain log: {e}", file=sys.stderr)
+
+
+def _humanize_age(days: int) -> str:
+    if days >= 60:
+        return f"{days // 30} months"
+    if days >= 14:
+        return f"{days // 7} weeks"
+    if days >= 7:
+        return "1 week"
+    if days <= 1:
+        return "yesterday" if days == 1 else "today"
+    return f"{days} days"
+
+
+def compute_bigbrain_memory(log_df, current_prices: dict, today_str: str) -> dict:
+    """For names flagged today that ALSO have an earlier log entry, return
+    {ticker: 'flagged <age> ago - <+/-%> since'} using current price vs the
+    OLDEST prior flag's price. Skips when no current/prior price."""
+    if log_df is None or len(log_df) == 0:
+        return {}
+    df = log_df.copy()
+    df["_d"] = pd.to_datetime(df["date"], errors="coerce")
+    today = pd.to_datetime(today_str, errors="coerce")
+    out = {}
+    for tkr, g in df.groupby("ticker"):
+        if not (g["date"] == today_str).any():
+            continue                      # not flagged today
+        prior = g[g["_d"] < today].sort_values("_d")
+        if prior.empty:
+            continue
+        oldest = prior.iloc[0]
+        prior_price = _bb_num(oldest["price"])
+        cur = current_prices.get(tkr)
+        cur = float(cur) if cur is not None else float("nan")
+        if prior_price != prior_price or prior_price <= 0 or cur != cur:
+            continue
+        pct = (cur / prior_price - 1) * 100
+        age = _humanize_age(int((today - oldest["_d"]).days))
+        out[tkr] = f"flagged {age} ago &mdash; {pct:+.0f}% since"
+    return out
+
+
+def _quadrant_signal_score(q, signal_label, row):
+    """(strength 0..100, direction +/-1) for one holding, from RSI distance,
+    trend label, 200-DMA side, and momentum. NaN-safe."""
+    sig = str(signal_label or "").strip().lower()
+    bull = any(w in sig for w in ("uptrend", "near 12m high", "trending up", "bouncing"))
+    bear = any(w in sig for w in ("downtrend", "near 12m low", "trending down", "pullback"))
+    rsi = _bb_num(q.get("rsi14")) if q is not None else float("nan")
+    sma = _bb_num(q.get("sma200_dist_pct")) if q is not None else float("nan")
+    m1 = _bb_num(row.get("1m_pct")) if row is not None else float("nan")
+    m3 = _bb_num(row.get("3m_pct")) if row is not None else float("nan")
+    s_rsi = abs(rsi - 50) / 50 if rsi == rsi else 0.0
+    s_trend = 1.0 if (bull or bear) else 0.0
+    s_mom = min(1.0, (abs(m1) if m1 == m1 else 0.0) / 15)
+    s_sma = min(1.0, (abs(sma) if sma == sma else 0.0) / 50)
+    strength = (0.35 * s_rsi + 0.25 * s_trend + 0.2 * s_mom + 0.2 * s_sma) * 100
+    score = 0
+    if rsi == rsi:
+        score += 1 if rsi > 50 else -1
+    score += 1 if bull else 0
+    score -= 1 if bear else 0
+    if m3 == m3:
+        score += 1 if m3 > 0 else -1
+    direction = 1 if score >= 0 else -1
+    return strength, direction
+
+
+def build_quadrant_data(returns, quant_metrics, signals) -> list[dict]:
+    """Per OPEN position: {ticker, weight_share (0..1), strength (0..100),
+    direction +/-1}."""
+    if returns is None or returns.empty:
+        return []
+    op = returns[returns.status == "open"]
+    total = float(op["weight"].sum()) if not op.empty else 0.0
+    if total <= 0:
+        return []
+    out = []
+    for tkr, row in op.iterrows():
+        q = quant_metrics.loc[tkr] if (quant_metrics is not None
+                                       and tkr in quant_metrics.index) else None
+        sig = (signals.loc[tkr, "signal"] if (signals is not None
+               and tkr in signals.index) else "")
+        strength, direction = _quadrant_signal_score(q, sig, row)
+        out.append({"ticker": tkr,
+                    "weight_share": float(row["weight"]) / total,
+                    "strength": strength, "direction": direction})
+    return out
+
+
 def _bb_deepen_universe(shortlist: list[str], meta: pd.DataFrame,
                         fx: pd.DataFrame):
     """Fetch OHLCV + news and compute quant/signals for the universe shortlist.
@@ -3688,10 +4023,62 @@ def _bb_deepen_universe(shortlist: list[str], meta: pd.DataFrame,
     return quant, signals, news
 
 
+_BB_NONEQUITY_HINTS = ("bond", "treasury", "gilt", "gold", "silver", "commodity",
+                       "money market", "cash")
+
+
+def _basket_equity_share(returns: pd.DataFrame, meta: pd.DataFrame) -> float | None:
+    """Best-effort share of OPEN cost basis in equities (not bond/commodity/cash
+    ETFs), classified by sector/industry keywords. None if unknowable."""
+    if returns is None or returns.empty:
+        return None
+    op = returns[returns.status == "open"]
+    if op.empty:
+        return None
+    total, equity = 0.0, 0.0
+    for tkr, row in op.iterrows():
+        w = _pred_num(row.get("weight"))
+        if w != w or w <= 0:
+            continue
+        total += w
+        label = ""
+        if meta is not None and tkr in meta.index:
+            label = (str(meta.loc[tkr, "industry"] or "") + " " +
+                     str(meta.loc[tkr, "sector"] or "")).lower()
+        if not any(h in label for h in _BB_NONEQUITY_HINTS):
+            equity += w
+    return (equity / total) if total > 0 else None
+
+
+def render_bigbrain_macro(top_move: dict | None, equity_share: float | None) -> str:
+    """Pinned macro callout for the Big Brain section head. Empty unless the
+    sharpest tracked move clears BB_MACRO_DELTA_PP."""
+    if not top_move:
+        return ""
+    d = top_move.get("delta_pp")
+    if d is None or abs(d) < BB_MACRO_DELTA_PP:
+        return ""
+    arrow = "jumped" if d >= 0 else "fell"
+    sign = "+" if d >= 0 else "&minus;"
+    if equity_share is not None:
+        exposure = f" Your basket is ~{equity_share * 100:.0f}% equities &mdash;"
+    else:
+        exposure = " For an equity-heavy basket like yours,"
+    return (
+        '<div class="bb-macro">'
+        '<span class="bb-macro-tag">&#127760; Macro</span>'
+        f'<span class="bb-macro-body">&ldquo;{_esc(top_move["theme"])}&rdquo; '
+        f'{arrow} {sign}{abs(d):.0f}pp to {top_move["probability"]:.0f}% this week.'
+        f'{exposure} worth knowing what the crowd is pricing.</span>'
+        '</div>'
+    )
+
+
 _BB_OWN_BADGE = {"held": "held", "sold": "sold", "idea": "not owned"}
 
 
-def render_bigbrain(observations: list[dict], as_of_str: str) -> str:
+def render_bigbrain(observations: list[dict], as_of_str: str, macro_html: str = "",
+                    memory: dict | None = None) -> str:
     """v2 discovery board: 2x2 of colour-coded cards (idea / held / sold)."""
     head = (
         '<div class="bb-head">'
@@ -3703,7 +4090,7 @@ def render_bigbrain(observations: list[dict], as_of_str: str) -> str:
     if not observations:
         body = ('<p class="bb-empty">Quiet week &mdash; nothing notable '
                 'stacking across your basket or the market right now.</p>')
-        return f'<section class="bigbrain-section">{head}{body}</section>'
+        return f'<section class="bigbrain-section">{head}{macro_html}{body}</section>'
     cards = []
     for o in observations:
         own = o.get("ownership", "held")
@@ -3711,6 +4098,8 @@ def render_bigbrain(observations: list[dict], as_of_str: str) -> str:
         badge = _BB_OWN_BADGE.get(own, own)
         pills = "".join(f'<span class="bb-pill">{_esc(p)}</span>'
                         for p in o.get("pills", []))
+        mem = (memory or {}).get(o["ticker"])
+        mem_html = f'<div class="bb-memory">&#8617; {mem}</div>' if mem else ""
         # idea (universe) tickers have no modal payload -> not clickable
         if own == "idea":
             tkr_html = f'<span class="bb-ticker">{_esc(o["ticker"])}</span>'
@@ -3732,10 +4121,98 @@ def render_bigbrain(observations: list[dict], as_of_str: str) -> str:
             f'<div class="bb-card-bd">'
             f'<div class="bb-body">{o["body"]}</div>'
             f'<div class="bb-pills">{pills}</div>'
-            f'{cite_html}</div></div>'
+            f'{mem_html}{cite_html}</div></div>'
         )
-    return (f'<section class="bigbrain-section">{head}'
+    return (f'<section class="bigbrain-section">{head}{macro_html}'
             f'<div class="bb-grid">{"".join(cards)}</div></section>')
+
+
+def render_market_expectations(rows: list[dict], as_of_str: str) -> str:
+    """Prediction-market sentiment: probability bars + since-last-build deltas,
+    sorted by |delta| desc. Source-attributed per row."""
+    head = (
+        '<div class="me-head"><h3>Market expectations</h3>'
+        '<span class="me-sub">what the crowd is pricing '
+        f'&middot; as of {as_of_str}</span></div>'
+    )
+    if not rows:
+        return ('<section class="market-expectations-section">' + head +
+                '<p class="me-empty">Tracking begins next build &mdash; first '
+                'snapshot of the prediction markets.</p></section>')
+    legend = ('<p class="me-legend"><b>%</b> = market-implied probability '
+              '&middot; the bar mirrors it &middot; '
+              '<b>&#9650;/&#9660; pp</b> = change since the last build</p>')
+    ordered = sorted(rows, key=lambda r: -abs(r.get("delta_pp") or 0))
+    items = []
+    for r in ordered:
+        prob = r["probability"]
+        d = r.get("delta_pp")
+        if d is None:
+            delta_html = '<span class="me-delta me-flat">&middot;</span>'
+        else:
+            cls = "me-up" if d >= 0 else "me-down"
+            arrow = "&#9650;" if d >= 0 else "&#9660;"
+            delta_html = f'<span class="me-delta {cls}">{arrow} {abs(d):.0f}pp</span>'
+        label = (f'<a class="me-q" href="{_esc(r["url"])}" target="_blank" '
+                 f'rel="noopener noreferrer">{_esc(r["theme"])}</a>'
+                 if r.get("url") else
+                 f'<span class="me-q">{_esc(r["theme"])}</span>')
+        items.append(
+            f'<div class="me-row">{label}'
+            f'<span class="me-prob">{prob:.0f}%</span>{delta_html}'
+            f'<span class="me-bar"><i style="width:{max(0, min(100, prob)):.0f}%"></i></span>'
+            f'<span class="me-src">{_esc(r["source"])}</span></div>'
+        )
+    return ('<section class="market-expectations-section">' + head + legend +
+            '<div class="me-list">' + "".join(items) + '</div></section>')
+
+
+def render_quadrant(data: list[dict]) -> str:
+    """SVG scatter: x=signal strength (0..100), y=weight share, colour=direction.
+    Dots are clickable -> ticker modal. Renders nothing for <2 positions."""
+    if not data or len(data) < 2:
+        return ""
+    PX0, PX1, PY0, PY1 = 70, 860, 30, 400   # plot box (wide, fills the module)
+    max_w = max(d["weight_share"] for d in data) or 1.0
+    # Label only the most "interesting" dots (heavy weight OR extreme signal) so a
+    # 100+-position basket doesn't drown in overlapping labels. Rest stay as bare
+    # (still clickable) dots.
+    ranked = sorted(data, key=lambda d: -(0.6 * d["weight_share"] / max_w
+                                          + 0.4 * min(100.0, d["strength"]) / 100))
+    labelled = {d["ticker"] for d in ranked[:12]}
+    dots = []
+    for d in data:
+        cx = PX0 + (max(0.0, min(100.0, d["strength"])) / 100) * (PX1 - PX0)
+        cy = PY1 - (d["weight_share"] / max_w) * (PY1 - PY0)   # bigger weight = higher
+        r = 4 + (d["weight_share"] / max_w) * 7
+        cls = "dot-up" if d["direction"] >= 0 else "dot-down"
+        tk = _esc(d["ticker"])
+        dots.append(
+            f'<circle class="q-dot {cls} ticker-clickable" data-ticker="{tk}" '
+            f'cx="{cx:.1f}" cy="{cy:.1f}" r="{r:.1f}"></circle>'
+        )
+        if d["ticker"] in labelled:
+            dots.append(f'<text class="q-tkr" x="{cx + r + 2:.1f}" y="{cy + 3:.1f}">{tk}</text>')
+    midx, midy = (PX0 + PX1) / 2, (PY0 + PY1) / 2
+    svg = (
+        '<svg viewBox="0 0 920 460" width="100%">'
+        f'<rect x="{PX0}" y="{PY0}" width="{PX1 - PX0}" height="{PY1 - PY0}" fill="rgba(0,0,0,.18)" stroke="var(--border)"/>'
+        f'<line x1="{midx:.0f}" y1="{PY0}" x2="{midx:.0f}" y2="{PY1}" stroke="var(--border)" stroke-dasharray="3,4"/>'
+        f'<line x1="{PX0}" y1="{midy:.0f}" x2="{PX1}" y2="{midy:.0f}" stroke="var(--border)" stroke-dasharray="3,4"/>'
+        f'<text class="q-q" x="{PX0 + 8}" y="{PY0 + 16}">Big bet &middot; quiet</text>'
+        f'<text class="q-q" x="{PX1 - 8}" y="{PY0 + 16}" text-anchor="end">Big bet &middot; active</text>'
+        f'<text class="q-q" x="{PX0 + 8}" y="{PY1 - 8}">Small &middot; quiet</text>'
+        f'<text class="q-q" x="{PX1 - 8}" y="{PY1 - 8}" text-anchor="end">Small &middot; active</text>'
+        f'<text class="q-ax" x="{midx:.0f}" y="{PY1 + 34}" text-anchor="middle">signal strength &#8594;</text>'
+        f'<text class="q-ax" x="26" y="{midy:.0f}" text-anchor="middle" transform="rotate(-90 26 {midy:.0f})">position weight &#8593;</text>'
+        + "".join(dots) + '</svg>'
+    )
+    return (
+        '<section class="quadrant-section">'
+        '<div class="q-head"><h3>Conviction vs signal</h3>'
+        '<span class="q-sub">open positions &middot; size = weight, x = signal strength, '
+        'green = bullish &middot; only the standouts are labelled</span></div>' + svg + '</section>'
+    )
 
 
 def render_basket_diversification(data: dict | None, meta: pd.DataFrame) -> str:
@@ -4522,7 +4999,8 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
                 rating_moves: list[dict] | None = None,
                 prior_analyst_exists: bool = False,
                 unusual_vol: list[dict] | None = None,
-                bb_universe_obs: list[dict] | None = None) -> str:
+                bb_universe_obs: list[dict] | None = None,
+                prediction_rows: list[dict] | None = None) -> str:
     weekly = prices.resample("W-FRI").last().ffill()
     defs_html = render_svg_defs()
     table_html = render_table(returns, weekly, meta, signals,
@@ -4579,7 +5057,30 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
         signals=signals, analyst=analyst, rating_moves=rating_moves,
         ticker_news=ticker_news, universe_observations=bb_universe_obs,
     )
-    bigbrain_html = render_bigbrain(bigbrain_observations, latest_date)
+    # v2.3 memory: log today's flags + compute "since" notes (real build only)
+    bigbrain_memory = {}
+    if not demo_mode:
+        _obs_prices = {}
+        for o in bigbrain_observations:
+            t = o["ticker"]
+            if t in returns.index:
+                _obs_prices[t] = float(returns.loc[t, "latest"])
+            elif universe_outlook is not None and t in universe_outlook.index:
+                _obs_prices[t] = _bb_num(universe_outlook.loc[t].get("current_price"))
+        _today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        log_bigbrain_flags(bigbrain_observations, _today, _obs_prices)
+        try:
+            _log = pd.read_csv(BIGBRAIN_LOG_CSV, dtype=str) if BIGBRAIN_LOG_CSV.exists() else None
+            bigbrain_memory = compute_bigbrain_memory(_log, _obs_prices, _today) if _log is not None else {}
+        except Exception:
+            bigbrain_memory = {}
+    _bb_top_move = max(prediction_rows or [],
+                       key=lambda r: abs(r.get("delta_pp") or 0), default=None)
+    _bb_macro_html = render_bigbrain_macro(_bb_top_move, _basket_equity_share(returns, meta))
+    bigbrain_html = render_bigbrain(bigbrain_observations, latest_date,
+                                    macro_html=_bb_macro_html, memory=bigbrain_memory)
+    market_expectations_html = render_market_expectations(prediction_rows or [], latest_date)
+    quadrant_html = render_quadrant(build_quadrant_data(returns, quant_metrics, signals))
 
     n_total = len(returns)
     n_open = int((returns.status == "open").sum()) if not returns.empty else 0
@@ -5005,6 +5506,17 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     # docs/index.html ships light fields inline + a sidecar payload.json with
     # modal-only fields, fetched on requestIdleCallback after first paint.
     build_timestamp = int(time.time())
+    # v2.3 since-last-look: tiny snapshot the page JS diffs against localStorage.
+    _idea_tickers = [o["ticker"] for o in bigbrain_observations
+                     if o.get("ownership") == "idea"]
+    _pred_probs = {r["theme"]: round(float(r["probability"]), 1)
+                   for r in (prediction_rows or [])}
+    last_look_json = json.dumps({
+        "build_id": build_timestamp,
+        "basket_return": round(float(basket_final), 2),
+        "idea_tickers": _idea_tickers,
+        "predictions": _pred_probs,
+    }, separators=(",", ":"))
     if demo_mode:
         data_json = json.dumps(data_dict, separators=(",", ":"))
         heavy_url_js = "null"
@@ -5056,11 +5568,13 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
         ("bigbrain", "Big Brain says", bigbrain_html),
         ("outlook", "Industry outlook", industry_html),
         ("news", "News", news_html),
+        ("predictions", "Market expectations", market_expectations_html),
         ("holdings", "Holdings", holdings_html),
         ("analyst", "Re-entry ideas", analyst_html),
         ("rating_moves", "Rating moves", rating_moves_html),
         ("detractors", "Exit strategy", detractors_html),
         ("diversification", "Basket diversification", diversification_html),
+        ("quadrant", "Conviction vs signal", quadrant_html),
         ("attribution", "Industry attribution", attribution_html),
         ("ccy_exposure", "Currency exposure", ccy_exposure_html),
         ("regret", "Regret tracker", regret_html),
@@ -5894,7 +6408,78 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     color:var(--accent);text-decoration:none;line-height:1.4;
     overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
   .bb-cite:hover{{text-decoration:underline}}
+  .bb-macro{{display:flex;gap:10px;align-items:baseline;margin-bottom:12px;
+    padding:10px 13px;border:1px solid var(--border);border-left:3px solid #8b9bff;
+    border-radius:9px;background:rgba(139,155,255,.08)}}
+  .bb-macro-tag{{font-family:var(--font-mono);font-size:10px;font-weight:700;
+    letter-spacing:.06em;text-transform:uppercase;color:#8b9bff;white-space:nowrap}}
+  .bb-macro-body{{font-family:var(--font-ui);font-size:12.5px;color:var(--text-2);line-height:1.5}}
+  .bb-memory{{margin-top:7px;font-family:var(--font-mono);font-size:10.5px;
+    color:var(--text-dim);font-style:italic}}
   @media (max-width:760px){{ .bb-grid{{grid-template-columns:1fr}} }}
+  /* v2.3 Market expectations -- prediction-market sentiment (Kalshi/Polymarket).
+     Probability bar + since-last-build delta per tracked theme. */
+  .market-expectations-section{{
+    background:linear-gradient(180deg,var(--surface),var(--ink-soft));
+    border:1px solid var(--border);border-radius:12px;padding:18px 20px;
+  }}
+  .me-head{{display:flex;align-items:baseline;gap:10px;margin-bottom:12px;flex-wrap:wrap}}
+  .me-head h3{{margin:0;font-family:var(--font-display);font-size:18px;
+    font-weight:400;color:var(--text);letter-spacing:-0.01em}}
+  .me-head h3::before{{content:"\\1F4C8";margin-right:8px;font-size:15px}}
+  .me-sub{{font-family:var(--font-mono);font-size:10px;color:var(--text-dim);
+    letter-spacing:.04em;text-transform:lowercase}}
+  .me-legend{{font-family:var(--font-ui);font-size:11px;color:var(--text-dim);
+    margin:0 0 10px;line-height:1.4}}
+  .me-legend b{{color:var(--text-2);font-family:var(--font-mono);font-weight:600}}
+  .me-empty{{font-family:var(--font-ui);font-size:12px;color:var(--text-dim);
+    font-style:italic;margin:4px 0 0}}
+  .me-list{{display:flex;flex-direction:column;gap:0}}
+  .me-row{{display:grid;grid-template-columns:1fr 48px 64px 120px 76px;
+    gap:12px;align-items:center;padding:9px 0;border-bottom:1px solid var(--border);
+    font-family:var(--font-ui);font-size:12.5px}}
+  .me-row:last-child{{border-bottom:none}}
+  .me-q{{color:var(--text);text-decoration:none}}
+  a.me-q:hover{{color:var(--accent);text-decoration:underline}}
+  .me-prob{{font-family:var(--font-mono);font-weight:700;color:var(--text);text-align:right}}
+  .me-delta{{font-family:var(--font-mono);font-size:11px;font-weight:600;text-align:right}}
+  .me-up{{color:var(--up)}} .me-down{{color:var(--down)}} .me-flat{{color:var(--text-dim)}}
+  .me-bar{{height:8px;border-radius:5px;background:var(--surface-2);overflow:hidden}}
+  .me-bar > i{{display:block;height:100%;background:var(--accent);border-radius:5px}}
+  .me-src{{font-family:var(--font-mono);font-size:9px;letter-spacing:.06em;
+    text-transform:uppercase;color:var(--text-dim);text-align:right}}
+  @media (max-width:700px){{
+    .me-row{{grid-template-columns:1fr 44px 56px;gap:8px}}
+    .me-bar,.me-src{{display:none}}
+  }}
+  /* v2.3 Conviction-vs-signal quadrant */
+  .quadrant-section{{
+    background:linear-gradient(180deg,var(--surface),var(--ink-soft));
+    border:1px solid var(--border);border-radius:12px;padding:18px 20px;
+  }}
+  .q-head{{display:flex;align-items:baseline;gap:10px;margin-bottom:6px;flex-wrap:wrap}}
+  .q-head h3{{margin:0;font-family:var(--font-display);font-size:18px;font-weight:400;
+    color:var(--text);letter-spacing:-0.01em}}
+  .q-sub{{font-family:var(--font-mono);font-size:10px;color:var(--text-dim);
+    letter-spacing:.04em;text-transform:lowercase}}
+  .q-q{{font-family:var(--font-mono);font-size:9px;fill:var(--text-dim);
+    text-transform:uppercase;letter-spacing:.06em}}
+  .q-ax{{font-family:var(--font-mono);font-size:10px;fill:var(--text-2)}}
+  .q-tkr{{font-family:var(--font-mono);font-size:9.5px;fill:var(--text);font-weight:600}}
+  .q-dot{{cursor:pointer;transition:opacity .12s}}
+  .q-dot:hover{{opacity:.75}}
+  .q-dot.dot-up{{fill:var(--up)}} .q-dot.dot-down{{fill:var(--down)}}
+  /* v2.3 "since your last visit" banner (client-side localStorage diff) */
+  #last-look{{display:flex;align-items:center;gap:12px;margin:18px 0 0;
+    padding:10px 14px;border:1px solid var(--border);border-left:3px solid var(--accent);
+    border-radius:9px;background:rgba(245,158,11,.06)}}
+  #last-look .ll-tag{{font-family:var(--font-mono);font-size:10px;font-weight:700;
+    letter-spacing:.06em;text-transform:uppercase;color:var(--accent);white-space:nowrap}}
+  #last-look .ll-body{{font-family:var(--font-ui);font-size:12.5px;color:var(--text-2)}}
+  #last-look .ll-body b{{color:var(--text)}}
+  #last-look .ll-x{{margin-left:auto;background:none;border:none;color:var(--text-dim);
+    font-size:18px;cursor:pointer;line-height:1;padding:0 4px}}
+  #last-look .ll-x:hover{{color:var(--text)}}
   /* Full-width analyst section (re-entry ideas) below the main table */
   section.analyst-section{{margin:22px 0 8px}}
 
@@ -6691,6 +7276,8 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
   </div>
 </header>
 
+<div id="last-look" hidden></div>
+
 <div id="module-stack" data-default-order="{default_order_csv}">
 {module_stack_html}
 </div>
@@ -6874,6 +7461,7 @@ const POCKET_LESSONS = {pocket_lessons_json};
 //   "quizSeen"    - JSON array of seen question ids
 //   "quizMonthly" - JSON {{month, answered, correct}} resetting on calendar month
 const QUIZ_POOL = {quiz_pool_json};
+const LAST_LOOK = {last_look_json};
 
 // ---- Helpers
 function fmtMoney(v, sym) {{
@@ -8326,6 +8914,39 @@ document.getElementById('hero-chart').addEventListener('click', (e) => {{
 // survives rebuilds (build.py only ships the default order). A new section
 // the author adds later slots into its default position automatically, so
 // people who cloned + customized never silently lose newly-shipped sections.
+(function setupLastLook() {{
+  const KEY = 'stocks-dashboard-lastlook', DKEY = KEY + '-dismissed';
+  const el = document.getElementById('last-look');
+  if (!el || typeof LAST_LOOK === 'undefined' || !LAST_LOOK) return;
+  let prev = null;
+  try {{ prev = JSON.parse(localStorage.getItem(KEY) || 'null'); }} catch (e) {{}}
+  const store = () => {{ try {{ localStorage.setItem(KEY, JSON.stringify(LAST_LOOK)); }} catch (e) {{}} }};
+  if (!prev) {{ store(); return; }}                       // first visit
+  if (prev.build_id === LAST_LOOK.build_id) return;       // already saw this build
+  let dismissed = null;
+  try {{ dismissed = localStorage.getItem(DKEY); }} catch (e) {{}}
+  if (dismissed === String(LAST_LOOK.build_id)) {{ store(); return; }}
+  const items = [];
+  const dB = LAST_LOOK.basket_return - (prev.basket_return || 0);
+  if (Math.abs(dB) >= 0.1) items.push(`basket <b>${{dB >= 0 ? '+' : ''}}${{dB.toFixed(1)}}pp</b>`);
+  const prevIdeas = prev.idea_tickers || [];
+  const newIdeas = (LAST_LOOK.idea_tickers || []).filter(t => !prevIdeas.includes(t));
+  if (newIdeas.length) items.push(`<b>${{newIdeas.length}}</b> new idea${{newIdeas.length > 1 ? 's' : ''}}: ${{newIdeas.join(', ')}}`);
+  const pm = [], pp = LAST_LOOK.predictions || {{}}, ppp = prev.predictions || {{}};
+  for (const k in pp) {{ if (k in ppp) {{ const d = pp[k] - ppp[k]; if (Math.abs(d) >= 3) pm.push(`${{k}} ${{d >= 0 ? '+' : ''}}${{d.toFixed(0)}}pp`); }} }}
+  if (pm.length) items.push(pm.join(' &middot; '));
+  store();
+  if (!items.length) return;
+  el.innerHTML = '<span class="ll-tag">Since your last visit</span>'
+    + '<span class="ll-body">' + items.join(' &middot; ') + '</span>'
+    + '<button class="ll-x" aria-label="Dismiss">&times;</button>';
+  el.hidden = false;
+  el.querySelector('.ll-x').addEventListener('click', () => {{
+    el.hidden = true;
+    try {{ localStorage.setItem(DKEY, String(LAST_LOOK.build_id)); }} catch (e) {{}}
+  }});
+}})();
+
 (function setupLayout() {{
   const KEY = 'stocks-dashboard-layout-v1';
   const stack = document.getElementById('module-stack');
@@ -8779,10 +9400,15 @@ function rebuildNewsChips(sources) {{
 function applyNewsFilter(src) {{
   const chipBar = document.querySelector('.news-chips');
   if (!chipBar) return;
+  const rows = [...document.querySelectorAll('.news-row')];
+  // Resilience: a saved/selected source that matches NO current rows (stale
+  // localStorage, or the live worker's feed set changed) would hide every row
+  // and leave the panel empty. Fall back to "All" so news never renders blank.
+  if (src !== '*' && !rows.some(r => r.dataset.source === src)) src = '*';
   chipBar.querySelectorAll('.news-chip').forEach(b => {{
     b.classList.toggle('active', b.dataset.src === src);
   }});
-  document.querySelectorAll('.news-row').forEach(row => {{
+  rows.forEach(row => {{
     const match = src === '*' || row.dataset.source === src;
     if (match) row.removeAttribute('hidden'); else row.setAttribute('hidden', '');
   }});
@@ -9060,6 +9686,23 @@ def main(demo: bool = False) -> None:
     if all_failed:
         print(f"  failed: {', '.join(sorted(all_failed))}")
 
+    # v2.3 Market expectations: prediction-market sentiment. Live fetch only on
+    # the real (local) build; demo/CI renders from the committed cache so the
+    # daily cron makes no Kalshi/Polymarket calls.
+    pred_themes = load_prediction_themes()
+    if not demo and pred_themes:
+        snapshot_prior_predictions()
+        pred_current = fetch_predictions(pred_themes)
+        if pred_current:
+            save_predictions_cache(pred_current)
+    else:
+        pred_current = load_predictions_cache()
+    pred_prior = load_predictions_cache(PRIOR_PREDICTIONS_CACHE)
+    prediction_rows = compute_prediction_moves(pred_prior, pred_current)
+    if prediction_rows:
+        print(f"Market expectations: {len(prediction_rows)} markets "
+              f"({'live' if not demo else 'cached'})")
+
     # v2.2 Big Brain: universe discovery lane (shortlist + deepen)
     bb_universe_obs = []
     try:
@@ -9089,7 +9732,8 @@ def main(demo: bool = False) -> None:
                        rating_moves=rating_moves,
                        prior_analyst_exists=PRIOR_ANALYST_CACHE.exists(),
                        unusual_vol=unusual_vol,
-                       bb_universe_obs=bb_universe_obs)
+                       bb_universe_obs=bb_universe_obs,
+                       prediction_rows=prediction_rows)
 
     out_path = DEMO_OUT_HTML if demo else OUT_HTML
     out_path.parent.mkdir(parents=True, exist_ok=True)

@@ -14,6 +14,75 @@ than a barely-working prototype.
 
 ---
 
+## v2.3 — Market expectations, Big Brain memory, since-you-last-looked, conviction quadrant · 13 June 2026
+
+Extends the v2.2 decision surface with a forward-looking **sentiment** layer,
+a sense of **memory** (how past calls played out), a **welcome-back** diff, and
+a portfolio-wide **conviction-vs-signal** lens. Plus three fixes surfaced in
+day-to-day use.
+
+### Added
+- **Market expectations module** — prediction-market sentiment from **Kalshi +
+  Polymarket**. A row per curated theme (Fed decision, recession, S&amp;P range,
+  market-crash, &hellip;): implied-probability % + a bar that mirrors it +
+  **since-last-build &Delta;** + a source badge, sorted by |&Delta;| so the
+  biggest movers lead. Curation is a single committed `predictions.csv`
+  (theme + an explicit `source` column, which dissolves multi-source dedup);
+  the build auto-resolves the current open market per theme. Two fetchers
+  behind one normalized record via stdlib `urllib` (no new runtime dep), each
+  graceful-skip on failure. **Build-time only** &mdash; the daily demo/CI
+  rebuild renders from the committed cache and makes **no** network calls to
+  the prediction APIs. A one-line legend explains what the %, bar and &Delta;
+  mean. Frame: market-implied odds, shapes-not-amounts, not advice.
+- **Big Brain macro callout** &mdash; a pinned full-width strip above the
+  Big Brain 2&times;2 when a tracked prediction market moves &geq; 8pp
+  build-over-build, related to the basket's equity exposure
+  ("recession odds +8pp &rarr; you're ~95% equities").
+- **Big Brain memory** &mdash; when a name Big Brain flags now was flagged
+  before, the card carries a small "flagged 3 weeks ago &mdash; +12% since"
+  line, so the board becomes accountable for its past calls. Backed by a
+  committed `data/bigbrain_log.csv` (date / ticker / price / archetype &mdash;
+  no &pound;, no shares); the real build appends, the demo skips.
+- **"Since you last looked" banner** &mdash; a dismissible strip below the hero
+  that diffs the current page against a `localStorage` snapshot from your last
+  visit: basket &Delta;pp, new Big Brain idea names, and any tracked prediction
+  market that shifted. Shows once per new build; nothing on a first visit.
+  Pure client-side.
+- **Conviction-vs-signal quadrant module** &mdash; a full-width SVG scatter of
+  every open position: **x** = a 0&ndash;100 technical signal score
+  (RSI distance-from-50 + trend + momentum), **y** = position weight, dot
+  **colour** = bullish/bearish. Surfaces the mismatches a table hides &mdash;
+  a big position with a quiet signal (top-left), a small position screaming
+  (bottom-right). Only the ~12 standouts are labelled so a 100+-name basket
+  stays readable; every dot clicks through to its modal.
+- **`test_predictions.py`** (15 `pytest` cases) for the prediction layer;
+  `test_bigbrain.py` expanded to 50 (memory, quadrant score/data/render,
+  analyst-snapshot age-gate). 65 tests total.
+
+### Changed
+- **Rating-moves baseline is now stable (~weekly).** The "prior" analyst
+  snapshot only refreshes when it's missing or &gt; ~6 days old, instead of
+  being overwritten every build. Previously the baseline reset to *current* on
+  every run, so target/recommendation moves only ever flashed for a single
+  build and then vanished; they now measure against a meaningful reference and
+  accumulate over time.
+
+### Fixed
+- **News panel could render empty.** A saved source-filter
+  (`localStorage`) that no longer matched the live worker's feed set (which has
+  narrowed over time) hid every headline until you clicked a chip.
+  `applyNewsFilter` now falls back to "All" when the chosen source matches no
+  rendered rows, and re-persists `*` so it self-heals.
+- **Lazy modal could stay permanently blank.** A transient failure of the v2.0
+  sidecar fetch (e.g. during a GitHub Pages redeploy window) marked the ticker
+  "hydrated" with no data, so reopening never retried. The ticker is now only
+  marked hydrated when the fetch actually succeeds.
+- **Quiz repeated the same question.** The picker now excludes the
+  last-shown question, so you never get the same one twice in a row across
+  opens or "Next".
+
+---
+
 ## v2.2 — "Big Brain says" discovery board · 5 June 2026
 
 Turns the dashboard from a data display into a **decision surface**. A new

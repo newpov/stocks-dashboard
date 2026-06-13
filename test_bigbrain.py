@@ -306,6 +306,135 @@ def test_render_empty_state():
     assert "bb-empty" in html
 
 
+def test_log_bigbrain_flags_appends_dedup(tmp_path, monkeypatch):
+    p = tmp_path / "bigbrain_log.csv"
+    monkeypatch.setattr(build, "BIGBRAIN_LOG_CSV", p)
+    obs = [{"ticker": "AMD", "ownership": "held", "title": "Running hot"},
+           {"ticker": "NVDA", "ownership": "idea", "title": "Setup you're missing"}]
+    prices = {"AMD": 168.4, "NVDA": 120.0}
+    build.log_bigbrain_flags(obs, "2026-06-12", prices)
+    build.log_bigbrain_flags(obs, "2026-06-12", prices)   # same day -> no dupes
+    df = pd.read_csv(p)
+    assert len(df) == 2
+    assert set(df["ticker"]) == {"AMD", "NVDA"}
+    assert float(df[df.ticker == "AMD"]["price"].iloc[0]) == 168.4
+
+
+def test_compute_bigbrain_memory():
+    log = pd.DataFrame([
+        {"date": "2026-05-22", "ticker": "AMD", "ownership": "held",
+         "price": "150.0", "label": "Running hot"},
+        {"date": "2026-06-12", "ticker": "AMD", "ownership": "held",
+         "price": "168.0", "label": "Running hot"},
+        {"date": "2026-06-12", "ticker": "MU", "ownership": "held",
+         "price": "100.0", "label": "x"},   # only today -> no note
+    ])
+    notes = build.compute_bigbrain_memory(log, {"AMD": 168.0, "MU": 100.0},
+                                          "2026-06-12")
+    assert "AMD" in notes
+    assert "+12%" in notes["AMD"]    # 168/150-1
+    assert "ago" in notes["AMD"]
+    assert "MU" not in notes
+
+
+def test_compute_bigbrain_memory_skips_no_price():
+    log = pd.DataFrame([
+        {"date": "2026-05-01", "ticker": "X", "ownership": "idea",
+         "price": "10.0", "label": "y"},
+        {"date": "2026-06-12", "ticker": "X", "ownership": "idea",
+         "price": "", "label": "y"},
+    ])
+    assert build.compute_bigbrain_memory(log, {}, "2026-06-12") == {}
+
+
+def test_render_bigbrain_memory_note():
+    obs = [{"ticker": "AMD", "ownership": "held", "severity": "watch",
+            "title": "Running hot", "body": "hot", "pills": ["RSI 71"],
+            "cite": None, "score": 5.0, "raw": 4.0}]
+    html = build.render_bigbrain(obs, "12 Jun 2026",
+                                 memory={"AMD": "flagged 3 weeks ago &mdash; +12% since"})
+    assert "bb-memory" in html
+    assert "+12% since" in html
+
+
+def test_quadrant_signal_score_bullish():
+    q = pd.Series({"rsi14": 78.0, "sma200_dist_pct": 40.0})
+    row = pd.Series({"1m_pct": 12.0, "3m_pct": 20.0})
+    strength, direction = build._quadrant_signal_score(q, "Strong uptrend", row)
+    assert strength > 50
+    assert direction == 1
+
+
+def test_quadrant_signal_score_bearish():
+    q = pd.Series({"rsi14": 28.0, "sma200_dist_pct": -30.0})
+    row = pd.Series({"1m_pct": -10.0, "3m_pct": -18.0})
+    strength, direction = build._quadrant_signal_score(q, "Strong downtrend", row)
+    assert direction == -1
+
+
+def test_quadrant_signal_score_nan_safe():
+    strength, direction = build._quadrant_signal_score(None, "", {})
+    assert strength == 0.0
+    assert direction in (1, -1)
+
+
+def test_build_quadrant_data():
+    returns = pd.DataFrame({
+        "status": ["open", "open", "closed"],
+        "weight": [300.0, 100.0, 0.0],
+        "1m_pct": [10.0, -5.0, 0.0], "3m_pct": [12.0, -8.0, 0.0],
+    }, index=["AMD", "SAP", "OLD"])
+    quant = pd.DataFrame({"rsi14": [75.0, 30.0, 50.0],
+                          "sma200_dist_pct": [40.0, -20.0, 0.0]},
+                         index=["AMD", "SAP", "OLD"])
+    signals = pd.DataFrame({"signal": ["Strong uptrend", "Trending down", "Mixed"]},
+                           index=["AMD", "SAP", "OLD"])
+    data = build.build_quadrant_data(returns, quant, signals)
+    assert {d["ticker"] for d in data} == {"AMD", "SAP"}    # open only
+    amd = next(d for d in data if d["ticker"] == "AMD")
+    assert 0 <= amd["weight_share"] <= 1
+    assert amd["direction"] == 1
+    assert round(sum(d["weight_share"] for d in data), 5) == 1.0
+
+
+def test_render_quadrant():
+    data = [{"ticker": "AMD", "weight_share": 0.5, "strength": 80.0, "direction": 1},
+            {"ticker": "SAP", "weight_share": 0.2, "strength": 70.0, "direction": -1}]
+    html = build.render_quadrant(data)
+    assert "quadrant-section" in html
+    assert "<svg" in html
+    assert html.count("<circle") == 2
+    assert "dot-up" in html and "dot-down" in html
+    assert 'data-ticker="AMD"' in html
+
+
+def test_render_quadrant_labels_only_outliers():
+    data = [{"ticker": f"T{i}", "weight_share": (i + 1) / 200.0,
+             "strength": float(i * 2), "direction": 1 if i % 2 else -1}
+            for i in range(40)]
+    html = build.render_quadrant(data)
+    assert html.count("<circle") == 40          # every holding is a dot
+    assert html.count('class="q-tkr"') <= 12     # only standouts labelled
+
+
+def test_render_quadrant_empty():
+    assert build.render_quadrant([]) == ""
+    assert build.render_quadrant([{"ticker": "A", "weight_share": 1.0,
+                                   "strength": 5.0, "direction": 1}]) == ""
+
+
+def test_analyst_snapshot_due(tmp_path):
+    import os, time
+    p = tmp_path / "prior.parquet"
+    now = time.time()
+    assert build._analyst_snapshot_due(p, now) is True            # missing -> due
+    p.write_text("x")
+    os.utime(p, (now, now))
+    assert build._analyst_snapshot_due(p, now, max_age_days=6) is False   # fresh
+    os.utime(p, (now - 7 * 86400, now - 7 * 86400))
+    assert build._analyst_snapshot_due(p, now, max_age_days=6) is True    # stale
+
+
 def test_archetype_idea():
     assert build._bb_match_archetype({"beats_your_sector", "unusual_volume"}) == "missing_idea"
 

@@ -106,7 +106,7 @@ falls back to build-time news cleanly.
                           ▼
                 ┌───────────────────────┐
                 │  docs/index.html      │  ← single self-contained file
-                │  (renders 11 modules) │     ~1.5 MB, GitHub Pages serves
+                │  (renders 13 modules) │     ~1.5 MB, GitHub Pages serves
                 └───────────────────────┘     this as the live dashboard
                           │
         ┌─────────────────┴─────────────────┐
@@ -307,6 +307,50 @@ Like the rest of the dashboard it uses **shapes, not amounts** — RSI, %, pp,
 weight *rank*, volume ratios, holding-period days — never £ figures or share
 counts. **It is build-time analytics, not financial advice.**
 
+**Memory (v2.3).** When a name Big Brain flags now was flagged before, the card
+adds a small *"flagged 3 weeks ago — +12% since"* line, so the board is held
+accountable for how its past calls played out. Flags are logged to a committed
+`data/bigbrain_log.csv` (date / ticker / price / archetype — no £, no shares);
+the real build appends, the demo skips. A pinned **macro callout** also appears
+above the board when a tracked prediction market moves ≥ 8pp build-over-build
+(see Market expectations).
+
+### Market expectations — prediction-market sentiment (v2.3)
+
+A forward-looking *sentiment* layer the rest of the page lacks: implied
+probabilities from **Kalshi + Polymarket** for macro events that move the whole
+market. Each row is a curated theme (Fed decision, recession, S&P year-end
+range, market-crash, …) showing the implied **probability %**, a bar that
+mirrors it, the **change since the last build** (the lead signal), and a source
+badge — sorted so the biggest movers surface first.
+
+Curation is a single committed **`predictions.csv`**: a theme label, a `source`
+column (kalshi / polymarket), and the series ticker / market slug. The build
+auto-resolves the current open market per theme and reads its odds via the
+sources' public read APIs (stdlib `urllib`, no new dependency). It's
+**build-time only** — the daily demo/CI rebuild renders from the committed cache
+and makes no calls to the prediction APIs, so the cron stays free of a new
+external dependency. Probabilities are public, so this slots into the
+shapes-not-amounts model cleanly. **Market-implied odds, not advice.**
+
+### Conviction vs signal — the quadrant (v2.3)
+
+A full-width scatter of every open position that surfaces mismatches a table
+hides: **x** = a 0–100 technical signal score (RSI distance-from-50 + trend +
+momentum), **y** = position weight, dot **colour** = bullish/bearish. The
+actionable corners are *big-bet-but-quiet* (top-left — conviction the signals
+don't confirm) and *small-but-screaming* (bottom-right — a mover you're
+underweight). Only the ~12 standouts are labelled so a 100+-name basket stays
+legible; every dot clicks through to its ticker modal.
+
+### Since you last looked (v2.3)
+
+A dismissible strip below the hero that diffs the current page against a
+`localStorage` snapshot from your previous visit — basket return Δ, new Big
+Brain idea names, and any tracked prediction market that shifted. It shows once
+per new build (nothing on a first visit), so returning to the page tells you
+what changed at a glance. Pure client-side; no build-time cost.
+
 ### Pocket lesson card (opt-in)
 
 A small educational card that you can toggle from the topbar. When on,
@@ -336,29 +380,37 @@ of the pool has been answered so the experience never dead-ends.
 ### Decision-flow ordering
 
 The vertical order is deliberate — verdict → research → details → action →
-portfolio lens → retrospective:
+portfolio lens → retrospective. A dismissible **"since your last visit"** strip
+sits above everything (when something changed since you last looked):
 
 1. **Big Brain says**: "what should I look at first, including things I'm
    missing" — the four highest-signal names (2 discovery + 2 basket).
 2. **Outlook + News**: "what should I read about today" — new stocks and the
    market backdrop.
-3. **Main table**: detailed per-stock view with sorting + filtering.
-4. **Re-entry ideas**: "of stocks I've held before, where do analysts see
+3. **Market expectations**: "what is the crowd pricing" — prediction-market
+   (Kalshi + Polymarket) implied odds for macro events, with since-last-build
+   deltas.
+4. **Main table**: detailed per-stock view with sorting + filtering.
+5. **Re-entry ideas**: "of stocks I've held before, where do analysts see
    most upside" — buy candidates.
-5. **Rating moves** (paired under Re-entry): "did analyst views shift since
-   last build" — target-price changes ≥ 5% and recommendation shifts.
-6. **Exit strategy**: "of my current losers, which should I cut" — sell
+6. **Rating moves** (paired under Re-entry): "did analyst views shift" —
+   target-price changes ≥ 5% and recommendation shifts vs a stable baseline.
+7. **Exit strategy**: "of my current losers, which should I cut" — sell
    candidates, with concrete 2× ATR suggested stops.
-7. **Basket diversification**: portfolio-level lens — pairwise correlations,
+8. **Basket diversification**: portfolio-level lens — pairwise correlations,
    most-correlated pairs (concentration risk), and best diversifiers.
-8. **Industry attribution** (paired under diversification): "which of my
-   sector bets are paying off" — cost-weighted return by industry.
-9. **Regrets / Lucky escapes**: retrospective — did I sell too early or
-   exit just in time.
+9. **Conviction vs signal** (paired under diversification): a scatter of
+   holdings — weight vs signal strength — to spot big-but-quiet and
+   small-but-screaming positions.
+10. **Industry attribution**: "which of my sector bets are paying off" —
+    cost-weighted return by industry.
+11. **Regrets / Lucky escapes**: retrospective — did I sell too early or
+    exit just in time.
 
 This ordering matches how the author actually reviews the portfolio: lead with
-the can't-miss names, read the market, dig into specific positions, decide what
-to buy or sell, then step back to the portfolio-level and retrospective lenses.
+the can't-miss names, read the market and what it's pricing, dig into specific
+positions, decide what to buy or sell, then step back to the portfolio-level and
+retrospective lenses.
 
 ### Click-to-expand drill-downs
 
@@ -611,11 +663,13 @@ stocks-dashboard/
 ├── CHANGELOG.md                       ← version history (v1.0 → v2.2)
 ├── demo.html                          ← standalone self-contained demo (CI-rebuilt daily)
 ├── build.py                           ← the build pipeline
-├── test_bigbrain.py                   ← pytest suite for the Big Brain engine
+├── test_bigbrain.py                   ← pytest suite for Big Brain + quadrant
+├── test_predictions.py                ← pytest suite for Market expectations
 ├── log.xlsx                           ← author's transaction log (private, gitignored)
 ├── transactions.csv                   ← public sample log used by demo.html
 ├── watchlist.csv                      ← optional watchlist tickers
 ├── universe.csv                       ← 150 large/mid/small US caps for industry outlook
+├── predictions.csv                    ← Market-expectations themes (Kalshi/Polymarket)
 ├── requirements.txt                   ← Python deps (runtime)
 ├── requirements-dev.txt               ← + pytest (for test_bigbrain.py)
 ├── daily_rebuild.ps1                  ← optional Task Scheduler script for daily local rebuilds
@@ -636,7 +690,10 @@ stocks-dashboard/
 │   ├── prior_analyst_cache.parquet    ← previous build's analyst snapshot for rating-moves diff
 │   ├── ticker_news_cache.parquet      ← per-ticker news for the modal, 7-day TTL
 │   ├── universe_outlook_cache.parquet ← universe.csv precomputed, 30-day TTL
-│   └── bb_universe_ohlcv_cache.parquet ← Big Brain universe-shortlist OHLCV
+│   ├── bb_universe_ohlcv_cache.parquet ← Big Brain universe-shortlist OHLCV
+│   ├── bigbrain_log.csv               ← Big Brain flag history (memory notes)
+│   ├── predictions_cache.parquet      ← Market-expectations snapshot
+│   └── prior_predictions_cache.parquet ← prior snapshot for since-last-build Δ
 │
 ├── docs/
 │   ├── index.html                     ← generated dashboard (~1.5 MB)
