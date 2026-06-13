@@ -14,6 +14,72 @@ than a barely-working prototype.
 
 ---
 
+## v2.4 — Equal-weight basket, value-weight mode, Signal map, mobile fix, +50 quiz · 13 June 2026
+
+A methodology pass and a readability pass. The basket is now **equal-weighted**
+(each position = one unit), removing a rebase bias where a stock split or heavy
+scale-in could make a name look like a 10&times; position and drag the headline
+return down. An opt-in **value-weight mode** restores capital-weighting for
+anyone who supplies real share quantities. The conviction quadrant is replaced
+by a far more legible **Signal map**, and one CSS root-cause fix ends the mobile
+horizontal-overflow that was clipping every section.
+
+### Added
+- **Value-weight mode** (`WEIGHT_MODE` env var or `--weight value`) &mdash;
+  opt-in capital weighting by real `shares &times; price`. Reads real quantities
+  from `transactions.csv` (`shares`) or a quantity column in `log.xlsx` if one is
+  present; otherwise falls back to one unit per position. Default stays **equal**
+  (privacy-driven, no monetary scale). `build_positions` and the basket MTM both
+  branch on the mode; everything downstream reads `weight` and follows.
+- **Signal map** &mdash; replaces the conviction-vs-signal quadrant with a
+  **beeswarm**: every open position placed along a bearish&harr;bullish technical
+  axis, jittered vertically so none overlap, coloured by return (green up / red
+  down), with hover tooltips and only the extremes labelled. (Equal weight
+  removed the old size axis and a holding-tenure axis clustered badly &mdash; the
+  beeswarm is collision-free by construction.)
+- **Market expectations &mdash; question subtitles** &mdash; each row now shows
+  the underlying market question beneath the theme ("Fed rate decision" &rarr;
+  "Will the upper bound&hellip; be above 5.25%? &mdash; 0%"), so the % has
+  meaning. Themes expanded toward **political / shock** markets (Fed emergency
+  meeting, government shutdown, debt ceiling, tariffs, China&ndash;Taiwan).
+- **+50 quiz questions** (50 &rarr; 100) &mdash; 5 entry-level + 5 hard per
+  category (25 + 25), same cloze/direct mix, plus an optional `difficulty` field.
+- **Watchlist-only mode** (`--watchlist-only`) &mdash; build the whole dashboard
+  from `watchlist.csv` with **no trade history**: each ticker is tracked
+  equal-weight from its window start, so a newcomer gets the full per-ticker
+  briefing (signals, analyst, news, Big Brain, Signal map) without modelling a
+  single trade. Banner + hero relabel to "Your watchlist". Lowers the
+  barrier-to-try for forkers.
+- **Broker-agnostic CSV import** &mdash; `transactions.csv` now accepts common
+  header variants (`symbol`/`quantity`/`side`/&hellip;) and free-text actions
+  ("Market buy", "Sold", "B"); only ticker/date/action are required (no quantity
+  column &rarr; one unit per row), so most brokers' exports work with little
+  editing.
+
+### Changed
+- **Equal-weight basket** &mdash; `build_positions` collapses every position to
+  one unit; the basket series is the equal-weight mean of per-position returns
+  (closed positions frozen at their realized return so closing a winner doesn't
+  drop the line). Currency exposure, contribution, industry attribution and
+  analyst-upside all follow. The **win/loss ratio is now %-based** (no &pound; in
+  the hero stat). The badge tooltip still shows the raw buy/sell counts.
+- **Hero stats** &mdash; `Annualized` dropped from the default set (it
+  duplicated the chart's return); still selectable in the picker. The
+  **since-you-last-looked** banner is now a compact pill directly under the stat
+  strip &mdash; and a latent bug where `display:flex` overrode the `hidden`
+  attribute (an empty orange bar on first visits) is fixed.
+
+### Fixed
+- **Mobile horizontal overflow** &mdash; a wide table forced the single grid
+  track to its min-content, blowing the whole page past the viewport and
+  clipping every section (Big Brain included). `min-width:0` on the module grid
+  items lets the inner scrollers scroll instead; the 2-column regret +
+  diversification grids collapse to one column; the news feed caps to half the
+  screen height.
+- **Market expectations** &mdash; theme links point to the Kalshi **series**
+  page (the raw event-ticker path 404'd); a **0pp** delta now renders neutral
+  instead of misleading green/red.
+
 ## v2.3 — Market expectations, Big Brain memory, since-you-last-looked, conviction quadrant · 13 June 2026
 
 Extends the v2.2 decision surface with a forward-looking **sentiment** layer,

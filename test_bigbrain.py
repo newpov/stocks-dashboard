@@ -1,3 +1,5 @@
+import re
+
 import pandas as pd
 
 import build
@@ -378,10 +380,12 @@ def test_quadrant_signal_score_nan_safe():
     assert direction in (1, -1)
 
 
-def test_build_quadrant_data():
+def test_build_signal_strip_data():
+    # v2.4 beeswarm: signal = direction*strength (-100..+100), colour = return.
     returns = pd.DataFrame({
         "status": ["open", "open", "closed"],
-        "weight": [300.0, 100.0, 0.0],
+        "weight": [1.0, 1.0, 0.0],
+        "total_pct": [22.0, -7.0, 5.0],
         "1m_pct": [10.0, -5.0, 0.0], "3m_pct": [12.0, -8.0, 0.0],
     }, index=["AMD", "SAP", "OLD"])
     quant = pd.DataFrame({"rsi14": [75.0, 30.0, 50.0],
@@ -389,38 +393,40 @@ def test_build_quadrant_data():
                          index=["AMD", "SAP", "OLD"])
     signals = pd.DataFrame({"signal": ["Strong uptrend", "Trending down", "Mixed"]},
                            index=["AMD", "SAP", "OLD"])
-    data = build.build_quadrant_data(returns, quant, signals)
+    data = build.build_signal_strip_data(returns, quant, signals)
     assert {d["ticker"] for d in data} == {"AMD", "SAP"}    # open only
     amd = next(d for d in data if d["ticker"] == "AMD")
-    assert 0 <= amd["weight_share"] <= 1
-    assert amd["direction"] == 1
-    assert round(sum(d["weight_share"] for d in data), 5) == 1.0
+    sap = next(d for d in data if d["ticker"] == "SAP")
+    assert amd["signal"] > 0 and sap["signal"] < 0          # bullish vs bearish
+    assert -100 <= amd["signal"] <= 100
+    assert amd["ret"] == 22.0 and sap["ret"] == -7.0         # return drives colour
 
 
-def test_render_quadrant():
-    data = [{"ticker": "AMD", "weight_share": 0.5, "strength": 80.0, "direction": 1},
-            {"ticker": "SAP", "weight_share": 0.2, "strength": 70.0, "direction": -1}]
-    html = build.render_quadrant(data)
+def test_render_signal_strip():
+    data = [{"ticker": "AMD", "signal": 70.0, "ret": 22.0},
+            {"ticker": "SAP", "signal": -55.0, "ret": -7.0}]
+    html = build.render_signal_strip(data)
     assert "quadrant-section" in html
     assert "<svg" in html
     assert html.count("<circle") == 2
-    assert "dot-up" in html and "dot-down" in html
+    assert "dot-up" in html and "dot-down" in html          # colour by return
     assert 'data-ticker="AMD"' in html
+    assert "<title>" in html                                # hover tooltip
 
 
-def test_render_quadrant_labels_only_outliers():
-    data = [{"ticker": f"T{i}", "weight_share": (i + 1) / 200.0,
-             "strength": float(i * 2), "direction": 1 if i % 2 else -1}
-            for i in range(40)]
-    html = build.render_quadrant(data)
-    assert html.count("<circle") == 40          # every holding is a dot
-    assert html.count('class="q-tkr"') <= 12     # only standouts labelled
+def test_render_signal_strip_beeswarm_spreads():
+    # identical signals must NOT stack on one point -> jittered to distinct y's
+    data = [{"ticker": f"T{i}", "signal": 0.0, "ret": 1.0} for i in range(12)]
+    html = build.render_signal_strip(data)
+    assert html.count("<circle") == 12          # every holding is a dot
+    ys = re.findall(r'cy="([\d.]+)"', html)
+    assert len(set(ys)) > 1                      # spread vertically, not piled
+    assert html.count('class="q-tkr"') <= 6      # only the extremes labelled
 
 
-def test_render_quadrant_empty():
-    assert build.render_quadrant([]) == ""
-    assert build.render_quadrant([{"ticker": "A", "weight_share": 1.0,
-                                   "strength": 5.0, "direction": 1}]) == ""
+def test_render_signal_strip_empty():
+    assert build.render_signal_strip([]) == ""
+    assert build.render_signal_strip([{"ticker": "A", "signal": 5.0, "ret": 1.0}]) == ""
 
 
 def test_analyst_snapshot_due(tmp_path):

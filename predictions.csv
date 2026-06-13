@@ -1,5 +1,9 @@
 theme_label,source,series_or_tag
 Fed rate decision,kalshi,KXFED
-US recession in 2026,kalshi,KXRECSSNBER
-S&P 500 year-end range,kalshi,KXINX
-Market crash in 2026,polymarket,will-the-stock-market-crash-in-2026
+US recession (NBER),kalshi,KXRECSSNBER
+S&P 500 price level,kalshi,KXINX
+Fed emergency meeting,kalshi,KXFEDMEET
+Government shutdown,kalshi,GOVSHUT
+Debt ceiling crisis,kalshi,DCEIL
+Average US tariff rate,kalshi,KXAVGTARIFF
+China invades Taiwan,polymarket,will-china-invade-taiwan-before-2027

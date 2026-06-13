@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import sys
 import time
@@ -36,6 +37,15 @@ import yfinance as yf
 ROOT = Path(__file__).parent
 TRANSACTIONS_CSV = ROOT / "transactions.csv"
 LOG_XLSX = ROOT / "log.xlsx"           # Trading 212-style real transaction log
+
+# v2.4 weighting model. "equal" = each position is one unit (privacy-driven,
+# the author's default; no monetary scale). "value" = capital-weighted by real
+# share quantities (shares x price) — only meaningful when the source actually
+# carries real quantities (transactions.csv `shares`, or a quantity column in
+# log.xlsx). Override with the WEIGHT_MODE env var or `--weight value`.
+WEIGHT_MODE = os.environ.get("WEIGHT_MODE", "equal").strip().lower()
+if WEIGHT_MODE not in ("equal", "value"):
+    WEIGHT_MODE = "equal"
 TICKERS_CSV = ROOT / "tickers.csv"  # legacy fallback
 OUT_HTML = ROOT / "docs" / "index.html"
 HEAVY_JSON = ROOT / "docs" / "data" / "payload.json"  # v2.0 lazy-modal sidecar
@@ -339,12 +349,13 @@ for _lesson in POCKET_LESSONS:
     _lesson["category"] = _pocket_lesson_category(_lesson["title"])
 del _lesson
 
-# v2.1: 50-question quiz pool (medium difficulty, practical tone) covering
-# finance knowledge COMPLEMENTARY to the dashboard's own teaching — Pocket
-# Lesson covers what the dashboard surfaces; QUIZ_POOL covers what it doesn't:
-# market mechanics, corporate actions, fixed income / commodities / REITs,
-# derivatives, financial history & regulation. 10 questions per category,
-# all 3-option multiple choice with a 1-sentence explanation on reveal.
+# v2.1 / v2.4: 100-question quiz pool (practical tone) covering finance knowledge
+# COMPLEMENTARY to the dashboard's own teaching — Pocket Lesson covers what the
+# dashboard surfaces; QUIZ_POOL covers what it doesn't: market mechanics,
+# corporate actions, fixed income / commodities / REITs, derivatives, financial
+# history & regulation. 20 questions per category (the original 10 medium, plus
+# v2.4's 5 entry-level + 5 hard), all 3-option multiple choice with a 1-sentence
+# explanation on reveal.
 # Schema (per entry):
 #   id          - stable integer id (used by the seen-set in localStorage)
 #   category    - one of the 5 category labels (used by category filter chips)
@@ -353,6 +364,8 @@ del _lesson
 #   options     - list of 3 strings; one is correct, two are plausible distractors
 #   correct     - 0-indexed position of the correct option
 #   explanation - 1-sentence reveal text shown after the user answers
+#   difficulty  - "entry" | "medium" | "hard" (v2.4; original 50 are implicitly
+#                 "medium" and omit the field — default to medium when absent)
 QUIZ_POOL: list[dict] = [
     # ---- Market mechanics ----
     {"id": 1, "category": "Market mechanics", "format": "cloze",
@@ -609,8 +622,270 @@ QUIZ_POOL: list[dict] = [
      "options": ["The dot-com bubble's collapse", "Major accounting fraud at Enron and WorldCom", "The 9/11 terrorist attacks' impact on markets"],
      "correct": 1,
      "explanation": "SOX imposed strict accounting controls, CEO/CFO certification of financial statements, and criminal penalties for fraud; it also created the PCAOB to oversee auditors."},
+
+    # ===== v2.4: entry-level + hard tiers (5 entry + 5 hard per category) =====
+    # ---- Market mechanics: entry ----
+    {"id": 51, "category": "Market mechanics", "format": "cloze", "difficulty": "entry",
+     "question": "A stock's 'bid' price is the highest price ___.",
+     "options": ["a buyer is currently willing to pay", "a seller is asking to receive", "the stock last traded at"],
+     "correct": 0,
+     "explanation": "The bid is the best price buyers will pay and the ask is the best price sellers want; the gap between them is the spread."},
+    {"id": 52, "category": "Market mechanics", "format": "direct", "difficulty": "entry",
+     "question": "A 'market order' to buy a stock tells your broker to:",
+     "options": ["Buy only if the price first falls to a set level", "Buy immediately at the best available current price", "Buy at the day's official closing price"],
+     "correct": 1,
+     "explanation": "Market orders prioritise immediate execution over price, filling at whatever the best current offer is."},
+    {"id": 53, "category": "Market mechanics", "format": "cloze", "difficulty": "entry",
+     "question": "After its IPO, a company's shares trade between investors in the ___ market.",
+     "options": ["primary", "forward", "secondary"],
+     "correct": 2,
+     "explanation": "The IPO is the primary market where the company raises cash; all later investor-to-investor trading happens in the secondary market."},
+    {"id": 54, "category": "Market mechanics", "format": "direct", "difficulty": "entry",
+     "question": "A stock's daily trading 'volume' measures:",
+     "options": ["The number of shares traded that day", "The total market value of the company", "The number of people who own the stock"],
+     "correct": 0,
+     "explanation": "Volume counts shares traded in the session; higher volume usually means tighter spreads and easier entry and exit."},
+    {"id": 55, "category": "Market mechanics", "format": "cloze", "difficulty": "entry",
+     "question": "A 'ticker symbol' such as AAPL is ___.",
+     "options": ["the company's current stock price", "a measure of how volatile it is", "the unique short code identifying a listed security"],
+     "correct": 2,
+     "explanation": "Tickers are exchange-assigned shorthand so orders route to the correct security."},
+    # ---- Market mechanics: hard ----
+    {"id": 56, "category": "Market mechanics", "format": "direct", "difficulty": "hard",
+     "question": "'Payment for order flow' (PFOF) is:",
+     "options": ["A fee retail brokers pay an exchange to list orders", "Market makers paying brokers to route their clients' orders", "A government levy on high-frequency trades"],
+     "correct": 1,
+     "explanation": "Wholesalers pay brokers for their retail order flow and profit from the spread, which is how many brokers fund zero-commission trading."},
+    {"id": 57, "category": "Market mechanics", "format": "cloze", "difficulty": "hard",
+     "question": "Under US Reg NMS, an order must generally execute at the ___.",
+     "options": ["National Best Bid and Offer (NBBO)", "exchange with the highest daily volume", "investor's designated home exchange"],
+     "correct": 0,
+     "explanation": "The order-protection rule makes trades fill at the best displayed price across all exchanges (the NBBO), preventing trade-throughs."},
+    {"id": 58, "category": "Market mechanics", "format": "direct", "difficulty": "hard",
+     "question": "A 'market-on-close' (MOC) order is designed to:",
+     "options": ["Cancel any unfilled orders at the close", "Execute in the official closing auction", "Trade only in the after-hours session"],
+     "correct": 1,
+     "explanation": "MOC orders pool into the closing auction, which sets one price on heavy volume and is favoured by index funds tracking the close."},
+    {"id": 59, "category": "Market mechanics", "format": "cloze", "difficulty": "hard",
+     "question": "A 'locked market' occurs when the bid ___ the ask.",
+     "options": ["equals", "sits far below", "is exactly double"],
+     "correct": 0,
+     "explanation": "A locked market has bid equal to ask (crossed means bid above ask); both are abnormal and discouraged because they signal routing or fee quirks."},
+    {"id": 60, "category": "Market mechanics", "format": "direct", "difficulty": "hard",
+     "question": "Firms pay for 'co-location' (servers inside the exchange's data centre) mainly to:",
+     "options": ["Meet regulatory data-storage rules", "Cut their electricity costs", "Minimise latency for speed-sensitive strategies"],
+     "correct": 2,
+     "explanation": "Shaving microseconds off the round-trip matters for market-making and arbitrage, so firms pay to sit beside the exchange's matching engine."},
+    # ---- Corporate actions: entry ----
+    {"id": 61, "category": "Corporate actions", "format": "cloze", "difficulty": "entry",
+     "question": "A cash dividend is ___.",
+     "options": ["a share of profits paid out to shareholders", "a loan the company takes from investors", "a discount on buying additional shares"],
+     "correct": 0,
+     "explanation": "Dividends hand a slice of company profits to shareholders, usually quarterly, though not every company pays one."},
+    {"id": 62, "category": "Corporate actions", "format": "direct", "difficulty": "entry",
+     "question": "After a 2-for-1 stock split, a share that traded at £100 will trade at roughly:",
+     "options": ["£200 with half as many shares", "£50 with twice as many shares", "£100 with twice as many shares"],
+     "correct": 1,
+     "explanation": "A split multiplies the share count and divides the price proportionally, so the total value of your holding is unchanged."},
+    {"id": 63, "category": "Corporate actions", "format": "cloze", "difficulty": "entry",
+     "question": "An IPO (initial public offering) is when a company ___.",
+     "options": ["sells shares to the public for the first time", "buys back its own shares", "merges with a rival"],
+     "correct": 0,
+     "explanation": "An IPO takes a company from private to publicly traded, raising capital and giving early backers a way to cash out."},
+    {"id": 64, "category": "Corporate actions", "format": "direct", "difficulty": "entry",
+     "question": "To receive a declared dividend you must own the shares before the:",
+     "options": ["Payment date", "Ex-dividend date", "Announcement date"],
+     "correct": 1,
+     "explanation": "Buy on or after the ex-dividend date and the seller keeps the payout; the price typically drops by the dividend on that date."},
+    {"id": 65, "category": "Corporate actions", "format": "cloze", "difficulty": "entry",
+     "question": "A share buyback is when a company ___.",
+     "options": ["issues new shares to raise cash", "splits its existing stock", "buys its own shares back from the market"],
+     "correct": 2,
+     "explanation": "Buybacks return cash by shrinking the share count, which mechanically lifts earnings per share."},
+    # ---- Corporate actions: hard ----
+    {"id": 66, "category": "Corporate actions", "format": "direct", "difficulty": "hard",
+     "question": "After a tax-free spin-off, your original cost basis is:",
+     "options": ["Entirely assigned to the new spun-off shares", "Allocated between parent and spin-off by relative market value", "Reset to the spin-off day's closing price"],
+     "correct": 1,
+     "explanation": "Tax rules split your original basis across the parent and spun-off shares in proportion to their market values just after the split."},
+    {"id": 67, "category": "Corporate actions", "format": "cloze", "difficulty": "hard",
+     "question": "In a rights issue, the theoretical ex-rights price (TERP) is ___.",
+     "options": ["the weighted average of the old shares and the discounted new shares", "always exactly the subscription price", "the price the day before the rights were announced"],
+     "correct": 0,
+     "explanation": "TERP blends the old share price with the cheaper new shares, and holders who don't take up their rights are diluted toward that level."},
+    {"id": 68, "category": "Corporate actions", "format": "direct", "difficulty": "hard",
+     "question": "When a company pays a large 'special' dividend, listed option strike prices are usually:",
+     "options": ["Left unchanged", "Adjusted down by the dividend amount", "Doubled"],
+     "correct": 1,
+     "explanation": "The clearing house adjusts strikes for special (non-ordinary) dividends so option holders aren't wiped out by the price drop; ordinary dividends are not adjusted."},
+    {"id": 69, "category": "Corporate actions", "format": "cloze", "difficulty": "hard",
+     "question": "A Dutch-auction tender offer buys back shares at ___.",
+     "options": ["the lowest price that secures the desired number of shares", "a fixed premium fixed in advance", "the simple average of all submitted bids"],
+     "correct": 0,
+     "explanation": "Holders name prices within a range and the company pays the single lowest price that buys the shares it wants, to everyone who bid at or below it."},
+    {"id": 70, "category": "Corporate actions", "format": "direct", "difficulty": "hard",
+     "question": "A reverse stock split is most often used to:",
+     "options": ["Return surplus cash to shareholders", "Lift the share price to meet a listing minimum", "Increase the number of shares outstanding"],
+     "correct": 1,
+     "explanation": "Consolidating shares (e.g. 1-for-10) raises the quoted price to avoid delisting, without changing the company's underlying value."},
+    # ---- Beyond equities: entry ----
+    {"id": 71, "category": "Beyond equities", "format": "cloze", "difficulty": "entry",
+     "question": "A bond's 'coupon' is ___.",
+     "options": ["the periodic interest it pays the holder", "the price you pay to buy it", "the date it matures"],
+     "correct": 0,
+     "explanation": "The coupon is the fixed interest a bond pays, usually semi-annually, until it matures and repays the principal."},
+    {"id": 72, "category": "Beyond equities", "format": "direct", "difficulty": "entry",
+     "question": "A REIT (real estate investment trust) lets investors:",
+     "options": ["Own physical property directly and tax-free", "Invest in income-producing real estate via a tradable share", "Borrow cheaply against their home"],
+     "correct": 1,
+     "explanation": "REITs hold portfolios of property and must pay out most of their income as dividends, giving stock-like access to real estate."},
+    {"id": 73, "category": "Beyond equities", "format": "cloze", "difficulty": "entry",
+     "question": "An ETF (exchange-traded fund) is ___.",
+     "options": ["a single government bond", "a type of savings account", "a basket of securities that trades like one stock"],
+     "correct": 2,
+     "explanation": "ETFs bundle many holdings (often an index) into one ticker that trades intraday, typically at low cost."},
+    {"id": 74, "category": "Beyond equities", "format": "direct", "difficulty": "entry",
+     "question": "Gold is called a 'safe-haven' asset because investors tend to buy it:",
+     "options": ["When equity markets are booming", "During market stress or high inflation", "Only when interest rates are rising"],
+     "correct": 1,
+     "explanation": "Gold carries no credit risk and has historically held value in crises, so demand often rises when confidence in other assets falls."},
+    {"id": 75, "category": "Beyond equities", "format": "cloze", "difficulty": "entry",
+     "question": "A government bond is generally ___ than a corporate bond of the same maturity.",
+     "options": ["lower risk", "higher risk", "far more volatile"],
+     "correct": 0,
+     "explanation": "Sovereigns borrowing in their own currency rarely default, so government bonds usually yield less than riskier corporate debt."},
+    # ---- Beyond equities: hard ----
+    {"id": 76, "category": "Beyond equities", "format": "direct", "difficulty": "hard",
+     "question": "A bond with higher 'duration' will:",
+     "options": ["Pay a higher coupon", "Fall more in price when interest rates rise", "Mature sooner"],
+     "correct": 1,
+     "explanation": "Duration measures price sensitivity to rates; a bond with seven-year duration loses roughly 7% if yields rise one percentage point."},
+    {"id": 77, "category": "Beyond equities", "format": "cloze", "difficulty": "hard",
+     "question": "A futures market is in 'contango' when ___.",
+     "options": ["futures prices sit above the spot price", "the spot price sits above futures", "storage is free"],
+     "correct": 0,
+     "explanation": "Contango (futures above spot) reflects storage and carrying costs, so continually rolling long futures bleeds value over time."},
+    {"id": 78, "category": "Beyond equities", "format": "direct", "difficulty": "hard",
+     "question": "REIT investors track 'FFO' (funds from operations) instead of net income because it:",
+     "options": ["Strips out rental revenue", "Adds back property depreciation", "Ignores all interest expense"],
+     "correct": 1,
+     "explanation": "Property depreciation is a big non-cash charge that understates a REIT's cash earnings, so FFO adds it back to net income."},
+    {"id": 79, "category": "Beyond equities", "format": "cloze", "difficulty": "hard",
+     "question": "An 'inverted yield curve' (short-term yields above long-term) has historically ___.",
+     "options": ["preceded many US recessions", "reliably signalled strong growth ahead", "meant nothing for the economy"],
+     "correct": 0,
+     "explanation": "Inversion implies markets expect rate cuts into a slowdown; the 10-year-minus-2-year spread is a closely watched recession signal."},
+    {"id": 80, "category": "Beyond equities", "format": "direct", "difficulty": "hard",
+     "question": "'Convexity' in bonds describes:",
+     "options": ["The curvature in the price/yield relationship that duration alone misses", "A bond's credit rating tier", "How often the bond pays coupons"],
+     "correct": 0,
+     "explanation": "Duration is only a straight-line estimate; convexity captures that prices rise more when yields fall than they drop when yields rise."},
+    # ---- Derivatives: entry ----
+    {"id": 81, "category": "Derivatives", "format": "cloze", "difficulty": "entry",
+     "question": "A call option gives the holder the right to ___ the underlying at the strike price.",
+     "options": ["buy", "sell", "short"],
+     "correct": 0,
+     "explanation": "A call is the right, not the obligation, to buy at the strike, so you exercise it when the stock is above that price."},
+    {"id": 82, "category": "Derivatives", "format": "direct", "difficulty": "entry",
+     "question": "A put option gives the holder the right to:",
+     "options": ["Buy the stock at the strike price", "Sell the stock at the strike price", "Collect the stock's dividend"],
+     "correct": 1,
+     "explanation": "A put is the right to sell at the strike, so it gains value as the underlying falls and can act as portfolio insurance."},
+    {"id": 83, "category": "Derivatives", "format": "cloze", "difficulty": "entry",
+     "question": "The 'strike price' of an option is ___.",
+     "options": ["the premium paid for the option", "the underlying's current market price", "the price at which the option can be exercised"],
+     "correct": 2,
+     "explanation": "The strike is the fixed buy or sell price written into the contract, and its distance from the spot drives the option's value."},
+    {"id": 84, "category": "Derivatives", "format": "direct", "difficulty": "entry",
+     "question": "The 'premium' of an option is:",
+     "options": ["The profit locked in at expiration", "The price paid to buy the contract", "The strike minus the stock price"],
+     "correct": 1,
+     "explanation": "The premium is the upfront price of the contract, made up of intrinsic value plus time value."},
+    {"id": 85, "category": "Derivatives", "format": "cloze", "difficulty": "entry",
+     "question": "One standard US equity option contract represents ___ shares.",
+     "options": ["10", "100", "1,000"],
+     "correct": 1,
+     "explanation": "One standard contract controls 100 shares, so a $2 premium costs $200 plus fees."},
+    # ---- Derivatives: hard ----
+    {"id": 86, "category": "Derivatives", "format": "direct", "difficulty": "hard",
+     "question": "An option with a 'delta' of 0.5 should move about:",
+     "options": ["50 cents for every $1 move in the stock", "Half a percent in value each day", "50% of its value by expiration"],
+     "correct": 0,
+     "explanation": "Delta is how much the option price moves per $1 move in the stock; around 0.5 is typical for an at-the-money option."},
+    {"id": 87, "category": "Derivatives", "format": "cloze", "difficulty": "hard",
+     "question": "'Theta' measures an option's ___.",
+     "options": ["sensitivity to volatility", "sensitivity to interest rates", "loss of value as time passes"],
+     "correct": 2,
+     "explanation": "Theta is time decay: all else equal an option loses a little value each day, and the bleed accelerates near expiry."},
+    {"id": 88, "category": "Derivatives", "format": "direct", "difficulty": "hard",
+     "question": "Put-call parity links a call and put of the same strike and expiry via:",
+     "options": ["A requirement that the call always cost more than the put", "A fixed relationship involving the stock price and the discounted strike", "Forcing both premiums to be equal"],
+     "correct": 1,
+     "explanation": "Call minus put equals stock minus the present value of the strike; sizeable violations open up riskless arbitrage."},
+    {"id": 89, "category": "Derivatives", "format": "cloze", "difficulty": "hard",
+     "question": "'IV crush' is when ___ falls sharply right after an event like earnings.",
+     "options": ["implied volatility", "the underlying's share price", "total open interest"],
+     "correct": 0,
+     "explanation": "Implied volatility inflates premiums ahead of a known event and collapses once it passes, which can hurt option buyers even when they pick the direction."},
+    {"id": 90, "category": "Derivatives", "format": "direct", "difficulty": "hard",
+     "question": "The maximum profit on a long call (debit) vertical spread is:",
+     "options": ["Unlimited", "The width between strikes minus the net premium paid", "The premium you received"],
+     "correct": 1,
+     "explanation": "Buying a lower-strike call and selling a higher one caps the upside at the strike width minus the net premium paid."},
+    # ---- History & regs: entry ----
+    {"id": 91, "category": "History & regs", "format": "cloze", "difficulty": "entry",
+     "question": "The S&P 500 is ___.",
+     "options": ["an index of 500 large US companies", "a single large technology stock", "a US government bond"],
+     "correct": 0,
+     "explanation": "It's a market-cap-weighted index of 500 large US companies, the standard benchmark for US large-cap performance."},
+    {"id": 92, "category": "History & regs", "format": "direct", "difficulty": "entry",
+     "question": "The main job of the US Securities and Exchange Commission (SEC) is to:",
+     "options": ["Set the country's interest rates", "Regulate securities markets and protect investors", "Print the currency"],
+     "correct": 1,
+     "explanation": "The SEC enforces disclosure and anti-fraud rules in securities markets; monetary policy is the Federal Reserve's job."},
+    {"id": 93, "category": "History & regs", "format": "cloze", "difficulty": "entry",
+     "question": "A 'bull market' is a period of ___ prices.",
+     "options": ["generally falling", "broadly flat", "generally rising"],
+     "correct": 2,
+     "explanation": "A bull market is a sustained rise; a bear market is a sustained fall (commonly 20% or more) — the terms describe direction and sentiment."},
+    {"id": 94, "category": "History & regs", "format": "direct", "difficulty": "entry",
+     "question": "In the US, FDIC insurance protects:",
+     "options": ["Stock investments against market losses", "Bank deposits up to a set limit per depositor", "Corporate bonds against default"],
+     "correct": 1,
+     "explanation": "The FDIC insures bank deposits (currently $250,000 per depositor, per bank) but does not cover investment losses."},
+    {"id": 95, "category": "History & regs", "format": "cloze", "difficulty": "entry",
+     "question": "The Federal Reserve influences the economy mainly by ___.",
+     "options": ["setting interest-rate policy", "approving company IPOs", "auditing public companies' accounts"],
+     "correct": 0,
+     "explanation": "The Fed sets the policy interest rate and steers the money supply to pursue stable prices and maximum employment."},
+    # ---- History & regs: hard ----
+    {"id": 96, "category": "History & regs", "format": "direct", "difficulty": "hard",
+     "question": "The Volcker Rule (part of Dodd-Frank) primarily restricts banks from:",
+     "options": ["Paying dividends to shareholders", "Proprietary trading with their own capital", "Offering basic checking accounts"],
+     "correct": 1,
+     "explanation": "The rule bars deposit-taking banks from speculative proprietary trading to limit risk-taking with insured funds."},
+    {"id": 97, "category": "History & regs", "format": "cloze", "difficulty": "hard",
+     "question": "Basel III is an international framework that raised banks' ___ requirements.",
+     "options": ["capital and liquidity", "advertising", "dividend-payout"],
+     "correct": 0,
+     "explanation": "After 2008, Basel III forced banks to hold more high-quality capital and bigger liquidity buffers to absorb shocks."},
+    {"id": 98, "category": "History & regs", "format": "direct", "difficulty": "hard",
+     "question": "The May 2010 'Flash Crash' was notable because the market:",
+     "options": ["Closed for a week", "Plunged about 9% and largely rebounded within minutes", "Was triggered by a major bank failure"],
+     "correct": 1,
+     "explanation": "Automated selling cascaded into a near-1,000-point Dow drop and a rapid rebound, prompting today's single-stock circuit breakers."},
+    {"id": 99, "category": "History & regs", "format": "cloze", "difficulty": "hard",
+     "question": "Long-Term Capital Management collapsed in 1998 mainly due to ___.",
+     "options": ["excessive leverage on convergence trades", "a large accounting fraud", "an insider-trading scandal"],
+     "correct": 0,
+     "explanation": "LTCM's enormous leverage turned small, correlated losses after Russia's default into a systemic threat, forcing a Fed-organised rescue."},
+    {"id": 100, "category": "History & regs", "format": "direct", "difficulty": "hard",
+     "question": "The Gramm-Leach-Bliley Act (1999) is significant because it:",
+     "options": ["Created the SEC", "Repealed much of Glass-Steagall, letting commercial and investment banking recombine", "Introduced market-wide circuit breakers"],
+     "correct": 1,
+     "explanation": "It tore down the Depression-era wall between commercial and investment banking, reshaping the modern financial-services industry."},
 ]
-assert len(QUIZ_POOL) == 50, f"QUIZ_POOL has {len(QUIZ_POOL)} entries (expected 50)"
+assert len(QUIZ_POOL) == 100, f"QUIZ_POOL has {len(QUIZ_POOL)} entries (expected 100)"
 
 # Universe - large-cap reference list for the industry outlook section.
 # Refreshed monthly (file-mtime TTL); daily builds reuse cached results.
@@ -663,19 +938,66 @@ NEWS_WORKER_URL = "https://stocks-dashboard-news.newpov.workers.dev/news"
 # --------------------------------------------------------------------------
 # Data layer
 # --------------------------------------------------------------------------
-def load_transactions() -> pd.DataFrame:
-    """Load and validate transactions.csv (ticker, date, action, shares).
+# v2.4: broker-agnostic column aliases so a forker can drop in most brokers'
+# CSV exports with little/no editing. The canonical schema is still
+# ticker,date,action[,shares]; these just map common header variants onto it.
+_TXN_COL_ALIASES = {
+    "ticker": ["ticker", "symbol", "instrument", "stock", "security"],
+    "date":   ["date", "time", "trade date", "executed at", "datetime", "settled"],
+    "action": ["action", "type", "side", "transaction type", "activity", "buy/sell"],
+    "shares": ["shares", "quantity", "qty", "no. of shares", "no of shares", "units", "amount"],
+}
 
-    Each row is a single BUY or SELL event. The script aggregates these per
-    ticker into positions, looking up prices from yfinance for the transaction
-    dates so cost basis is consistent with the daily price data.
+
+def _normalize_txn_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Rename whatever header variants are present to the canonical names."""
+    lower = {str(c).lower().strip(): c for c in df.columns}
+    rename = {}
+    for canon, aliases in _TXN_COL_ALIASES.items():
+        for a in aliases:
+            if a in lower and lower[a] not in rename:
+                rename[lower[a]] = canon
+                break
+    return df.rename(columns=rename)
+
+
+def _normalize_action(v) -> str:
+    """Map free-text action values onto BUY / SELL (or '' to drop). Handles
+    bare single-letter broker codes ("B"/"S") as well as phrases."""
+    s = str(v).strip().lower()
+    if s in ("b", "buy") or any(k in s for k in ("buy", "bought", "purchase")):
+        return "BUY"
+    if s in ("s", "sell") or any(k in s for k in ("sell", "sold", "sale", "disposal")):
+        return "SELL"
+    return ""
+
+
+def load_transactions() -> pd.DataFrame:
+    """Load and validate transactions.csv.
+
+    Canonical schema: ``ticker, date, action`` (+ optional ``shares``). v2.4
+    tolerates common broker header variants (symbol/quantity/side/...) and
+    free-text actions ("Market buy", "Sold", "B"). With no ``shares`` column
+    every row counts as one unit, which is exactly what equal-weight wants.
+
+    Each row is a single BUY or SELL event, aggregated per ticker into positions
+    with prices looked up from yfinance for the transaction dates.
     """
     df = pd.read_csv(TRANSACTIONS_CSV)
+    df = _normalize_txn_columns(df)
+    missing = {"ticker", "date", "action"} - set(df.columns)
+    if missing:
+        raise ValueError(
+            f"transactions.csv is missing required column(s): {sorted(missing)}. "
+            f"Accepted header names per field: {_TXN_COL_ALIASES}")
     df["ticker"] = df["ticker"].astype(str).str.strip().str.upper()
     df = df[df["ticker"] != ""].copy()
     df["date"] = pd.to_datetime(df["date"], errors="coerce")
-    df["action"] = df["action"].astype(str).str.strip().str.upper()
-    df["shares"] = pd.to_numeric(df["shares"], errors="coerce").fillna(0.0)
+    df["action"] = df["action"].map(_normalize_action)
+    if "shares" in df.columns:
+        df["shares"] = pd.to_numeric(df["shares"], errors="coerce").fillna(0.0)
+    else:
+        df["shares"] = 1.0   # no quantity column -> one unit per row
     df = df[df["action"].isin(["BUY", "SELL"])]
     df = df[df["shares"] > 0]
     df = df.dropna(subset=["date"])
@@ -841,8 +1163,16 @@ def load_transactions_from_log() -> tuple[pd.DataFrame, pd.DataFrame]:
     tracked = tracked.dropna(subset=["date"])
     tracked = tracked[tracked["ticker"] != ""]
 
-    # Each broker entry = 1 unit (fractional-share platforms hide the qty).
-    tracked["shares"] = 1.0
+    # Each broker entry = 1 unit by default (fractional-share platforms hide the
+    # qty). v2.4: if the export carries a real quantity column, read it so the
+    # opt-in value-weight mode has real sizes; equal mode ignores it anyway.
+    _qty_col = next((c for c in ("no. of shares", "no of shares", "shares",
+                                 "quantity", "qty", "units") if c in df.columns), None)
+    if _qty_col:
+        tracked["shares"] = pd.to_numeric(tracked[_qty_col], errors="coerce").fillna(1.0)
+        tracked.loc[tracked["shares"] <= 0, "shares"] = 1.0
+    else:
+        tracked["shares"] = 1.0
 
     out = tracked[["ticker", "date", "action", "shares"]].copy()
     out = out.sort_values(["ticker", "date"]).reset_index(drop=True)
@@ -1030,7 +1360,7 @@ def _pred_http_get_json(url: str, timeout: int = 12):
         return None
 
 
-def _parse_kalshi_market(m: dict, theme: str) -> dict | None:
+def _parse_kalshi_market(m: dict, theme: str, series_ticker: str | None = None) -> dict | None:
     yb = _pred_num(m.get("yes_bid_dollars"))
     ya = _pred_num(m.get("yes_ask_dollars"))
     if yb == yb and ya == ya and (yb > 0 or ya > 0):
@@ -1039,7 +1369,11 @@ def _parse_kalshi_market(m: dict, theme: str) -> dict | None:
         prob = yb * 100
     else:
         return None
+    # Link to the stable series landing page (e.g. /markets/kxfed) rather than the
+    # raw event-ticker path, which Kalshi's slug router 404s on. Derive the series
+    # from the explicit key, else from the event-ticker prefix.
     ev = str(m.get("event_ticker") or "").strip()
+    series = (series_ticker or ev.split("-")[0] or "").strip().lower()
     return {
         "theme": theme,
         "question": str(m.get("title") or "").strip(),
@@ -1048,11 +1382,12 @@ def _parse_kalshi_market(m: dict, theme: str) -> dict | None:
         "volume": _pred_num(m.get("volume_fp")) if m.get("volume_fp") is not None
                   else (_pred_num(m.get("volume")) or 0.0),
         "end_date": str(m.get("expiration_time") or ""),
-        "url": f"https://kalshi.com/markets/{ev}" if ev else None,
+        "url": f"https://kalshi.com/markets/{series}" if series else None,
     }
 
 
-def _kalshi_pick_active(markets: list[dict], theme: str) -> dict | None:
+def _kalshi_pick_active(markets: list[dict], theme: str,
+                        series_ticker: str | None = None) -> dict | None:
     """Among a series' markets, pick the soonest market whose expiry is in the
     future (the currently-relevant one), parse it, return the record."""
     now = pd.Timestamp.now(tz="UTC")
@@ -1065,7 +1400,7 @@ def _kalshi_pick_active(markets: list[dict], theme: str) -> dict | None:
             best, best_ts = m, ts
     if best is None:
         return None
-    return _parse_kalshi_market(best, theme)
+    return _parse_kalshi_market(best, theme, series_ticker)
 
 
 def fetch_kalshi(themes: list[dict]) -> list[dict]:
@@ -1078,7 +1413,7 @@ def fetch_kalshi(themes: list[dict]) -> list[dict]:
         markets = (data or {}).get("markets") if isinstance(data, dict) else None
         if not markets:
             continue
-        rec = _kalshi_pick_active(markets, t["theme"])
+        rec = _kalshi_pick_active(markets, t["theme"], t["key"])
         if rec:
             out.append(rec)
     return out
@@ -1778,15 +2113,40 @@ def _baseline_price(series: pd.Series, baseline_date: pd.Timestamp) -> float | N
     return float(sub.iloc[-1])
 
 
-def build_positions(transactions: pd.DataFrame, prices: pd.DataFrame) -> pd.DataFrame:
+def _synthesize_watchlist_transactions(watchlist: pd.DataFrame,
+                                       prices: pd.DataFrame) -> pd.DataFrame:
+    """Watchlist-only mode: treat each watched ticker as a single equal unit
+    'held' from the start of its price window, so the normal positions pipeline
+    renders per-ticker analytics and an equal-weight watchlist performance line —
+    no real trades required."""
+    if watchlist is None or watchlist.empty:
+        return pd.DataFrame(columns=["ticker", "date", "action", "shares"])
+    rows = []
+    for tkr in watchlist.ticker.tolist():
+        if tkr not in prices.columns:
+            continue
+        s = prices[tkr].dropna()
+        if s.empty:
+            continue
+        rows.append({"ticker": tkr, "date": s.index[0], "action": "BUY", "shares": 1.0})
+    return pd.DataFrame(rows, columns=["ticker", "date", "action", "shares"])
+
+
+def build_positions(transactions: pd.DataFrame, prices: pd.DataFrame,
+                    mode: str | None = None) -> pd.DataFrame:
     """Aggregate transactions into positions using average-cost accounting.
 
     Output column names mirror the old returns shape (baseline, baseline_date,
     latest, total_pct, ...) so the render layer keeps working; new columns
     (shares_held, status, total_invested, ...) extend the schema.
+
+    ``mode`` (default = WEIGHT_MODE): "equal" collapses each position to one unit
+    (privacy-driven, no monetary scale); "value" keeps real share quantities and
+    capital-weights by shares x price.
     """
     if transactions.empty:
         return pd.DataFrame()
+    mode = (mode or WEIGHT_MODE)
     latest_date = prices.index[-1]
     rows: list[dict] = []
     for tkr, txns in transactions.groupby("ticker"):
@@ -1805,17 +2165,18 @@ def build_positions(transactions: pd.DataFrame, prices: pd.DataFrame) -> pd.Data
 
         buys = txns[txns.action == "BUY"]
         sells = txns[txns.action == "SELL"]
-        total_bought = float(buys.shares.sum())
-        total_sold = float(sells.shares.sum())
-        shares_held = total_bought - total_sold
-        if total_bought <= 0:
+        n_buys = int(len(buys))
+        n_sells = int(len(sells))
+        raw_bought = float(buys.shares.sum())    # raw row count (each row = 1 unit)
+        raw_sold = float(sells.shares.sum())
+        if raw_bought <= 0:
             continue
 
-        avg_buy_price = float((buys.shares * buys.price).sum() / total_bought)
-        total_invested = float((buys.shares * buys.price).sum())
-        total_received = float((sells.shares * sells.price).sum()) if total_sold > 0 else 0.0
-        avg_sell_price = (float((sells.shares * sells.price).sum() / total_sold)
-                          if total_sold > 0 else float("nan"))
+        # Average-cost basis straight from the rows (each row is 1 unit, so this
+        # reduces to the simple mean buy / sell price).
+        avg_buy_price = float((buys.shares * buys.price).sum() / raw_bought)
+        avg_sell_price = (float((sells.shares * sells.price).sum() / raw_sold)
+                          if raw_sold > 0 else float("nan"))
 
         first_buy_date = pd.Timestamp(buys.date.min())
         last_action_date = pd.Timestamp(txns.date.max())
@@ -1828,6 +2189,31 @@ def build_positions(transactions: pd.DataFrame, prices: pd.DataFrame) -> pd.Data
         # misclassify or require real per-row share quantities we don't have.
         last_action = str(txns.iloc[-1].action).upper()
         status = "closed" if last_action == "SELL" else "open"
+
+        if mode == "value":
+            # Capital weighting from real share quantities (shares x price). Only
+            # meaningful when the source carries real sizes; on a 1-unit-per-row
+            # source this degenerates to row-count x price (the KLAC artifact).
+            total_bought = raw_bought
+            total_sold = raw_sold
+            shares_held = raw_bought - raw_sold
+            total_invested = float((buys.shares * buys.price).sum())
+            total_received = float((sells.shares * sells.price).sum()) if raw_sold > 0 else 0.0
+            weight = total_invested if status == "open" else 0.0
+        else:
+            # v2.4 equal weight (default): collapse every position to ONE unit,
+            # regardless of how many broker rows it carries. A stock split or
+            # heavy scale-in (e.g. KLAC logged as 10 share-grants) must not
+            # inflate this name's weight or, via cumulative-invested math, drag
+            # the whole basket return down. Open = 1 unit held; closed = that
+            # single unit sold. Raw counts (n_buys/n_sells) are display-only.
+            total_bought = 1.0
+            total_sold = 1.0 if status == "closed" else 0.0
+            shares_held = 1.0 if status == "open" else 0.0
+            total_invested = avg_buy_price            # per-unit cost basis (native ccy)
+            total_received = avg_sell_price if status == "closed" else 0.0
+            weight = 1.0 if status == "open" else 0.0
+
         realized_pnl = (avg_sell_price - avg_buy_price) * total_sold if total_sold > 0 else 0.0
         current_value = shares_held * latest
         current_cost = shares_held * avg_buy_price
@@ -1883,10 +2269,12 @@ def build_positions(transactions: pd.DataFrame, prices: pd.DataFrame) -> pd.Data
             "1m_pct": pct_back(30),
             "3m_pct": pct_back(90),
             "ytd_pct": ytd_pct,
-            "weight": total_invested if status == "open" else 0.0,
+            "weight": weight,
             "shares_held": shares_held,
             "total_bought": total_bought,
             "total_sold": total_sold,
+            "n_buys": n_buys,
+            "n_sells": n_sells,
             "total_invested": total_invested,
             "total_received": total_received,
             "avg_buy_price": avg_buy_price,
@@ -1907,25 +2295,13 @@ def build_positions(transactions: pd.DataFrame, prices: pd.DataFrame) -> pd.Data
     return pd.DataFrame(rows).set_index("ticker")
 
 
-def compute_basket_mtm_series(transactions: pd.DataFrame, prices: pd.DataFrame) -> pd.Series:
-    """Daily portfolio % return on cumulative capital deployed.
-
-    For each date t:
-        cum_invested(t) = Σ buy_shares × buy_price for buys up to t (capital put in)
-        cum_value(t)    = Σ active_shares(t) × price(t)  (currently-held market value)
-                         + Σ sell_shares × sell_price for sells up to t  (cash from sells)
-        return(t)       = (cum_value(t) − cum_invested(t)) / cum_invested(t)
-
-    This includes BOTH unrealized gain on held shares AND realized cash from
-    past sells, so closing a winning position doesn't make the line drop.
-    """
-    if transactions.empty:
-        return pd.Series(dtype=float)
-    p = prices.ffill()
-    dates = p.index
+def _basket_mtm_capital_weighted(transactions: pd.DataFrame, p: pd.DataFrame,
+                                 dates: pd.DatetimeIndex) -> pd.Series:
+    """value-mode basket: % return on cumulative capital deployed, marking held
+    shares to market and counting realized sell cash so closing a winner doesn't
+    drop the line. Needs real share quantities to be meaningful."""
     cum_invested = pd.Series(0.0, index=dates)
     cum_value = pd.Series(0.0, index=dates)
-
     for tkr, txns in transactions.groupby("ticker"):
         if tkr not in p.columns:
             continue
@@ -1933,11 +2309,6 @@ def compute_basket_mtm_series(transactions: pd.DataFrame, prices: pd.DataFrame) 
         txns = txns.sort_values("date").copy()
         txns["price"] = txns["date"].apply(lambda d: _txn_price(d, s.dropna()))
         txns = txns.dropna(subset=["price"])
-        if txns.empty:
-            continue
-
-        # Snap each transaction to the nearest trading day >= its date so we
-        # can place share/cash deltas onto the price-series index cleanly.
         snapped = []
         for _, row in txns.iterrows():
             snap = _snap_to_trading(pd.Timestamp(row["date"]), dates)
@@ -1948,37 +2319,82 @@ def compute_basket_mtm_series(transactions: pd.DataFrame, prices: pd.DataFrame) 
         if not snapped:
             continue
         snap_df = pd.DataFrame(snapped)
-
-        # Share delta: +shares on BUY, −shares on SELL. Cumsum across all dates
-        # gives the running net position at each trading day.
         sign = snap_df.action.map({"BUY": 1, "SELL": -1})
-        delta = (sign * snap_df.shares).groupby(snap_df.date).sum()
-        active_shares = delta.reindex(dates).fillna(0).cumsum()
-
-        # Cumulative buy cash (capital put in)
+        active_shares = (sign * snap_df.shares).groupby(snap_df.date).sum() \
+            .reindex(dates).fillna(0).cumsum()
         buys = snap_df[snap_df.action == "BUY"]
-        if not buys.empty:
-            buy_cash = (buys.shares * buys.price).groupby(buys.date).sum()
-            cum_buy = buy_cash.reindex(dates).fillna(0).cumsum()
-        else:
-            cum_buy = pd.Series(0.0, index=dates)
-
-        # Cumulative sell cash (proceeds — counts toward portfolio "value")
+        cum_buy = ((buys.shares * buys.price).groupby(buys.date).sum()
+                   .reindex(dates).fillna(0).cumsum()
+                   if not buys.empty else pd.Series(0.0, index=dates))
         sells = snap_df[snap_df.action == "SELL"]
-        if not sells.empty:
-            sell_cash = (sells.shares * sells.price).groupby(sells.date).sum()
-            cum_sell = sell_cash.reindex(dates).fillna(0).cumsum()
-        else:
-            cum_sell = pd.Series(0.0, index=dates)
-
-        # Active market value (currently-held shares marked to today's close)
-        active_value = active_shares * s
-        ticker_total_value = active_value.fillna(0) + cum_sell
-
+        cum_sell = ((sells.shares * sells.price).groupby(sells.date).sum()
+                    .reindex(dates).fillna(0).cumsum()
+                    if not sells.empty else pd.Series(0.0, index=dates))
         cum_invested = cum_invested.add(cum_buy, fill_value=0)
-        cum_value = cum_value.add(ticker_total_value, fill_value=0)
-
+        cum_value = cum_value.add((active_shares * s).fillna(0) + cum_sell, fill_value=0)
     return ((cum_value / cum_invested.replace(0, np.nan)) - 1).fillna(0) * 100
+
+
+def compute_basket_mtm_series(transactions: pd.DataFrame, prices: pd.DataFrame,
+                              mode: str | None = None) -> pd.Series:
+    """Daily basket return (%).
+
+    Default (``mode="equal"``, v2.4): every position counts once, no matter how
+    many transaction rows or how much capital it carries. Each ticker's return
+    series is rebased to its average buy price and frozen at the realized return
+    once closed (so closing a winner doesn't drop the line); the basket at date t
+    is the mean across positions active by t — a "how have my picks done, on
+    average" line no split / scale-in can distort.
+
+    ``mode="value"`` instead capital-weights by real share quantities (see
+    :func:`_basket_mtm_capital_weighted`).
+    """
+    if transactions.empty:
+        return pd.Series(dtype=float)
+    mode = (mode or WEIGHT_MODE)
+    p = prices.ffill()
+    dates = p.index
+    if mode == "value":
+        return _basket_mtm_capital_weighted(transactions, p, dates)
+    contribs: list[pd.Series] = []   # per-position return %, NaN before entry
+
+    for tkr, txns in transactions.groupby("ticker"):
+        if tkr not in p.columns:
+            continue
+        s = p[tkr]
+        ser = s.dropna()
+        if ser.empty:
+            continue
+        txns = txns.sort_values("date").copy()
+        txns["price"] = txns["date"].apply(lambda d: _txn_price(d, ser))
+        txns = txns.dropna(subset=["price"])
+        buys = txns[txns.action == "BUY"]
+        if buys.empty:
+            continue
+        avg_buy = float(buys.price.mean())
+        if avg_buy <= 0:
+            continue
+        entry = _snap_to_trading(pd.Timestamp(buys.date.min()), dates)
+        if entry is None:
+            continue
+
+        # Mark-to-market return relative to this position's average buy price.
+        r = (s / avg_buy - 1.0) * 100.0
+        sells = txns[txns.action == "SELL"]
+        closed = str(txns.iloc[-1].action).upper() == "SELL" and not sells.empty
+        if closed:
+            exit_date = _snap_to_trading(pd.Timestamp(sells.date.max()), dates)
+            if exit_date is not None:
+                realized = (float(sells.price.mean()) / avg_buy - 1.0) * 100.0
+                r.loc[r.index >= exit_date] = realized   # freeze at realized return
+        r.loc[r.index < entry] = np.nan                  # not in the basket before entry
+        contribs.append(r)
+
+    if not contribs:
+        return pd.Series(0.0, index=dates)
+    # Equal-weight: mean across the positions that are active on each date.
+    basket = pd.concat(contribs, axis=1).mean(axis=1, skipna=True)
+    return basket.fillna(0.0)
 
 
 def compute_benchmark_series(bench: pd.Series, start_date: pd.Timestamp) -> pd.Series:
@@ -2227,7 +2643,7 @@ def compute_quant_metrics(ohlcv_native: pd.DataFrame, fx: pd.DataFrame,
 
 
 def compute_contributors(returns_df: pd.DataFrame) -> pd.DataFrame:
-    """Contribution in percentage points to the current weighted-basket return."""
+    """Contribution in percentage points to the equal-weight basket return."""
     in_basket = returns_df[returns_df.weight > 0].copy()
     total_w = in_basket.weight.sum()
     if total_w == 0:
@@ -2446,8 +2862,8 @@ def render_table(returns: pd.DataFrame, weekly: pd.DataFrame, meta: pd.DataFrame
             if ccy != BASE_CCY else ""
         )
         weight_badge = (
-            f'<span class="badge-weight" title="{r.shares_held:g} units held '
-            f'({int(r.total_bought)} buys, {int(r.total_sold)} sells)">{r.shares_held:g} u</span>'
+            f'<span class="badge-weight" title="1 equal-weight unit '
+            f'&middot; {r.n_buys} buys, {r.n_sells} sells">1 u</span>'
             if r.status == "open" else
             '<span class="badge-closed" title="Position closed">CLOSED</span>'
         )
@@ -2586,7 +3002,8 @@ def render_chart_grid(returns: pd.DataFrame, weekly: pd.DataFrame, meta: pd.Data
             if ccy != BASE_CCY else ""
         )
         weight_badge = (
-            f'<span class="badge-weight" title="{r.shares_held:g} units held">{r.shares_held:g} u</span>'
+            f'<span class="badge-weight" title="1 equal-weight unit '
+            f'&middot; {r.n_buys} buys, {r.n_sells} sells">1 u</span>'
             if r.status == "open" else
             '<span class="badge-closed" title="Position closed">CLOSED</span>'
         )
@@ -2615,9 +3032,9 @@ def render_contributors(contrib: pd.DataFrame, meta: pd.DataFrame, n: int = 5) -
 
     def _row(tkr, r):
         ind = _esc(_industry_label(meta, tkr))
-        # Contributors WT column now shows cost basis (£ amount actually invested
-        # in this position) rather than the old unitless weight.
-        cost_str = f"{BASE_SYMBOL}{r.weight:,.0f}"
+        # "Cost basis" column shows the per-unit avg buy price (each position is
+        # one equal-weight unit as of v2.4); contribution below is equal-weight.
+        cost_str = f"{BASE_SYMBOL}{r.total_invested:,.0f}"
         return (
             f'<tr data-ticker="{tkr}">'
             f'<td class="ct-tkr">{tkr}<div class="ct-ind">{ind}</div></td>'
@@ -2711,7 +3128,7 @@ def render_detractors_strategy(contrib: pd.DataFrame, returns: pd.DataFrame,
     rows = []
     for tkr, r in bot.iterrows():
         ind = _esc(_industry_label(meta, tkr))
-        cost_str = f"{BASE_SYMBOL}{r.weight:,.0f}"
+        cost_str = f"{BASE_SYMBOL}{r.total_invested:,.0f}"   # per-unit cost basis
         # Technical signal
         if tkr in signals.index:
             sig = signals.loc[tkr]
@@ -3196,10 +3613,10 @@ def build_industry_attribution(returns: pd.DataFrame, meta: pd.DataFrame,
     """Aggregate the user's OPEN positions by industry to show which industries
     drive the basket return up or down.
 
-    Each row's "contribution to basket" is its cost-weighted return share —
-    (industry_cost / basket_cost) * industry_avg_return. Sum across all
-    industries equals the basket return (modulo tiny rounding from individual
-    weights). Returns (rows_sorted_by_contribution_desc, basket_avg_return).
+    Each row's "contribution to basket" is its equal-weight return share —
+    (industry_n / basket_n) * industry_avg_return. Sum across all industries
+    equals the basket return (modulo tiny rounding). Each position counts once
+    (v2.4). Returns (rows_sorted_by_contribution_desc, basket_avg_return).
     """
     if returns.empty:
         return [], 0.0
@@ -3213,22 +3630,22 @@ def build_industry_attribution(returns: pd.DataFrame, meta: pd.DataFrame,
          if t in meta.index else "") or "Other"
         for t in open_pos.index
     ]
-    total_cost = float(open_pos["weight"].sum())
-    if total_cost <= 0:
+    total_w = float(open_pos["weight"].sum())   # equal-weight => count of open names
+    if total_w <= 0:
         return [], 0.0
-    # Basket-wide cost-weighted average return — anchor for "vs basket avg"
-    basket_avg = float((open_pos["weight"] * open_pos["total_pct"]).sum() / total_cost)
+    # Basket-wide equal-weight average return — anchor for "vs basket avg"
+    basket_avg = float((open_pos["weight"] * open_pos["total_pct"]).sum() / total_w)
     rows = []
     for industry, g in open_pos.groupby("industry"):
-        ind_cost = float(g["weight"].sum())
-        if ind_cost <= 0:
+        ind_w = float(g["weight"].sum())
+        if ind_w <= 0:
             continue
-        ind_avg = float((g["weight"] * g["total_pct"]).sum() / ind_cost)
-        contrib = (ind_cost / total_cost) * ind_avg   # pp contribution to basket
+        ind_avg = float((g["weight"] * g["total_pct"]).sum() / ind_w)
+        contrib = (ind_w / total_w) * ind_avg   # pp contribution to basket
         rows.append({
             "industry": industry,
             "n_holdings": int(len(g)),
-            "cost_basis": ind_cost,
+            "cost_basis": float(g["total_invested"].sum()),  # per-unit £ cost basis (display)
             "avg_return": ind_avg,
             "contribution_pp": contrib,
             "vs_basket": ind_avg - basket_avg,
@@ -3286,8 +3703,8 @@ def render_industry_attribution(rows: list[dict], basket_avg: float) -> str:
     return f"""<section class="attribution-section">
   <div class="ia-head-row">
     <h3>Industry attribution <span class="muted">({len(rows)})</span></h3>
-    <p class="muted">Cost-weighted contribution to your basket return, grouped by industry —
-    open positions only. Basket weighted-avg return: <strong>{basket_avg:+.2f}%</strong>.
+    <p class="muted">Equal-weight contribution to your basket return, grouped by industry —
+    open positions only. Basket equal-weight avg return: <strong>{basket_avg:+.2f}%</strong>.
     Bars show each industry's signed contribution to the basket; longer = bigger driver.</p>
   </div>
   <div class="ia-scroll">
@@ -3308,12 +3725,14 @@ def render_industry_attribution(rows: list[dict], basket_avg: float) -> str:
 
 
 def compute_currency_exposure(returns: pd.DataFrame, meta: pd.DataFrame) -> list[dict]:
-    """v1.9 #3: aggregate open-position cost basis by currency.
+    """v1.9 #3 / v2.4: equal-weight currency mix of open positions.
 
-    Each open position contributes its `total_invested` (already in base ccy)
-    to its native currency bucket. Returns a list of dicts sorted by share desc:
+    Each open position counts once (one equal-weight unit) toward its native
+    currency bucket, so the split reflects how many of your names sit in each
+    currency rather than how much capital — consistent with the equal-weight
+    basket. Returns dicts sorted by share desc:
 
-        [{"ccy": "USD", "ccy_symbol": "$", "invested": 12345.0,
+        [{"ccy": "USD", "ccy_symbol": "$", "invested": 14.0,
           "share": 0.62, "n": 14}, ...]
 
     Empty list when there are no open positions.
@@ -3326,11 +3745,9 @@ def compute_currency_exposure(returns: pd.DataFrame, meta: pd.DataFrame) -> list
     buckets: dict[str, dict] = {}
     for tkr, r in open_pos.iterrows():
         ccy = ticker_currency(meta, tkr) or BASE_CCY
-        invested = float(r.total_invested) if pd.notna(r.total_invested) else 0.0
-        if invested <= 0:
-            continue
+        w = float(r.weight) if pd.notna(r.weight) and r.weight > 0 else 1.0
         b = buckets.setdefault(ccy, {"ccy": ccy, "invested": 0.0, "n": 0})
-        b["invested"] += invested
+        b["invested"] += w            # equal mode: 1 each; value mode: cost basis
         b["n"] += 1
     total = sum(b["invested"] for b in buckets.values())
     if total <= 0:
@@ -3392,7 +3809,7 @@ def render_currency_exposure(rows: list[dict]) -> str:
     top = rows[0]
     if top["share"] >= 0.80:
         note = (f'<span class="ccy-note">High concentration in {top["ccy"]} '
-                f'({top["share"] * 100:.0f}% of cost basis) &mdash; a stronger '
+                f'({top["share"] * 100:.0f}% of open positions) &mdash; a stronger '
                 f'home currency materially drags total return.</span>')
     elif len(rows) == 1:
         note = (f'<span class="ccy-note">All open positions are in {top["ccy"]}.</span>')
@@ -3975,14 +4392,17 @@ def _quadrant_signal_score(q, signal_label, row):
     return strength, direction
 
 
-def build_quadrant_data(returns, quant_metrics, signals) -> list[dict]:
-    """Per OPEN position: {ticker, weight_share (0..1), strength (0..100),
-    direction +/-1}."""
+def build_signal_strip_data(returns, quant_metrics, signals) -> list[dict]:
+    """Per OPEN position: {ticker, signal (-100..+100 bearish->bullish), ret (%)}.
+
+    v2.4: equal weight removed the old size/conviction axis, so this feeds a
+    one-dimensional beeswarm — each open name placed along a bearish<->bullish
+    technical-signal axis, coloured by its return. `signal` = direction x
+    strength from `_quadrant_signal_score`; `ret` is total return to date."""
     if returns is None or returns.empty:
         return []
     op = returns[returns.status == "open"]
-    total = float(op["weight"].sum()) if not op.empty else 0.0
-    if total <= 0:
+    if op.empty:
         return []
     out = []
     for tkr, row in op.iterrows():
@@ -3991,9 +4411,10 @@ def build_quadrant_data(returns, quant_metrics, signals) -> list[dict]:
         sig = (signals.loc[tkr, "signal"] if (signals is not None
                and tkr in signals.index) else "")
         strength, direction = _quadrant_signal_score(q, sig, row)
+        ret = _bb_num(row.get("total_pct"))
         out.append({"ticker": tkr,
-                    "weight_share": float(row["weight"]) / total,
-                    "strength": strength, "direction": direction})
+                    "signal": float(direction) * float(min(100.0, strength)),
+                    "ret": float(ret) if ret == ret else 0.0})
     return out
 
 
@@ -4028,8 +4449,9 @@ _BB_NONEQUITY_HINTS = ("bond", "treasury", "gilt", "gold", "silver", "commodity"
 
 
 def _basket_equity_share(returns: pd.DataFrame, meta: pd.DataFrame) -> float | None:
-    """Best-effort share of OPEN cost basis in equities (not bond/commodity/cash
-    ETFs), classified by sector/industry keywords. None if unknowable."""
+    """Best-effort share of OPEN positions in equities (not bond/commodity/cash
+    ETFs), classified by sector/industry keywords. Equal-weight (each open name
+    counts once). None if unknowable."""
     if returns is None or returns.empty:
         return None
     op = returns[returns.status == "open"]
@@ -4148,17 +4570,25 @@ def render_market_expectations(rows: list[dict], as_of_str: str) -> str:
         prob = r["probability"]
         d = r.get("delta_pp")
         if d is None:
-            delta_html = '<span class="me-delta me-flat">&middot;</span>'
+            delta_html = '<span class="me-delta me-flat">&middot;</span>'   # no prior build
+        elif abs(d) < 0.5:
+            delta_html = '<span class="me-delta me-flat">0pp</span>'        # tracked, unchanged
         else:
-            cls = "me-up" if d >= 0 else "me-down"
-            arrow = "&#9650;" if d >= 0 else "&#9660;"
+            cls = "me-up" if d > 0 else "me-down"
+            arrow = "&#9650;" if d > 0 else "&#9660;"
             delta_html = f'<span class="me-delta {cls}">{arrow} {abs(d):.0f}pp</span>'
-        label = (f'<a class="me-q" href="{_esc(r["url"])}" target="_blank" '
-                 f'rel="noopener noreferrer">{_esc(r["theme"])}</a>'
-                 if r.get("url") else
-                 f'<span class="me-q">{_esc(r["theme"])}</span>')
+        theme_html = (f'<a class="me-q" href="{_esc(r["url"])}" target="_blank" '
+                      f'rel="noopener noreferrer">{_esc(r["theme"])}</a>'
+                      if r.get("url") else
+                      f'<span class="me-q">{_esc(r["theme"])}</span>')
+        # The specific market question gives the % meaning ("Fed rate decision"
+        # alone is ambiguous; "...above 4.25% after Jun meeting? — 0%" is not).
+        q = (r.get("question") or "").strip()
+        if len(q) > 78:
+            q = q[:77].rstrip() + "…"
+        qsub = f'<span class="me-qsub">{_esc(q)}</span>' if q else ""
         items.append(
-            f'<div class="me-row">{label}'
+            f'<div class="me-row"><div class="me-q-wrap">{theme_html}{qsub}</div>'
             f'<span class="me-prob">{prob:.0f}%</span>{delta_html}'
             f'<span class="me-bar"><i style="width:{max(0, min(100, prob)):.0f}%"></i></span>'
             f'<span class="me-src">{_esc(r["source"])}</span></div>'
@@ -4167,51 +4597,74 @@ def render_market_expectations(rows: list[dict], as_of_str: str) -> str:
             '<div class="me-list">' + "".join(items) + '</div></section>')
 
 
-def render_quadrant(data: list[dict]) -> str:
-    """SVG scatter: x=signal strength (0..100), y=weight share, colour=direction.
-    Dots are clickable -> ticker modal. Renders nothing for <2 positions."""
+def render_signal_strip(data: list[dict]) -> str:
+    """Beeswarm: every open position placed along a bearish<->bullish technical
+    signal axis, jittered vertically so none overlap, coloured by return (green
+    up / red down). Dots are clickable + carry a hover tooltip. The extremes get
+    text labels. Renders nothing for <2 positions."""
     if not data or len(data) < 2:
         return ""
-    PX0, PX1, PY0, PY1 = 70, 860, 30, 400   # plot box (wide, fills the module)
-    max_w = max(d["weight_share"] for d in data) or 1.0
-    # Label only the most "interesting" dots (heavy weight OR extreme signal) so a
-    # 100+-position basket doesn't drown in overlapping labels. Rest stay as bare
-    # (still clickable) dots.
-    ranked = sorted(data, key=lambda d: -(0.6 * d["weight_share"] / max_w
-                                          + 0.4 * min(100.0, d["strength"]) / 100))
-    labelled = {d["ticker"] for d in ranked[:12]}
+    W, H = 920, 300
+    PX0, PX1, midY, R, GAP = 60, 880, 150, 7.0, 2.0
+    step = 2 * R + GAP
+    max_off = H / 2 - R - 26          # keep the swarm inside the band
+
+    def x_of(s):                      # signal -100..+100 -> px
+        return PX0 + (max(-100.0, min(100.0, s)) + 100) / 200 * (PX1 - PX0)
+
+    # Greedy beeswarm: sort by signal, then place each dot at the y closest to
+    # the centre line that doesn't collide with an already-placed neighbour.
+    placed = []                       # (x, y, d)
+    for d in sorted(data, key=lambda d: d["signal"]):
+        x = x_of(d["signal"])
+        y = midY
+        for k in range(0, 80):
+            done = False
+            for off in ((0,) if k == 0 else (k * step, -k * step)):
+                cand = midY + off
+                if abs(off) > max_off:
+                    continue
+                if not any(abs(px - x) < step and abs(py - cand) < step
+                           for px, py, _ in placed):
+                    y, done = cand, True
+                    break
+            if done:
+                break
+        placed.append((x, y, d))
+
+    # Label only the strongest few on each end so the strip stays clean.
+    label_tkrs = {d["ticker"] for d in sorted(data, key=lambda d: -abs(d["signal"]))[:6]}
     dots = []
-    for d in data:
-        cx = PX0 + (max(0.0, min(100.0, d["strength"])) / 100) * (PX1 - PX0)
-        cy = PY1 - (d["weight_share"] / max_w) * (PY1 - PY0)   # bigger weight = higher
-        r = 4 + (d["weight_share"] / max_w) * 7
-        cls = "dot-up" if d["direction"] >= 0 else "dot-down"
+    for x, y, d in placed:
+        cls = "dot-up" if d["ret"] >= 0 else "dot-down"
         tk = _esc(d["ticker"])
+        tone = "bullish" if d["signal"] >= 0 else "bearish"
+        tip = f'{d["ticker"]} · {tone} signal · {d["ret"]:+.1f}%'
         dots.append(
             f'<circle class="q-dot {cls} ticker-clickable" data-ticker="{tk}" '
-            f'cx="{cx:.1f}" cy="{cy:.1f}" r="{r:.1f}"></circle>'
+            f'cx="{x:.1f}" cy="{y:.1f}" r="{R:.0f}"><title>{_esc(tip)}</title></circle>'
         )
-        if d["ticker"] in labelled:
-            dots.append(f'<text class="q-tkr" x="{cx + r + 2:.1f}" y="{cy + 3:.1f}">{tk}</text>')
-    midx, midy = (PX0 + PX1) / 2, (PY0 + PY1) / 2
+        if d["ticker"] in label_tkrs:
+            anchor = "start" if d["signal"] >= 0 else "end"
+            dx = (R + 3) if d["signal"] >= 0 else -(R + 3)
+            dots.append(f'<text class="q-tkr" x="{x + dx:.1f}" y="{y + 3:.1f}" '
+                        f'text-anchor="{anchor}">{tk}</text>')
+    midX = (PX0 + PX1) / 2
     svg = (
-        '<svg viewBox="0 0 920 460" width="100%">'
-        f'<rect x="{PX0}" y="{PY0}" width="{PX1 - PX0}" height="{PY1 - PY0}" fill="rgba(0,0,0,.18)" stroke="var(--border)"/>'
-        f'<line x1="{midx:.0f}" y1="{PY0}" x2="{midx:.0f}" y2="{PY1}" stroke="var(--border)" stroke-dasharray="3,4"/>'
-        f'<line x1="{PX0}" y1="{midy:.0f}" x2="{PX1}" y2="{midy:.0f}" stroke="var(--border)" stroke-dasharray="3,4"/>'
-        f'<text class="q-q" x="{PX0 + 8}" y="{PY0 + 16}">Big bet &middot; quiet</text>'
-        f'<text class="q-q" x="{PX1 - 8}" y="{PY0 + 16}" text-anchor="end">Big bet &middot; active</text>'
-        f'<text class="q-q" x="{PX0 + 8}" y="{PY1 - 8}">Small &middot; quiet</text>'
-        f'<text class="q-q" x="{PX1 - 8}" y="{PY1 - 8}" text-anchor="end">Small &middot; active</text>'
-        f'<text class="q-ax" x="{midx:.0f}" y="{PY1 + 34}" text-anchor="middle">signal strength &#8594;</text>'
-        f'<text class="q-ax" x="26" y="{midy:.0f}" text-anchor="middle" transform="rotate(-90 26 {midy:.0f})">position weight &#8593;</text>'
+        f'<svg viewBox="0 0 {W} {H}" width="100%">'
+        f'<line x1="{PX0}" y1="{midY}" x2="{PX1}" y2="{midY}" stroke="var(--border)"/>'
+        f'<line x1="{midX:.0f}" y1="42" x2="{midX:.0f}" y2="{H - 42}" stroke="var(--border)" stroke-dasharray="3,4"/>'
+        f'<text class="q-q" x="{PX0}" y="{H - 12}">&#9664; bearish tape</text>'
+        f'<text class="q-q" x="{midX:.0f}" y="{H - 12}" text-anchor="middle">neutral</text>'
+        f'<text class="q-q" x="{PX1}" y="{H - 12}" text-anchor="end">bullish tape &#9654;</text>'
         + "".join(dots) + '</svg>'
     )
     return (
         '<section class="quadrant-section">'
-        '<div class="q-head"><h3>Conviction vs signal</h3>'
-        '<span class="q-sub">open positions &middot; size = weight, x = signal strength, '
-        'green = bullish &middot; only the standouts are labelled</span></div>' + svg + '</section>'
+        '<div class="q-head"><h3>Signal map</h3>'
+        '<span class="q-sub">each open position by technical signal &middot; '
+        'colour = return (green up / red down) &middot; hover or tap a dot</span></div>'
+        + svg + '</section>'
     )
 
 
@@ -4994,6 +5447,7 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
                 quant_metrics: pd.DataFrame | None = None,
                 ticker_news: pd.DataFrame | None = None,
                 demo_mode: bool = False,
+                watchlist_only: bool = False,
                 sortable_inline_js: str | None = None,
                 build_health: dict | None = None,
                 rating_moves: list[dict] | None = None,
@@ -5080,7 +5534,7 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     bigbrain_html = render_bigbrain(bigbrain_observations, latest_date,
                                     macro_html=_bb_macro_html, memory=bigbrain_memory)
     market_expectations_html = render_market_expectations(prediction_rows or [], latest_date)
-    quadrant_html = render_quadrant(build_quadrant_data(returns, quant_metrics, signals))
+    quadrant_html = render_signal_strip(build_signal_strip_data(returns, quant_metrics, signals))
 
     n_total = len(returns)
     n_open = int((returns.status == "open").sum()) if not returns.empty else 0
@@ -5330,23 +5784,21 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     n_wins = int((closed_positions["total_pct"] > 0).sum()) if n_closed_total else 0
     win_rate = (n_wins / n_closed_total * 100) if n_closed_total else 0.0
 
-    # T6: win/loss magnitude ratio. Headline = avg_win_£ / avg_loss_£.
-    # Unit caveat: pnl is approximated as total_invested * total_pct/100,
-    # which inherits whatever currency the underlying transactions table
-    # used (typically GBP for UK-domiciled T212). The RATIO is dimensionless
-    # so the headline number is correct regardless of currency mix; only
-    # the £ meta line is unit-approximate.
-    avg_win_pnl = 0.0
-    avg_loss_pnl = 0.0      # stored as a negative number
+    # T6 / v2.4: win/loss magnitude ratio, now EQUAL-WEIGHT. Each closed
+    # position contributes its RETURN (total_pct, %) rather than a £ amount, so
+    # no high-priced name dominates and nothing about position size leaks into
+    # the UI. Ratio = avg win % / avg loss %; dimensionless and currency-neutral.
+    avg_win_pct = 0.0
+    avg_loss_pct = 0.0      # stored as a negative number
     win_loss_ratio: float | None = None
     if not closed_positions.empty:
-        pnl = closed_positions["total_invested"] * closed_positions["total_pct"] / 100.0
+        pnl = closed_positions["total_pct"]
         wins   = pnl[pnl > 0]
         losses = pnl[pnl < 0]
-        avg_win_pnl  = float(wins.mean())   if len(wins)   > 0 else 0.0
-        avg_loss_pnl = float(losses.mean()) if len(losses) > 0 else 0.0
-        if avg_loss_pnl < 0 and len(wins) > 0:
-            win_loss_ratio = avg_win_pnl / abs(avg_loss_pnl)
+        avg_win_pct  = float(wins.mean())   if len(wins)   > 0 else 0.0
+        avg_loss_pct = float(losses.mean()) if len(losses) > 0 else 0.0
+        if avg_loss_pct < 0 and len(wins) > 0:
+            win_loss_ratio = avg_win_pct / abs(avg_loss_pct)
         elif len(wins) > 0 and len(losses) == 0:
             win_loss_ratio = float("inf")
         elif len(losses) > 0 and len(wins) == 0:
@@ -5367,10 +5819,10 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
             wlr_cls = "neg"
         else:
             wlr_cls = ""
-        wlr_meta_str = (f"{BASE_SYMBOL}{avg_win_pnl:,.0f} avg win &middot; "
-                        f"{BASE_SYMBOL}{abs(avg_loss_pnl):,.0f} avg loss")
+        wlr_meta_str = (f"{avg_win_pct:+.1f}% avg win &middot; "
+                        f"{avg_loss_pct:+.1f}% avg loss")
 
-    # 2. Cost-weighted average analyst upside across open positions. Uses the
+    # 2. Equal-weight average analyst upside across open positions. Uses the
     #    analyst cache directly (native ccy for both target and current_price,
     #    so the ratio is currency-neutral).
     open_positions = returns[returns.status == "open"] if not returns.empty else returns.iloc[0:0]
@@ -5470,7 +5922,9 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
         ("positions_open",  "Open positions",     f"{n_open}",                   "",                                 f"{n_closed} closed alongside"),
     ]
 
-    HERO_STATS_DEFAULT = ["annualized", "sharpe", "win_rate", "win_loss_ratio", "avg_upside"]
+    # v2.4: 'annualized' dropped from the default set — it duplicates the return
+    # the hero chart already shows. Still selectable in the stats picker.
+    HERO_STATS_DEFAULT = ["sharpe", "win_rate", "win_loss_ratio", "avg_upside"]
     _stats_default_csv = ",".join(HERO_STATS_DEFAULT)
     _stats_all_csv = ",".join(slug for (slug, *_rest) in _stats_registry)
 
@@ -5574,7 +6028,7 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
         ("rating_moves", "Rating moves", rating_moves_html),
         ("detractors", "Exit strategy", detractors_html),
         ("diversification", "Basket diversification", diversification_html),
-        ("quadrant", "Conviction vs signal", quadrant_html),
+        ("quadrant", "Signal map", quadrant_html),
         ("attribution", "Industry attribution", attribution_html),
         ("ccy_exposure", "Currency exposure", ccy_exposure_html),
         ("regret", "Regret tracker", regret_html),
@@ -5597,14 +6051,38 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
 
     # Top-of-page banner shown only on the public/demo build (when log.xlsx
     # isn't present). Makes "this is sample data" unmissable for visitors.
-    demo_banner_html = (
-        '<div class="demo-banner">'
-        '<span class="demo-banner-tag">DEMO MODE</span>'
-        '<span class="demo-banner-text">This is a sample portfolio for illustration &mdash; not real holdings. '
-        '<a href="https://github.com/newpov/stocks-dashboard" target="_blank" rel="noopener noreferrer">'
-        'Fork the repo</a> to run it with your own broker export.</span>'
-        '</div>'
-    ) if demo_mode else ''
+    if watchlist_only:
+        demo_banner_html = (
+            '<div class="demo-banner">'
+            '<span class="demo-banner-tag">WATCHLIST</span>'
+            '<span class="demo-banner-text">Tracking a watchlist &mdash; no positions; each ticker '
+            'is shown equal-weight from the start of its price window. '
+            '<a href="https://github.com/newpov/stocks-dashboard" target="_blank" rel="noopener noreferrer">'
+            'Fork the repo</a> to track your own.</span>'
+            '</div>'
+        )
+    elif demo_mode:
+        demo_banner_html = (
+            '<div class="demo-banner">'
+            '<span class="demo-banner-tag">DEMO MODE</span>'
+            '<span class="demo-banner-text">This is a sample portfolio for illustration &mdash; not real holdings. '
+            '<a href="https://github.com/newpov/stocks-dashboard" target="_blank" rel="noopener noreferrer">'
+            'Fork the repo</a> to run it with your own broker export.</span>'
+            '</div>'
+        )
+    else:
+        demo_banner_html = ''
+
+    # Hero eyebrow + title adapt to watchlist-only mode (no positions / P&L).
+    if watchlist_only:
+        hero_eyebrow = (f'{n_open} tracked <span class="dot">&middot;</span> watchlist '
+                        f'<span class="dot">&middot;</span> in {BASE_CCY}')
+        hero_h1 = 'Your <em>watchlist</em>'
+    else:
+        hero_eyebrow = (f'{n_open} open <span class="dot">&middot;</span> {n_closed} closed '
+                        f'<span class="dot">&middot;</span> first buy {first_purchase_str} '
+                        f'<span class="dot">&middot;</span> in {BASE_CCY}')
+        hero_h1 = 'The basket since <em>October &rsquo;24</em>'
 
     # SortableJS: either reference the vendored file (normal docs/index.html
     # build, served alongside docs/vendor/) or inline the whole library
@@ -6028,6 +6506,16 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
        become full-width stacked, matching the legacy mobile behavior. */
     #module-stack{{grid-template-columns:1fr}}
     #module-stack > .module.module-paired{{grid-column:1 / -1;min-height:auto;max-height:none}}
+    /* v2.4 mobile fix: a wide table (returns/holdings) forced the single grid
+       track to its min-content, blowing the whole page past the viewport and
+       clipping EVERY section (Big Brain included). min-width:0 lets the track
+       shrink so the inner scrollers (.table-scroll / .ia-scroll) scroll
+       instead; the hardcoded 2-col regret + diversification grids collapse to
+       one column; and the news feed is capped to half the screen height. */
+    #module-stack > .module{{min-width:0}}
+    .regret{{grid-template-columns:1fr !important}}
+    .regret-col,.div-card{{min-width:0}}
+    .news-list{{max-height:50vh !important;overflow-y:auto}}
   }}
   *{{box-sizing:border-box}}
   html,body{{margin:0;padding:0}}
@@ -6439,8 +6927,11 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     gap:12px;align-items:center;padding:9px 0;border-bottom:1px solid var(--border);
     font-family:var(--font-ui);font-size:12.5px}}
   .me-row:last-child{{border-bottom:none}}
-  .me-q{{color:var(--text);text-decoration:none}}
+  .me-q-wrap{{display:flex;flex-direction:column;gap:1px;min-width:0}}
+  .me-q{{color:var(--text);text-decoration:none;font-weight:600}}
   a.me-q:hover{{color:var(--accent);text-decoration:underline}}
+  .me-qsub{{font-family:var(--font-ui);font-size:10.5px;color:var(--text-dim);
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
   .me-prob{{font-family:var(--font-mono);font-weight:700;color:var(--text);text-align:right}}
   .me-delta{{font-family:var(--font-mono);font-size:11px;font-weight:600;text-align:right}}
   .me-up{{color:var(--up)}} .me-down{{color:var(--down)}} .me-flat{{color:var(--text-dim)}}
@@ -6470,15 +6961,20 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
   .q-dot:hover{{opacity:.75}}
   .q-dot.dot-up{{fill:var(--up)}} .q-dot.dot-down{{fill:var(--down)}}
   /* v2.3 "since your last visit" banner (client-side localStorage diff) */
-  #last-look{{display:flex;align-items:center;gap:12px;margin:18px 0 0;
-    padding:10px 14px;border:1px solid var(--border);border-left:3px solid var(--accent);
-    border-radius:9px;background:rgba(245,158,11,.06)}}
-  #last-look .ll-tag{{font-family:var(--font-mono);font-size:10px;font-weight:700;
+  /* v2.4: compact inline pill (was a full-width band that read as dead space).
+     The explicit display below would override the UA [hidden] rule, so restore
+     it — that latent bug showed an empty orange bar on first visits. */
+  #last-look{{display:inline-flex;align-items:center;gap:8px;margin:0 0 14px;max-width:100%;
+    padding:5px 9px 5px 13px;border:1px solid rgba(245,158,11,.4);
+    border-radius:999px;background:rgba(245,158,11,.07)}}
+  #last-look[hidden]{{display:none}}
+  #last-look .ll-tag{{font-family:var(--font-mono);font-size:9.5px;font-weight:700;
     letter-spacing:.06em;text-transform:uppercase;color:var(--accent);white-space:nowrap}}
-  #last-look .ll-body{{font-family:var(--font-ui);font-size:12.5px;color:var(--text-2)}}
+  #last-look .ll-body{{font-family:var(--font-ui);font-size:12px;color:var(--text-2);
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}}
   #last-look .ll-body b{{color:var(--text)}}
-  #last-look .ll-x{{margin-left:auto;background:none;border:none;color:var(--text-dim);
-    font-size:18px;cursor:pointer;line-height:1;padding:0 4px}}
+  #last-look .ll-x{{background:none;border:none;color:var(--text-dim);
+    font-size:15px;cursor:pointer;line-height:1;padding:0 2px}}
   #last-look .ll-x:hover{{color:var(--text)}}
   /* Full-width analyst section (re-entry ideas) below the main table */
   section.analyst-section{{margin:22px 0 8px}}
@@ -7241,8 +7737,8 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
 </div>
 
 <header>
-  <div class="eyebrow">{n_open} open <span class="dot">&middot;</span> {n_closed} closed <span class="dot">&middot;</span> first buy {first_purchase_str} <span class="dot">&middot;</span> in {BASE_CCY}</div>
-  <h1>The basket since <em>October &rsquo;24</em></h1>
+  <div class="eyebrow">{hero_eyebrow}</div>
+  <h1>{hero_h1}</h1>
 
   <div class="hero-chart-wrap">
     <div class="hero-chart-head">
@@ -7271,12 +7767,12 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     {stats_cards_html}
   </div>
 
+  <div id="last-look" hidden></div>
+
   <div class="build-info">
     <span class="live"></span>last close {latest_date} &middot; rebuilt {built}
   </div>
 </header>
-
-<div id="last-look" hidden></div>
 
 <div id="module-stack" data-default-order="{default_order_csv}">
 {module_stack_html}
@@ -9451,7 +9947,7 @@ refreshNewsFromWorker();
 """
 
 
-def main(demo: bool = False) -> None:
+def main(demo: bool = False, watchlist_only: bool = False) -> None:
     # --demo forces the public-facing sample build: never reads log.xlsx (even
     # if present), writes to repo-root demo.html, and inlines SortableJS so
     # the resulting file is fully self-contained (works opened from disk via
@@ -9459,7 +9955,11 @@ def main(demo: bool = False) -> None:
     # behaves as before: log.xlsx → docs/index.html with real data; absent →
     # transactions.csv fallback also into docs/index.html.
     t0 = time.time()
-    if not demo and LOG_XLSX.exists():
+    if watchlist_only:
+        print("Watchlist-only mode: ignoring log.xlsx / transactions.csv")
+        transactions = pd.DataFrame(columns=["ticker", "date", "action", "shares"])
+        untracked = pd.DataFrame()
+    elif not demo and LOG_XLSX.exists():
         print(f"Loading transactions from {LOG_XLSX}")
         transactions, untracked = load_transactions_from_log()
         if not untracked.empty:
@@ -9469,11 +9969,12 @@ def main(demo: bool = False) -> None:
         print(f"Loading transactions from {TRANSACTIONS_CSV}")
         transactions = load_transactions()
         untracked = pd.DataFrame()
-    n_txns = len(transactions)
-    n_buys = int((transactions.action == "BUY").sum())
-    n_sells = int((transactions.action == "SELL").sum())
-    print(f"  {n_txns} transactions ({n_buys} buys, {n_sells} sells) across "
-          f"{transactions.ticker.nunique()} tickers")
+    if not watchlist_only:
+        n_txns = len(transactions)
+        n_buys = int((transactions.action == "BUY").sum())
+        n_sells = int((transactions.action == "SELL").sum())
+        print(f"  {n_txns} transactions ({n_buys} buys, {n_sells} sells) across "
+              f"{transactions.ticker.nunique()} tickers")
 
     watchlist = load_watchlist()
     if not watchlist.empty:
@@ -9539,6 +10040,12 @@ def main(demo: bool = False) -> None:
     bench_df = convert_to_base(bench_native.to_frame(name=BENCHMARK), bench_meta, fx, base=BASE_CCY) \
                if not bench_native.empty else pd.DataFrame()
     bench = bench_df[BENCHMARK] if not bench_df.empty else pd.Series(dtype=float)
+
+    if watchlist_only:
+        transactions = _synthesize_watchlist_transactions(watchlist, prices)
+        print(f"  synthesized {len(transactions)} watchlist tickers as equal-weight "
+              f"positions (tracked from each ticker's window start)")
+        watchlist = watchlist.iloc[0:0]   # rendered as the basket, not a separate panel
 
     returns = build_positions(transactions, prices)
     returns_native = build_positions(transactions, prices_native)
@@ -9727,6 +10234,7 @@ def main(demo: bool = False) -> None:
                        quant_metrics=quant_metrics,
                        ticker_news=ticker_news,
                        demo_mode=demo or not LOG_XLSX.exists(),
+                       watchlist_only=watchlist_only,
                        sortable_inline_js=sortable_inline_js,
                        build_health=build_health,
                        rating_moves=rating_moves,
@@ -9750,5 +10258,15 @@ if __name__ == "__main__":
     parser.add_argument("--demo", action="store_true",
                         help="Force the standalone demo build (repo-root "
                              "demo.html, transactions.csv, inlined SortableJS).")
+    parser.add_argument("--weight", choices=["equal", "value"], default=None,
+                        help="Position weighting: 'equal' (default, one unit per "
+                             "position) or 'value' (capital-weighted by real share "
+                             "quantities). Overrides the WEIGHT_MODE env var.")
+    parser.add_argument("--watchlist-only", action="store_true",
+                        help="Build from watchlist.csv only (no positions): each "
+                             "ticker is tracked equal-weight from its window start. "
+                             "Lets someone use the dashboard with zero trade history.")
     args = parser.parse_args()
-    main(demo=args.demo)
+    if args.weight:
+        WEIGHT_MODE = args.weight   # module-level rebind; functions read this global
+    main(demo=args.demo, watchlist_only=args.watchlist_only)

@@ -140,6 +140,26 @@ def test_render_bigbrain_macro_silent_below_threshold():
     assert build.render_bigbrain_macro(None, 0.95) == ""
 
 
+def test_parse_kalshi_url_is_series_page():
+    m = {"title": "x", "yes_bid_dollars": "0.5", "yes_ask_dollars": "0.5",
+         "event_ticker": "KXFED-26JUL"}
+    rec = build._parse_kalshi_market(m, "Fed", series_ticker="KXFED")
+    assert rec["url"] == "https://kalshi.com/markets/kxfed"   # series page, lowercased
+    rec2 = build._parse_kalshi_market(m, "Fed")               # fall back to event prefix
+    assert rec2["url"] == "https://kalshi.com/markets/kxfed"
+
+
+def test_render_market_expectations_zero_delta_is_neutral():
+    rows = [{"theme": "Fed rate decision", "question": "Will rates be above 4.25%?",
+             "source": "kalshi", "probability": 50.0, "volume": 1.0, "end_date": "",
+             "url": "https://kalshi.com/markets/kxfed", "delta_pp": 0.0}]
+    html = build.render_market_expectations(rows, "12 Jun 2026")
+    assert "me-flat" in html                       # zero delta -> neutral
+    assert "me-up" not in html and "me-down" not in html
+    assert "Will rates be above 4.25%?" in html    # question subtitle shown
+    assert "me-qsub" in html
+
+
 def test_render_bigbrain_passes_macro_html():
     html = build.render_bigbrain([], "05 Jun 2026",
                                  macro_html='<div class="bb-macro">X</div>')
