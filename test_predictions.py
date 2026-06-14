@@ -29,7 +29,7 @@ def test_parse_kalshi_market():
     assert rec["theme"] == "Fed decision"
     assert abs(rec["probability"] - 72.0) < 0.01   # mid of 70/74 cents
     assert rec["volume"] == 50000.0
-    assert "kalshi.com" in rec["url"]
+    assert rec["url"] == "https://kalshi.com/markets/kxfed"   # series page, lowercased
 
 
 def test_parse_kalshi_no_price_returns_none():
@@ -123,7 +123,7 @@ def test_parse_polymarket_market():
     assert rec["source"] == "polymarket"
     assert abs(rec["probability"] - 18.0) < 0.01
     assert rec["volume"] == 250000.0
-    assert "polymarket.com" in rec["url"]
+    assert rec["url"] == "https://polymarket.com/event/will-it-crash"
 
 
 def test_render_bigbrain_macro_fires_above_threshold():
