@@ -45,9 +45,9 @@ yfinance closes.
 > lose money. Do your own research, or speak to a licensed adviser, before
 > acting on anything you see on this page.
 
-> **Built with Claude Opus 4.7.** The code, design decisions, prose
+> **Built with Claude Opus 4.8.** The code, design decisions, prose
 > commentary and this README were developed end-to-end in pair programming
-> with Anthropic's Claude Opus 4.7 model.
+> with Anthropic's Claude Opus model (initially Opus 4.7, now Opus 4.8).
 
 ---
 
@@ -272,12 +272,15 @@ one opens the ticker modal. Hides cleanly when nothing qualifies.
 
 The first module under the hero. Where every other section *displays* a metric,
 Big Brain *interprets* them: it reads the data the build already computes and
-surfaces the **four names where the most is happening this week**, as a
-full-width 2×2 of colour-coded cards.
+surfaces the names where the most is happening this week, as colour-coded cards.
+As of **v2.5** it carries up to **8 cards** (4 ideas + 4 owned), shown **2:2 per
+"couple"** with `‹ 1/2 ›` arrows that flip to the alternate pair — and each card
+shows the name's **current price in its native currency** (Engie → €, US names →
+$, UK → £), so the whole section is local-currency consistent.
 
-It's deliberately **discovery-led**. Two of the four slots are reserved for a
+It's deliberately **discovery-led**. Half the slots are reserved for a
 **universe-discovery lane** — names you *don't* own that are stacking signals —
-and two come from your live basket (a *sold* position can take a basket slot
+and half come from your live basket (a *sold* position can take a basket slot
 when it out-signals an open one). So the section answers "what should I be
 looking at, including things I'm missing?" rather than just restating the
 basket the rest of the page already covers.
@@ -323,14 +326,16 @@ above the board when a tracked prediction market moves ≥ 8pp build-over-build
 ### Market expectations — prediction-market sentiment (v2.3)
 
 A forward-looking *sentiment* layer the rest of the page lacks: implied
-probabilities from **Kalshi + Polymarket** for macro events that move the whole
-market. Each row is a curated theme — spanning **political / shock** events as
-of v2.4 (Fed decision, Fed emergency meeting, recession, S&P level, government
-shutdown, debt ceiling, tariffs, China–Taiwan) — showing the implied
-**probability %**, the underlying market **question** beneath the label so the %
-has meaning, a bar that mirrors it, the **change since the last build** (a 0pp
-change reads neutral, not red/green), and a source badge — sorted so the biggest
-movers surface first.
+probabilities from **Kalshi + Polymarket** for events that move the whole market.
+As of **v2.5** the pool is **20 markets** spanning macro (recession, rate cuts,
+CPI, GDP, unemployment, Bitcoin) **and political / geopolitical shocks** (Taiwan,
+Iran, Ukraine, China–India/Philippines, G7, Israel–Indonesia) — a deliberate move
+away from a handful of dull Fed-only rows. The panel shows **5 at a time** with a
+**Reshuffle** button that slides the window through the rest without repeats until
+the pool is exhausted, then wraps. Each row shows the implied **probability %**,
+the underlying market **question** beneath the label so the % has meaning, a bar
+that mirrors it, the **change since the last build** (a 0pp change reads neutral,
+not red/green), and a source badge — sorted so the biggest movers surface first.
 
 Curation is a single committed **`predictions.csv`**: a theme label, a `source`
 column (kalshi / polymarket), and the series ticker / market slug. The build
@@ -670,7 +675,7 @@ pattern for the same reason.
 stocks-dashboard/
 ├── README.md                          ← this file
 ├── LICENSE                            ← MIT
-├── CHANGELOG.md                       ← version history (v1.0 → v2.4)
+├── CHANGELOG.md                       ← version history (v1.0 → v2.5)
 ├── demo.html                          ← standalone self-contained demo (CI-rebuilt daily)
 ├── build.py                           ← the build pipeline
 ├── test_bigbrain.py                   ← pytest suite for Big Brain + signal map
@@ -997,9 +1002,9 @@ This project would not exist without:
   serverless platform hosting the optional RSS proxy.
 - **[feedparser](https://feedparser.readthedocs.io/)** — Python RSS / Atom
   parser used by the build-time news fetch.
-- **[Anthropic's Claude Opus 4.7](https://claude.com)** — the code,
+- **[Anthropic's Claude Opus 4.8](https://claude.com)** — the code,
   design decisions, prose commentary, and this README were developed
-  end-to-end in pair programming with Claude.
+  end-to-end in pair programming with Claude (initially Opus 4.7, now Opus 4.8).
 
 ---
 

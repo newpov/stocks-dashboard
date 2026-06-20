@@ -1,9 +1,21 @@
 theme_label,source,series_or_tag
-Fed rate decision,kalshi,KXFED
-US recession (NBER),kalshi,KXRECSSNBER
-S&P 500 price level,kalshi,KXINX
+US recession in 2026,kalshi,KXRECSSNBER
+Fed cuts rates before 2027,kalshi,KXRATECUT
+CPI inflation above 4.5%,kalshi,KXCPIYOY
+Monthly CPI surprise,kalshi,KXCPI
+Real GDP growth this quarter,kalshi,KXGDP
+Unemployment spike,kalshi,KXU3
 Fed emergency meeting,kalshi,KXFEDMEET
-Government shutdown,kalshi,GOVSHUT
-Debt ceiling crisis,kalshi,DCEIL
-Average US tariff rate,kalshi,KXAVGTARIFF
+Fed rate decision,kalshi,KXFED
+Bitcoin above $110k by year-end,kalshi,KXBTCMAXY
+World passes 2C of warming,kalshi,KXWARMING
+Zelenskyy and Putin meet,kalshi,KXZELENSKYPUTIN
 China invades Taiwan,polymarket,will-china-invade-taiwan-before-2027
+China-Taiwan military clash,polymarket,china-x-taiwan-military-clash-before-2027
+Iran builds a nuclear weapon,polymarket,iran-nuke-before-2027
+China-Philippines military clash,polymarket,china-x-philippines-military-clash-before-2027
+China-India military clash,polymarket,china-x-india-military-clash-by-december-31-2026
+Ukraine holds elections,polymarket,ukraine-election-held-by-december-31-2026-344-142
+US recognizes Russian Ukraine,polymarket,us-recognizes-russian-sovereignty-over-ukraine-before-2027
+Russia rejoins the G7,polymarket,will-russia-rejoin-the-g7-before-2027
+Israel-Indonesia normalize ties,polymarket,israel-and-indonesia-normalize-relations-by-december-31-2026-618-741

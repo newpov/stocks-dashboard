@@ -160,6 +160,25 @@ def test_render_market_expectations_zero_delta_is_neutral():
     assert "me-qsub" in html
 
 
+def _me_rows(n):
+    return [{"theme": f"T{i}", "question": "Will X happen?", "source": "kalshi",
+             "probability": 50.0, "volume": 1.0, "end_date": "",
+             "url": "https://kalshi.com/markets/x", "delta_pp": float(i)}
+            for i in range(n)]
+
+
+def test_render_market_expectations_reshuffle_when_many():
+    html = build.render_market_expectations(_me_rows(8), "12 Jun 2026")
+    assert "me-reshuffle" in html                       # button present
+    assert 'data-me-window="' in html                   # JS window hook
+    assert all(f"T{i}" in html for i in range(8))        # all rows in the DOM
+
+
+def test_render_market_expectations_no_reshuffle_when_few():
+    html = build.render_market_expectations(_me_rows(3), "12 Jun 2026")
+    assert "me-reshuffle" not in html                   # nothing to reshuffle
+
+
 def test_render_bigbrain_passes_macro_html():
     html = build.render_bigbrain([], "05 Jun 2026",
                                  macro_html='<div class="bb-macro">X</div>')

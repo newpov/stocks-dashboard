@@ -14,6 +14,59 @@ than a barely-working prototype.
 
 ---
 
+## v2.5 — Deeper market expectations, 8-card Big Brain, cap-weighted outlook · 20 June 2026
+
+A breadth-and-polish pass driven by use. **Market expectations** stopped showing
+the same handful of (often dull) Fed markets &mdash; the theme pool is now **20
+markets** spanning macro *and* geopolitics/shocks, with a **Reshuffle** button
+that cycles a 5-at-a-time window through them without repeats. **Big Brain**
+doubled to **8 cards** (4 ideas + 4 owned) browsable two-couples-at-a-time, now
+showing each name's **price in its native currency**. **Industry outlook** moved
+from a straight average to a **market-cap-weighted** one, and **Rating moves**
+stopped listing new ratings alphabetically.
+
+### Added
+- **Market expectations &mdash; Reshuffle + 20-theme pool** &mdash; `predictions.csv`
+  broadened from 8 to 20 markets: macro (recession, rate cuts, CPI, GDP,
+  unemployment, BTC) plus geopolitics/shocks (Taiwan, Iran, Ukraine, China&ndash;India/
+  Philippines, G7, Israel&ndash;Indonesia). `PRED_MAX_ROWS` 8&rarr;20; the panel renders
+  `PRED_WINDOW` (5) at a time and a **Reshuffle** button slides the window with no
+  repeats until the pool is exhausted, then wraps. (Demo renders from the committed
+  cache, now 20 rows.)
+- **Big Brain &mdash; 8 cards with couple-flip arrows** &mdash; the board now carries up
+  to 4 ideas + 4 owned (`_bb_merge_lanes` `n=8, per_lane=4`), shown 2:2 per "couple"
+  with `&lsaquo; 1/2 &rsaquo;` arrows that swap to the alternate pair.
+- **Big Brain &mdash; price on every card** &mdash; current price next to each ticker,
+  shown in the name's **native currency** (Engie &rarr; &euro;, US names &rarr; $,
+  UK &rarr; &pound;), reconstructed from the base price &divide; FX rate so the whole
+  section is local-currency consistent with the universe ideas.
+
+### Changed
+- **Industry outlook is market-cap-weighted** &mdash; the per-group 12-month return is
+  now `&Sigma;(ret &times; market_cap) / &Sigma; market_cap` (bigger companies count more),
+  not a straight mean that let a small, volatile name dominate. Falls back to the
+  simple mean if a group has no usable caps.
+- **Rating moves ordered by resulting rating** &mdash; target-price moves still lead
+  (by magnitude); the recommendation rows below now sort **strong buy &rarr; buy &rarr;
+  hold &rarr; sell &rarr; coverage-dropped** instead of alphabetically. Panel cap 8&rarr;12
+  so the ordered list stays visible on high-target-churn days.
+- **Hero title is dynamic** &mdash; "The basket since &lt;month&gt;" now derives from the
+  first transaction (was hardcoded "October &rsquo;24"), so a fork shows its own start.
+- **Attribution credits Opus 4.8** &mdash; footer reads "built with Claude Opus 4.8";
+  README body text updated 4.7&rarr;4.8 (notes 4.7 as the initial model).
+
+### Fixed
+- **Mobile: industry-attribution contribution bar renders** &mdash; it was
+  `display:none` below 900px, which hid the cell but not the column header, leaving
+  a blank column. The bar now renders compactly (120px) and rides the section's
+  existing horizontal scroll.
+
+### Tests
+- 91 passing (up from 78). New: market-cap weighting, native-currency cards,
+  rating-moves ordering, market-expectations reshuffle, 8-card pagination.
+
+---
+
 ## v2.4 — Equal-weight basket, value-weight mode, Signal map, mobile fix, +50 quiz · 13 June 2026
 
 A methodology pass and a readability pass. The basket is now **equal-weighted**

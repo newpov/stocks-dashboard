@@ -901,7 +901,8 @@ BIGBRAIN_LOG_CSV = ROOT / "data" / "bigbrain_log.csv"   # v2.3 Big Brain flag hi
 KALSHI_API = "https://api.elections.kalshi.com/trade-api/v2"
 POLYMARKET_API = "https://gamma-api.polymarket.com"
 PRED_VOLUME_FLOOR = 1000.0   # drop thin/noisy markets (source-native volume units)
-PRED_MAX_ROWS = 8
+PRED_MAX_ROWS = 20           # v2.5 #3: deepen the pool; render shows a window
+PRED_WINDOW = 5              # v2.5 #3: themes shown at once; "Reshuffle" cycles
 BB_MACRO_DELTA_PP = 8.0      # min |delta| (pp) for the Big Brain macro callout
 
 # How many candidates the analyst panel shows in total (the grid scrolls
@@ -1849,7 +1850,7 @@ def snapshot_prior_analyst() -> None:
 def compute_rating_moves(prior_path: Path,
                          current: pd.DataFrame,
                          min_target_pct: float = 5.0,
-                         max_results: int = 8) -> list[dict]:
+                         max_results: int = 12) -> list[dict]:
     """T9: diff prior vs current analyst cache, surface material moves.
 
     A "move" is one of:
@@ -1903,7 +1904,18 @@ def compute_rating_moves(prior_path: Path,
                 # always dominating large target moves).
                 "abs_pct": 10.0,
             })
-    moves.sort(key=lambda m: m["abs_pct"], reverse=True)
+    # v2.5 #4: target-price moves lead (by magnitude, unchanged); recommendation
+    # rows follow, ordered by the *resulting* rating strength (strong buy -> buy
+    # -> hold -> sell -> coverage-dropped), not alphabetically.
+    _rec_rank = {"strong_buy": 0, "buy": 1, "outperform": 1, "hold": 2,
+                 "neutral": 2, "underperform": 3, "sell": 3, "strong_sell": 4}
+
+    def _order(m):
+        if m["kind"] == "target":
+            return (0, -m["abs_pct"], m["ticker"])
+        rank = _rec_rank.get(str(m.get("after", "")).strip().lower(), 9)
+        return (1, rank, m["ticker"])
+    moves.sort(key=_order)
     return moves[:max_results]
 
 
@@ -4091,13 +4103,19 @@ def _bb_build_universe_observations(shortlist, quant_metrics, signals, analyst,
         score, raw, _ = _bb_score(flags)
         archetype = _bb_match_archetype({f["id"] for f in flags})
         tag, body = _bb_narrative(tkr, flags, archetype)
+        # Native price for the card (v2.5 #2). The universe is the S&P 500
+        # (universe.csv), so current_price is USD.
+        _px = _bb_num(outlook.loc[tkr].get("current_price")) \
+            if (outlook is not None and tkr in outlook.index) else float("nan")
         out.append({
             "ticker": tkr, "ownership": "idea", "severity": "good",
             # Neutral fallback tag: only an archetype (e.g. missing_idea from a
             # beats_your_sector match) earns the "Setup you're missing" claim.
             "title": tag if archetype else "On the radar", "body": body,
             "pills": [f["pill"] for f in sorted(flags, key=lambda f: -f["weight"])],
-            "cite": _bb_news_cite(items, now), "score": score, "raw": raw,
+            "cite": _bb_news_cite(items, now),
+            "price": (_px if _px == _px else None), "price_ccy": "$",
+            "score": score, "raw": raw,
         })
     out.sort(key=lambda c: (-c["score"], -c["raw"], c["ticker"]))
     return out
@@ -4206,6 +4224,22 @@ def _bb_narrative(tkr: str, flags: list[dict], archetype: str | None
     return tag, body
 
 
+def _bb_owned_price(base_px, ccy: str, fx) -> "tuple[float | None, str]":
+    """Owned-position price in its NATIVE currency, reconstructed from the
+    base-currency price and the latest FX rate (so GBp/pence never surface).
+    Falls back to base currency when no rate is available. (v2.5 #2b)"""
+    if base_px is None or base_px != base_px:
+        return None, BASE_SYMBOL
+    if ccy == BASE_CCY:
+        return float(base_px), BASE_SYMBOL
+    key = f"{ccy}{BASE_CCY}=X"
+    if fx is not None and hasattr(fx, "columns") and key in fx.columns:
+        rate = fx[key].dropna()
+        if len(rate) and float(rate.iloc[-1]) > 0:
+            return float(base_px) / float(rate.iloc[-1]), CCY_SYMBOLS.get(ccy, ccy + " ")
+    return float(base_px), BASE_SYMBOL
+
+
 def compute_bigbrain_observations(
     returns: pd.DataFrame,
     meta: pd.DataFrame,
@@ -4216,6 +4250,7 @@ def compute_bigbrain_observations(
     rating_moves: "list[dict] | None" = None,
     ticker_news: "pd.DataFrame | None" = None,
     universe_observations: "list[dict] | None" = None,
+    fx: "pd.DataFrame | None" = None,
 ) -> list[dict]:
     """Discovery board engine. Two lanes: universe ideas (passed in, Phase 2)
     and portfolio (open + sold). Returns up to 4: 2 per lane, backfilled."""
@@ -4265,6 +4300,11 @@ def compute_bigbrain_observations(
             score, raw, _ = _bb_score(flags)
             archetype = _bb_match_archetype({f["id"] for f in flags})
             tag, body = _bb_narrative(tkr, flags, archetype)
+            # v2.5 #2b: show the holding in its NATIVE currency (Engie -> EUR,
+            # US names -> USD) so the whole section is local-currency consistent
+            # with the universe ideas. Reconstructed from base price / FX rate.
+            _ccy = ticker_currency(meta, tkr)
+            _px, _px_ccy = _bb_owned_price(_bb_num(row.get("latest")), _ccy, fx)
             portfolio.append({
                 "ticker": tkr,
                 "ownership": "sold" if row.get("status") == "closed" else "held",
@@ -4272,13 +4312,15 @@ def compute_bigbrain_observations(
                 "title": tag, "body": body,
                 "pills": [f["pill"] for f in sorted(flags, key=lambda f: -f["weight"])],
                 "cite": _bb_news_cite(items, now),
+                "price": _px, "price_ccy": _px_ccy,
                 "score": score, "raw": raw,
             })
         portfolio.sort(key=lambda c: (-c["score"], -c["raw"], c["ticker"]))
 
     universe = list(universe_observations or [])
     universe.sort(key=lambda c: (-c["score"], -c.get("raw", 0), c["ticker"]))
-    return _bb_merge_lanes(universe, portfolio, n=4, per_lane=2)
+    # v2.5 #9: up to 8 cards (4 idea + 4 owned), rendered 2:2 per couple page.
+    return _bb_merge_lanes(universe, portfolio, n=8, per_lane=4)
 
 
 def _bb_merge_lanes(universe: list[dict], portfolio: list[dict],
@@ -4501,11 +4543,14 @@ _BB_OWN_BADGE = {"held": "held", "sold": "sold", "idea": "not owned"}
 
 def render_bigbrain(observations: list[dict], as_of_str: str, macro_html: str = "",
                     memory: dict | None = None) -> str:
-    """v2 discovery board: 2x2 of colour-coded cards (idea / held / sold)."""
+    """v2 discovery board: colour-coded cards (idea / held / sold). Up to 8
+    cards (4 idea + 4 owned) shown 2:2 per "couple", with arrows to flip
+    between couples (v2.5 #9)."""
+    n = len(observations)
     head = (
         '<div class="bb-head">'
         '<h3>Big Brain says</h3>'
-        '<span class="bb-sub">4 names punching above the noise this week</span>'
+        f'<span class="bb-sub">{n} name{"s" if n != 1 else ""} punching above the noise this week</span>'
         f'<span class="bb-asof">as of {as_of_str}</span>'
         '</div>'
     )
@@ -4513,8 +4558,8 @@ def render_bigbrain(observations: list[dict], as_of_str: str, macro_html: str = 
         body = ('<p class="bb-empty">Quiet week &mdash; nothing notable '
                 'stacking across your basket or the market right now.</p>')
         return f'<section class="bigbrain-section">{head}{macro_html}{body}</section>'
-    cards = []
-    for o in observations:
+
+    def render_card(o: dict) -> str:
         own = o.get("ownership", "held")
         tier = "idea" if own == "idea" else ("good" if own == "sold" else o["severity"])
         badge = _BB_OWN_BADGE.get(own, own)
@@ -4535,9 +4580,14 @@ def render_bigbrain(observations: list[dict], as_of_str: str, macro_html: str = 
             title = _esc(c["title"][:80] + ("…" if len(c["title"]) > 80 else ""))
             cite_html = (f'<a class="bb-cite" href="{_esc(c["link"])}" target="_blank" '
                          f'rel="noopener noreferrer">&#8599; {title}{pub}</a>')
-        cards.append(
+        # v2.5 #2: current price next to the ticker (base ccy for held/sold,
+        # native for universe ideas). Omitted when unavailable.
+        price = o.get("price")
+        price_html = (f'<span class="bb-price">{o.get("price_ccy", "")}{price:,.2f}</span>'
+                      if price is not None and price == price else "")
+        return (
             f'<div class="bb-card bb-tier-{tier}">'
-            f'<div class="bb-card-hd">{tkr_html}'
+            f'<div class="bb-card-hd">{tkr_html}{price_html}'
             f'<span class="bb-badge">{_esc(badge)}</span>'
             f'<span class="bb-tag">{_esc(o["title"])}</span></div>'
             f'<div class="bb-card-bd">'
@@ -4545,22 +4595,66 @@ def render_bigbrain(observations: list[dict], as_of_str: str, macro_html: str = 
             f'<div class="bb-pills">{pills}</div>'
             f'{mem_html}{cite_html}</div></div>'
         )
-    return (f'<section class="bigbrain-section">{head}{macro_html}'
-            f'<div class="bb-grid">{"".join(cards)}</div></section>')
+
+    # Split into "couples": each page = up to 2 ideas + 2 owned, so a page
+    # keeps the familiar 2x2 (ideas top row, owned bottom). Arrows flip pages.
+    ideas = [o for o in observations if o.get("ownership") == "idea"]
+    owned = [o for o in observations if o.get("ownership") != "idea"]
+    pages: list[list[dict]] = []
+    i = 0
+    while i * 2 < len(ideas) or i * 2 < len(owned):
+        page = ideas[i * 2:i * 2 + 2] + owned[i * 2:i * 2 + 2]
+        if page:
+            pages.append(page)
+        i += 1
+    if not pages:
+        pages = [observations]
+
+    if len(pages) == 1:
+        grid = f'<div class="bb-grid">{"".join(render_card(o) for o in pages[0])}</div>'
+        return f'<section class="bigbrain-section">{head}{macro_html}{grid}</section>'
+
+    page_divs = []
+    for pi, page in enumerate(pages):
+        active = " active" if pi == 0 else ""
+        page_divs.append(
+            f'<div class="bb-page{active}" data-page="{pi}">'
+            f'<div class="bb-grid">{"".join(render_card(o) for o in page)}</div></div>'
+        )
+    nav = (
+        '<div class="bb-nav">'
+        '<button type="button" class="bb-arrow bb-prev" aria-label="Previous set">&#8249;</button>'
+        f'<span class="bb-page-ind"><span class="bb-page-cur">1</span>&#8202;/&#8202;{len(pages)}</span>'
+        '<button type="button" class="bb-arrow bb-next" aria-label="Next set">&#8250;</button>'
+        '</div>'
+    )
+    return (f'<section class="bigbrain-section" data-bb-pages="{len(pages)}">{head}'
+            f'{macro_html}{nav}<div class="bb-pages">{"".join(page_divs)}</div></section>')
 
 
 def render_market_expectations(rows: list[dict], as_of_str: str) -> str:
     """Prediction-market sentiment: probability bars + since-last-build deltas,
-    sorted by |delta| desc. Source-attributed per row."""
-    head = (
-        '<div class="me-head"><h3>Market expectations</h3>'
-        '<span class="me-sub">what the crowd is pricing '
-        f'&middot; as of {as_of_str}</span></div>'
-    )
+    sorted by |delta| desc. Source-attributed per row. Shows PRED_WINDOW themes
+    at a time with a "Reshuffle" button that cycles through the rest without
+    repeats until exhausted (v2.5 #3)."""
     if not rows:
+        head = (
+            '<div class="me-head"><h3>Market expectations</h3>'
+            '<span class="me-sub">what the crowd is pricing '
+            f'&middot; as of {as_of_str}</span></div>'
+        )
         return ('<section class="market-expectations-section">' + head +
                 '<p class="me-empty">Tracking begins next build &mdash; first '
                 'snapshot of the prediction markets.</p></section>')
+    reshuffle = ('<button type="button" class="me-reshuffle" '
+                 'aria-label="Show other themes">&#8635; Reshuffle</button>'
+                 if len(rows) > PRED_WINDOW else '')
+    head = (
+        '<div class="me-head"><h3>Market expectations</h3>'
+        f'{reshuffle}'
+        '<span class="me-sub">what the crowd is pricing '
+        f'&middot; as of {as_of_str}</span></div>'
+    )
     legend = ('<p class="me-legend"><b>%</b> = market-implied probability '
               '&middot; the bar mirrors it &middot; '
               '<b>&#9650;/&#9660; pp</b> = change since the last build</p>')
@@ -4594,7 +4688,8 @@ def render_market_expectations(rows: list[dict], as_of_str: str) -> str:
             f'<span class="me-src">{_esc(r["source"])}</span></div>'
         )
     return ('<section class="market-expectations-section">' + head + legend +
-            '<div class="me-list">' + "".join(items) + '</div></section>')
+            f'<div class="me-list" data-me-window="{PRED_WINDOW}" '
+            f'data-me-total="{len(items)}">' + "".join(items) + '</div></section>')
 
 
 def render_signal_strip(data: list[dict]) -> str:
@@ -4806,9 +4901,14 @@ def build_industry_outlook(universe_outlook: pd.DataFrame | None,
         if ret_12m is None or pd.isna(ret_12m):
             continue
         up_val = row.get("upside")
+        mc_val = row.get("market_cap")
         records.append({
             "ticker": tkr, "industry": industry,
             "ret_12m": float(ret_12m),
+            # market cap drives the group's cap-weighted return (v2.5 #1); NaN
+            # when missing/non-positive so it drops out of the weighting.
+            "market_cap": (float(mc_val) if mc_val is not None and pd.notna(mc_val)
+                           and float(mc_val) > 0 else float("nan")),
             "upside": (None if up_val is None or pd.isna(up_val) else float(up_val)),
             "rec": str(row.get("recommendation") or ""),
             "n_an": int(row["num_analysts"]) if pd.notna(row.get("num_analysts")) else 0,
@@ -4823,7 +4923,15 @@ def build_industry_outlook(universe_outlook: pd.DataFrame | None,
     for ind, g in df.groupby("industry"):
         if len(g) < min_holdings:
             continue
-        avg_ret = float(g["ret_12m"].mean())
+        # v2.5 #1: market-cap-weighted average 12mo return — a bigger company
+        # moves the group number more (standard index-weighting). Falls back to
+        # the simple mean if no constituent has a usable market cap.
+        mc = g["market_cap"]
+        mask = mc > 0
+        if mask.any():
+            avg_ret = float((g.loc[mask, "ret_12m"] * mc[mask]).sum() / mc[mask].sum())
+        else:
+            avg_ret = float(g["ret_12m"].mean())
         # Top stocks per industry: prefer those with analyst upside, sort by
         # upside; tiebreak with 12mo return so non-covered names still appear
         # if there's room.
@@ -4882,7 +4990,8 @@ def render_industry_outlook(groups: list[dict], universe_size: int) -> str:
             f'title="Click to see every tracked ticker in {_esc(g["industry"])}">'
             f'<div class="io-head">'
             f'<div class="io-industry">{_esc(g["industry"])}</div>'
-            f'<div class="io-avg {avg_cls}">{g["avg_ret_12m"]:+.0f}% avg 12mo</div>'
+            f'<div class="io-avg {avg_cls}" title="Market-cap-weighted average 12-month return '
+            f'(bigger companies count more)">{g["avg_ret_12m"]:+.0f}% avg 12mo</div>'
             f'</div>'
             f'<div class="io-sub muted">{g["n_holdings"]} tracked stocks <span class="io-expand-hint">&rarr; see all</span></div>'
             f'<div class="io-stocks">{"".join(stock_rows)}</div>'
@@ -5510,6 +5619,7 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
         returns, meta, contrib=contrib, quant_metrics=quant_metrics,
         signals=signals, analyst=analyst, rating_moves=rating_moves,
         ticker_news=ticker_news, universe_observations=bb_universe_obs,
+        fx=fx,
     )
     # v2.3 memory: log today's flags + compute "since" notes (real build only)
     bigbrain_memory = {}
@@ -6082,7 +6192,10 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
         hero_eyebrow = (f'{n_open} open <span class="dot">&middot;</span> {n_closed} closed '
                         f'<span class="dot">&middot;</span> first buy {first_purchase_str} '
                         f'<span class="dot">&middot;</span> in {BASE_CCY}')
-        hero_h1 = 'The basket since <em>October &rsquo;24</em>'
+        # Dynamic so a fork shows its own first-buy month (e.g. "Dec '25"),
+        # not the author's hardcoded start. (v2.5 #7)
+        _since_label = first_purchase.strftime("%b") + " &rsquo;" + first_purchase.strftime("%y")
+        hero_h1 = f'The basket since <em>{_since_label}</em>'
 
     # SortableJS: either reference the vendored file (normal docs/index.html
     # build, served alongside docs/vendor/) or inline the whole library
@@ -6861,6 +6974,17 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
   .bb-empty{{font-family:var(--font-ui);font-size:13px;color:var(--text-dim);
     font-style:italic;margin:4px 0 0;line-height:1.5}}
   .bb-grid{{display:grid;grid-template-columns:repeat(2,1fr);gap:14px}}
+  /* v2.5 #9: couple pages + flip arrows */
+  .bb-page{{display:none}}
+  .bb-page.active{{display:block}}
+  .bb-nav{{display:flex;align-items:center;justify-content:flex-end;gap:8px;margin-bottom:10px}}
+  .bb-arrow{{cursor:pointer;background:var(--surface-2);border:1px solid var(--border);
+    color:var(--text);border-radius:7px;width:28px;height:26px;font-size:16px;line-height:1;
+    display:flex;align-items:center;justify-content:center;font-family:var(--font-mono);
+    transition:border-color .12s,color .12s}}
+  .bb-arrow:hover{{border-color:var(--accent);color:var(--accent)}}
+  .bb-page-ind{{font-family:var(--font-mono);font-size:11px;color:var(--text-dim);
+    min-width:34px;text-align:center}}
   .bb-card{{border:1px solid var(--border);border-radius:11px;overflow:hidden;
     background:var(--surface)}}
   .bb-card-hd{{padding:9px 14px;display:flex;align-items:center;gap:9px;
@@ -6873,6 +6997,8 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     letter-spacing:.04em;color:var(--text)}}
   .bb-ticker.ticker-clickable{{cursor:pointer}}
   .bb-ticker.ticker-clickable:hover{{color:var(--accent)}}
+  .bb-price{{font-family:var(--font-mono);font-size:11px;font-weight:600;
+    color:var(--text-2);letter-spacing:.01em}}
   .bb-badge{{font-family:var(--font-mono);font-size:9px;letter-spacing:.08em;
     text-transform:uppercase;color:var(--text-dim);border:1px solid var(--border);
     border-radius:4px;padding:1px 5px}}
@@ -6916,7 +7042,12 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     font-weight:400;color:var(--text);letter-spacing:-0.01em}}
   .me-head h3::before{{content:"\\1F4C8";margin-right:8px;font-size:15px}}
   .me-sub{{font-family:var(--font-mono);font-size:10px;color:var(--text-dim);
-    letter-spacing:.04em;text-transform:lowercase}}
+    letter-spacing:.04em;text-transform:lowercase;margin-left:auto}}
+  /* v2.5 #3: cycle through the deeper theme pool */
+  .me-reshuffle{{cursor:pointer;background:var(--surface-2);border:1px solid var(--border);
+    color:var(--text-2);border-radius:6px;font-size:11px;padding:3px 10px;
+    font-family:var(--font-mono);transition:border-color .12s,color .12s}}
+  .me-reshuffle:hover{{border-color:var(--accent);color:var(--accent)}}
   .me-legend{{font-family:var(--font-ui);font-size:11px;color:var(--text-dim);
     margin:0 0 10px;line-height:1.4}}
   .me-legend b{{color:var(--text-2);font-family:var(--font-mono);font-weight:600}}
@@ -7121,7 +7252,12 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
   .ia-bar-label.pos{{color:var(--up)}}
   .ia-bar-label.neg{{color:var(--down)}}
   @media (max-width:900px){{
-    .ia-bar{{display:none}}
+    /* v2.5 #5: render the bar on mobile (compact) instead of display:none,
+       which left an orphan "Contribution bar" header over a blank column.
+       The table sits in .ia-scroll (overflow-x:auto), so the narrower bar
+       just rides the horizontal scroll rather than breaking page width. */
+    .ia-bar{{width:120px;min-width:120px;padding:8px 6px}}
+    .ia-bar-label{{font-size:9.5px}}
     .ia-table th,.ia-table td{{padding:8px 6px;font-size:11.5px}}
   }}
 
@@ -7778,7 +7914,7 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
 {module_stack_html}
 </div>
 
-<footer>Built locally &middot; data via yfinance &middot; TWR basket vs SPY &middot; click any row for the full chart</footer>
+<footer>Built locally &middot; built with Claude Opus 4.8 &middot; data via yfinance &middot; TWR basket vs SPY &middot; click any row for the full chart</footer>
 {build_health_html}
 
 </div>
@@ -8857,6 +8993,42 @@ document.querySelectorAll('.wl-card, .an-card').forEach(card => {{
 }});
 document.querySelectorAll('.io-stock').forEach(row => {{
   row.addEventListener('click', () => openModal(row.dataset.ticker));
+}});
+// v2.5 #9: Big Brain "couple" pages -> arrows flip between alternate sets.
+document.querySelectorAll('.bigbrain-section[data-bb-pages]').forEach(sec => {{
+  const pages = Array.from(sec.querySelectorAll('.bb-page'));
+  if (pages.length < 2) return;
+  const ind = sec.querySelector('.bb-page-cur');
+  let cur = 0;
+  const show = i => {{
+    cur = (i + pages.length) % pages.length;
+    pages.forEach((p, idx) => p.classList.toggle('active', idx === cur));
+    if (ind) ind.textContent = (cur + 1);
+  }};
+  const prev = sec.querySelector('.bb-prev');
+  const next = sec.querySelector('.bb-next');
+  if (prev) prev.addEventListener('click', () => show(cur - 1));
+  if (next) next.addEventListener('click', () => show(cur + 1));
+}});
+// v2.5 #3: Market expectations "Reshuffle" -> slide a window over the deeper
+// theme pool, wrapping around (no repeats until the whole pool is exhausted).
+document.querySelectorAll('.market-expectations-section').forEach(sec => {{
+  const list = sec.querySelector('.me-list');
+  if (!list) return;
+  const win = parseInt(list.dataset.meWindow || '0', 10);
+  const rows = Array.from(list.querySelectorAll('.me-row'));
+  if (!win || rows.length <= win) return;
+  let start = 0;
+  const paint = () => rows.forEach((r, i) => {{
+    r.style.display = (i >= start && i < start + win) ? '' : 'none';
+  }});
+  paint();
+  const btn = sec.querySelector('.me-reshuffle');
+  if (btn) btn.addEventListener('click', () => {{
+    start += win;
+    if (start >= rows.length) start = 0;
+    paint();
+  }});
 }});
 // T9/T10: generic ticker-clickable handler. Anything bearing the class +
 // data-ticker opens the modal. Used by the rating-moves panel ticker spans
