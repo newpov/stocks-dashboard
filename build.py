@@ -905,6 +905,17 @@ PRED_MAX_ROWS = 20           # v2.5 #3: deepen the pool; render shows a window
 PRED_WINDOW = 5              # v2.5 #3: themes shown at once; "Reshuffle" cycles
 BB_MACRO_DELTA_PP = 8.0      # min |delta| (pp) for the Big Brain macro callout
 
+# v2.6 Value screen — quality+value names trading near their 52-week low.
+# All thresholds are tunable. Filter #1 (near-low) is a required gate; #2-#6 are
+# scored; a name needs VALUE_MIN_PASS of 6 to appear.
+VALUE_NEAR_LOW_PCT = 10.0    # gate: within this % of the 52-week range bottom
+VALUE_MIN_ROE      = 0.10    # #4 profitability (ROE; ROIC proxy)
+VALUE_MAX_DE       = 1.5     # #6 balance sheet (debt/equity below this)
+VALUE_MIN_PASS     = 6       # need >= this many of the 6 filters (strict all-6)
+VALUE_MAX_ROWS     = 20      # cap; rendered in pages of VALUE_PAGE
+VALUE_PAGE         = 10      # rows shown per page (arrows flip to the next set)
+VALUE_MIN_SECTOR_N = 3       # #2 sector-median P/E needs >= this many priced peers
+
 # How many candidates the analyst panel shows in total (the grid scrolls
 # internally past ~6 visible). Safety cap for very large closed-position lists.
 ANALYST_TOP_N = 50
@@ -1571,7 +1582,11 @@ def fetch_universe_outlook(universe: list[str], meta_cache: pd.DataFrame,
         if len(s) < 30:
             continue
         ret_12m = (float(s.iloc[-1]) / float(s.iloc[0]) - 1) * 100 if s.iloc[0] else 0.0
-        rows.append({"ticker": tkr, "ret_12m": ret_12m})
+        # v2.6 Value screen: where today's price sits in the 52-week range
+        # (0 = at the low, 100 = at the high) — the "near 52w low" trigger.
+        lo, hi = float(s.min()), float(s.max())
+        range52w = ((float(s.iloc[-1]) - lo) / (hi - lo) * 100) if hi > lo else float("nan")
+        rows.append({"ticker": tkr, "ret_12m": ret_12m, "range52w_pct": range52w})
 
     if not rows:
         print("WARN universe outlook: no usable price series", file=sys.stderr)
@@ -1590,6 +1605,15 @@ def fetch_universe_outlook(universe: list[str], meta_cache: pd.DataFrame,
         if t in meta_cache.index else ""
         for t in df.index
     ]
+    # v2.6 Value screen needs the broad sector (for sector-median P/E) + a name.
+    df["sector"] = [
+        str(meta_cache.loc[t, "sector"] or "") if t in meta_cache.index else ""
+        for t in df.index
+    ]
+    df["name"] = [
+        str(meta_cache.loc[t, "name"] or t) if t in meta_cache.index else t
+        for t in df.index
+    ]
 
     # Analyst data — parallel fetch with the same fetch_analyst_data helper.
     # We pass a fresh empty cache so all tickers are fetched in one batch;
@@ -1605,6 +1629,9 @@ def fetch_universe_outlook(universe: list[str], meta_cache: pd.DataFrame,
     df["recommendation"]= a.reindex(df.index)["recommendation"].fillna("")
     df["num_analysts"]  = a.reindex(df.index)["num_analysts"]
     df["market_cap"]    = a.reindex(df.index)["market_cap"]
+    # v2.6 Value screen fundamentals (reindexed from the analyst fetch)
+    for _c in ("pe", "pb", "roe", "rev_growth", "fcf", "debt_to_equity"):
+        df[_c] = a.reindex(df.index)[_c] if _c in a.columns else float("nan")
     # Upside %: (target / current - 1) * 100, when both are defined
     df["upside"] = df.apply(
         lambda r: ((r["target_mean"] / r["current_price"] - 1) * 100
@@ -1741,14 +1768,16 @@ def fetch_meta(tickers: list[str], cache: pd.DataFrame) -> tuple[pd.DataFrame, s
 
 def load_analyst_cache() -> pd.DataFrame:
     cols = ["target_mean", "target_high", "target_low", "num_analysts",
-            "recommendation", "rec_mean", "current_price", "market_cap", "fetched_at"]
+            "recommendation", "rec_mean", "current_price", "market_cap",
+            "pe", "pb", "roe", "rev_growth", "fcf", "debt_to_equity", "fetched_at"]
     if not ANALYST_CACHE.exists():
         return pd.DataFrame(columns=cols).rename_axis("ticker")
     df = pd.read_parquet(ANALYST_CACHE)
-    # Backward-compat: older caches lack market_cap. Pre-fill so downstream code
-    # can rely on the column existing.
-    if "market_cap" not in df.columns:
-        df["market_cap"] = float("nan")
+    # Backward-compat: older caches lack market_cap + the v2.6 value-screen
+    # fundamentals. Pre-fill so downstream code can rely on the columns existing.
+    for _c in ("market_cap", "pe", "pb", "roe", "rev_growth", "fcf", "debt_to_equity"):
+        if _c not in df.columns:
+            df[_c] = float("nan")
     if "fetched_at" in df.columns:
         df["fetched_at"] = pd.to_datetime(df["fetched_at"], utc=True)
     return df
@@ -1784,6 +1813,13 @@ def fetch_analyst_data(tickers: list[str], cache: pd.DataFrame,
                 "rec_mean":     info.get("recommendationMean"),
                 "current_price": info.get("currentPrice"),
                 "market_cap":   info.get("marketCap"),
+                # v2.6 Value screen fundamentals (yfinance .info)
+                "pe":             info.get("trailingPE"),
+                "pb":             info.get("priceToBook"),
+                "roe":            info.get("returnOnEquity"),
+                "rev_growth":     info.get("revenueGrowth"),
+                "fcf":            info.get("freeCashflow"),
+                "debt_to_equity": info.get("debtToEquity"),
                 "fetched_at":   now,
             }, None
         except Exception as e:
@@ -1791,7 +1827,9 @@ def fetch_analyst_data(tickers: list[str], cache: pd.DataFrame,
             return t, {
                 "target_mean": None, "target_high": None, "target_low": None,
                 "num_analysts": None, "recommendation": "", "rec_mean": None,
-                "current_price": None, "market_cap": None, "fetched_at": now,
+                "current_price": None, "market_cap": None,
+                "pe": None, "pb": None, "roe": None, "rev_growth": None,
+                "fcf": None, "debt_to_equity": None, "fetched_at": now,
             }, str(e)
 
     rows = []
@@ -4596,19 +4634,17 @@ def render_bigbrain(observations: list[dict], as_of_str: str, macro_html: str = 
             f'{mem_html}{cite_html}</div></div>'
         )
 
-    # Split into "couples": each page = up to 2 ideas + 2 owned, so a page
-    # keeps the familiar 2x2 (ideas top row, owned bottom). Arrows flip pages.
+    # v2.6 #1: with a full board (>4 cards), page 1 = the names you DON'T own
+    # (ideas), page 2 = the names you DO own — each flip is a clean
+    # "discovery vs portfolio" switch. With <=4 cards there's nothing to flip.
     ideas = [o for o in observations if o.get("ownership") == "idea"]
     owned = [o for o in observations if o.get("ownership") != "idea"]
-    pages: list[list[dict]] = []
-    i = 0
-    while i * 2 < len(ideas) or i * 2 < len(owned):
-        page = ideas[i * 2:i * 2 + 2] + owned[i * 2:i * 2 + 2]
-        if page:
-            pages.append(page)
-        i += 1
-    if not pages:
-        pages = [observations]
+    if len(observations) <= 4:
+        pages: list[list[dict]] = [observations]
+    elif ideas and owned:
+        pages = [ideas, owned]
+    else:                                   # all one type -> chunk into pages of 4
+        pages = [observations[i:i + 4] for i in range(0, len(observations), 4)]
 
     if len(pages) == 1:
         grid = f'<div class="bb-grid">{"".join(render_card(o) for o in pages[0])}</div>'
@@ -5004,6 +5040,191 @@ def render_industry_outlook(groups: list[dict], universe_size: int) -> str:
   </div>
   <div class="io-grid">{''.join(cards)}</div>
 </section>"""
+
+
+def build_value_screen(universe_outlook: "pd.DataFrame | None",
+                       log_tickers: "set[str] | None" = None,
+                       bb_idea_tickers: "set[str] | None" = None,
+                       min_pass: "int | None" = None,
+                       near_low_pct: "float | None" = None) -> list[dict]:
+    """v2.6 Value screen: quality+value names trading near their 52-week low.
+
+    Six filters: #1 near-52w-low is a REQUIRED gate; #2 cheap vs sector (P/E
+    below the sector's median P/E); #3 positive FCF; #4 ROE > threshold; #5
+    positive revenue growth; #6 debt/equity below threshold. #2-#6 are scored;
+    a name needs VALUE_MIN_PASS of 6 to appear. Universe-only: names in
+    log_tickers (held/sold) are dropped (discovery-led). Returns the full
+    filtered list sorted by (pass_count desc, P/E discount-to-sector desc);
+    the renderer caps + paginates. See value-screen-spec.md.
+    """
+    if universe_outlook is None or len(universe_outlook) == 0:
+        return []
+    min_pass = VALUE_MIN_PASS if min_pass is None else min_pass
+    near_low_pct = VALUE_NEAR_LOW_PCT if near_low_pct is None else near_low_pct
+    skip = log_tickers or set()
+    bb = bb_idea_tickers or set()
+    df = universe_outlook[~universe_outlook.index.isin(skip)]
+
+    def _n(v) -> float:
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return float("nan")
+        return f if f == f else float("nan")
+
+    # Sector-median P/E (positive P/E only), per sector with enough priced peers.
+    sector_med: dict[str, float] = {}
+    if "sector" in df.columns and "pe" in df.columns:
+        peers = pd.DataFrame({"sector": df["sector"].astype(str),
+                              "pe": pd.to_numeric(df["pe"], errors="coerce")})
+        peers = peers[peers["pe"] > 0]
+        for sec, g in peers.groupby("sector"):
+            if len(g) >= VALUE_MIN_SECTOR_N:
+                sector_med[sec] = float(g["pe"].median())
+
+    rows: list[dict] = []
+    for tkr, r in df.iterrows():
+        r52 = _n(r.get("range52w_pct"))
+        if not (r52 == r52 and r52 <= near_low_pct):
+            continue                                          # #1 gate
+        sec = str(r.get("sector") or "")
+        pe = _n(r.get("pe"))
+        med = sector_med.get(sec)
+        f_cheap = bool(pe == pe and pe > 0 and med is not None and pe < med)
+        pe_disc = ((med - pe) / med) if (med and pe == pe and pe > 0) else float("nan")
+        fcf = _n(r.get("fcf"));         f_fcf = bool(fcf == fcf and fcf > 0)
+        roe = _n(r.get("roe"));         f_roe = bool(roe == roe and roe > VALUE_MIN_ROE)
+        rev = _n(r.get("rev_growth"));  f_rev = bool(rev == rev and rev > 0)
+        de_raw = _n(r.get("debt_to_equity"))
+        de = (de_raw / 100.0) if de_raw == de_raw else float("nan")  # yfinance D/E is a %
+        f_de = bool(de == de and de < VALUE_MAX_DE)
+        passed = {"near_low": True, "cheap": f_cheap, "fcf": f_fcf,
+                  "roe": f_roe, "rev": f_rev, "de": f_de}
+        pass_count = sum(1 for v in passed.values() if v)
+        if pass_count < min_pass:
+            continue
+        rows.append({
+            "ticker": tkr, "name": str(r.get("name") or tkr), "sector": sec,
+            "price": _n(r.get("current_price")),
+            "pe": pe, "sector_median_pe": med, "pe_discount": pe_disc,
+            "pb": _n(r.get("pb")), "roe": roe, "rev_growth": rev,
+            "fcf_positive": f_fcf, "debt_to_equity": de, "range52w_pct": r52,
+            "pass_count": pass_count, "passed": passed, "is_bb_idea": tkr in bb,
+        })
+    rows.sort(key=lambda x: (
+        -x["pass_count"],
+        -(x["pe_discount"] if x["pe_discount"] == x["pe_discount"] else float("-inf")),
+    ))
+    return rows
+
+
+def render_value_screen(rows: list[dict], as_of_str: str) -> str:
+    """Scorecard table of value-screen survivors. Price + optional BB tag next to
+    the ticker; green cells = filter passed; up to VALUE_MAX_ROWS shown in pages
+    of VALUE_PAGE with flip arrows. `as_of_str` is the universe cache's refresh
+    date (the data is only as fresh as that monthly fetch). See value-screen-spec.md."""
+    head_h3 = '<h3>Value screen</h3>'
+    if not rows:
+        return (f'<section class="value-screen-section"><div class="vs-head">{head_h3}'
+                f'<span class="vs-sub">as of {as_of_str}</span></div>'
+                '<p class="vs-empty">No S&amp;P 500 names cleared the value filters near a '
+                '52-week low this build.</p></section>')
+
+    total = len(rows)
+    shown = rows[:VALUE_MAX_ROWS]
+    plural = "name" if total == 1 else "names"
+    cap_note = f' &middot; showing top {VALUE_MAX_ROWS}' if total > VALUE_MAX_ROWS else ''
+    bar = ('passed all 6 filters' if VALUE_MIN_PASS >= 6
+           else f'passed &ge;{VALUE_MIN_PASS}/6')
+    sub = (f'<span class="vs-sub">{total} {plural} {bar} '
+           f'&middot; S&amp;P 500 &middot; as of {as_of_str}{cap_note}</span>')
+    legend = ('<p class="vs-legend"><b>Near a 52-week low</b> (required) + cheap vs sector, '
+              'positive FCF, ROE&gt;10%, revenue growth, debt/equity&lt;1.5. '
+              'Cells shade by strength vs the others shown &mdash; deeper = better; '
+              'hover a column heading for what it measures. '
+              'New ideas only &mdash; excludes names you already hold.</p>')
+
+    def _num(v, d=1):
+        return f'{v:.{d}f}' if (v is not None and v == v) else '&mdash;'
+
+    def _pct(v):
+        return f'{v * 100:.0f}%' if (v is not None and v == v) else '&mdash;'
+
+    def _rng(key):
+        vals = [r.get(key) for r in shown
+                if r.get(key) is not None and r.get(key) == r.get(key)]
+        return (min(vals), max(vals)) if vals else (None, None)
+
+    def _heat(val, lo, hi, invert=False, rgb="52,211,153"):
+        """Faint background whose opacity scales with where `val` sits in
+        [lo,hi] across the shown rows, so a strong value reads deeper than a
+        marginal one. invert=True for 'lower is better' columns (P/E, P/B,
+        D/E, 52w distance)."""
+        if val is None or val != val or lo is None or hi is None or hi <= lo:
+            return ""
+        t = (val - lo) / (hi - lo)
+        if invert:
+            t = 1 - t
+        t = max(0.0, min(1.0, t))
+        return f'background:rgba({rgb},{0.05 + t * 0.35:.2f})'
+
+    pe_lo, pe_hi = _rng("pe");  pb_lo, pb_hi = _rng("pb");  roe_lo, roe_hi = _rng("roe")
+    rev_lo, rev_hi = _rng("rev_growth");  de_lo, de_hi = _rng("debt_to_equity")
+    w_lo, w_hi = _rng("range52w_pct")
+
+    body = []
+    for r in shown:
+        bb_tag = '<span class="vs-bb-tag" title="Also a Big Brain idea">BB</span>' if r.get("is_bb_idea") else ''
+        row_cls = 'vs-row vs-bb' if r.get("is_bb_idea") else 'vs-row'
+        price = r.get("price")
+        price_html = f'<span class="vs-price">${price:,.2f}</span>' if (price is not None and price == price) else ''
+        fcf_html = ('<span class="vs-pass">+</span>' if r.get("fcf_positive")
+                    else '<span class="vs-fail">&minus;</span>')
+        pe, pb, roe = r.get("pe"), r.get("pb"), r.get("roe")
+        rev, de, w = r.get("rev_growth"), r.get("debt_to_equity"), r.get("range52w_pct")
+        pass_cls = "vs-pass" if r["pass_count"] >= 6 else "vs-mid"
+        body.append(
+            f'<tr class="{row_cls}">'
+            f'<td class="vs-tkr"><span class="vs-sym">{_esc(r["ticker"])}</span>{bb_tag}{price_html}</td>'
+            f'<td class="vs-sector">{_esc(r["sector"] or "&mdash;")}</td>'
+            f'<td class="num vs-cell vs-c-pe" style="{_heat(pe, pe_lo, pe_hi, invert=True)}">{_num(pe)}</td>'
+            f'<td class="num vs-cell vs-c-pb" style="{_heat(pb, pb_lo, pb_hi, invert=True)}">{_num(pb)}</td>'
+            f'<td class="num vs-cell vs-c-roe" style="{_heat(roe, roe_lo, roe_hi)}">{_pct(roe)}</td>'
+            f'<td class="num vs-cell vs-c-rev" style="{_heat(rev, rev_lo, rev_hi)}">{_pct(rev)}</td>'
+            f'<td class="num vs-cell vs-c-fcf">{fcf_html}</td>'
+            f'<td class="num vs-cell vs-c-de" style="{_heat(de, de_lo, de_hi, invert=True)}">{_num(de, 2)}</td>'
+            f'<td class="num vs-cell vs-c-52w" style="{_heat(w, w_lo, w_hi, invert=True, rgb="245,158,11")}">{_num(w, 0)}%</td>'
+            f'<td class="num {pass_cls} vs-passcount vs-c-pass">{r["pass_count"]}/6</td>'
+            f'</tr>'
+        )
+
+    n_shown = len(shown)
+    nav, section_attr, table_attr = '', '', ''
+    if n_shown > VALUE_PAGE:
+        npages = (n_shown + VALUE_PAGE - 1) // VALUE_PAGE
+        section_attr = f' data-vs-pages="{npages}"'
+        table_attr = f' data-vs-page="{VALUE_PAGE}"'
+        nav = ('<div class="vs-nav">'
+               '<button type="button" class="vs-arrow vs-prev" aria-label="Previous set">&#8249;</button>'
+               f'<span class="vs-page-ind"><span class="vs-page-cur">1</span>&#8202;/&#8202;{npages}</span>'
+               '<button type="button" class="vs-arrow vs-next" aria-label="Next set">&#8250;</button>'
+               '</div>')
+
+    header = ('<thead><tr>'
+              '<th>Ticker</th><th>Sector</th>'
+              '<th class="num" title="Trailing price/earnings. Passes when positive and below its sector median (cheaper than peers).">P/E</th>'
+              '<th class="num" title="Price/book ratio. Lower is cheaper relative to book value.">P/B</th>'
+              '<th class="num" title="Return on equity — profitability. Passes above 10%.">ROE</th>'
+              '<th class="num" title="Year-over-year revenue growth. Passes when positive.">Rev</th>'
+              '<th class="num" title="Free cash flow. Passes when positive (the + sign).">FCF</th>'
+              '<th class="num" title="Debt / equity. Passes below 1.5.">D/E</th>'
+              '<th class="num" title="Where the price sits in its 52-week range: 0% = at the low. Required gate: within 10% of the low.">52w</th>'
+              '<th class="num" title="How many of the six filters this name passed.">Pass</th>'
+              '</tr></thead>')
+    return (f'<section class="value-screen-section"{section_attr}>'
+            f'<div class="vs-head">{head_h3}{sub}</div>{legend}{nav}'
+            f'<div class="vs-scroll"><table class="vs-table"{table_attr}>'
+            f'{header}<tbody>{"".join(body)}</tbody></table></div></section>')
 
 
 def render_news(news_items: list[dict]) -> str:
@@ -5416,7 +5637,8 @@ def build_portfolio_payload(basket: pd.Series, bench: pd.Series,
 def build_aux_payload(returns: pd.DataFrame, prices: pd.DataFrame,
                       meta: pd.DataFrame, universe_outlook: pd.DataFrame | None,
                       diversification_data: dict | None,
-                      basket_first_date: pd.Timestamp | None = None) -> dict:
+                      basket_first_date: pd.Timestamp | None = None,
+                      log_tickers: "set[str] | None" = None) -> dict:
     """T11/T12/T14/T15: pre-shape per-modal data so the JS click handlers can
     look up "what to show in the drill-down modal" by O(1) lookup.
 
@@ -5434,11 +5656,19 @@ def build_aux_payload(returns: pd.DataFrame, prices: pd.DataFrame,
     # the ticker name lives in `meta` (joined by ticker index), not in the
     # universe frame itself.
     if universe_outlook is not None and not universe_outlook.empty:
+        # v2.6 #3: match the industry-outlook card's count exactly — it excludes
+        # held names (log.xlsx) and skips tickers without a 12-mo return, so the
+        # "see all" modal must too (otherwise the card says 4 but lists 7).
+        _skip = log_tickers or set()
         for tkr, row in universe_outlook.iterrows():
+            if tkr in _skip:
+                continue
             ind = str(row.get("industry") or "").strip()
             if not ind:
                 continue
             r12 = row.get("ret_12m")
+            if r12 is None or pd.isna(r12):
+                continue
             tier = row.get("cap_tier")
             name = (str(meta.loc[tkr, "name"]).strip()
                     if (tkr in meta.index and pd.notna(meta.loc[tkr, "name"]))
@@ -5645,6 +5875,21 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
                                     macro_html=_bb_macro_html, memory=bigbrain_memory)
     market_expectations_html = render_market_expectations(prediction_rows or [], latest_date)
     quadrant_html = render_signal_strip(build_signal_strip_data(returns, quant_metrics, signals))
+
+    # v2.6 Value screen — fundamental quality+value names near a 52-week low.
+    # New ideas only (excludes held); cross-tags names Big Brain also flagged.
+    _bb_idea_tkrs = {o["ticker"] for o in bigbrain_observations
+                     if o.get("ownership") == "idea"}
+    value_rows = build_value_screen(universe_outlook, log_tickers=log_tickers_set,
+                                    bb_idea_tickers=_bb_idea_tkrs)
+    # "as of" = the universe cache's last refresh (the monthly fetch), not today,
+    # since the screen's data is only as fresh as that fetch.
+    try:
+        _uni_ts = datetime.fromtimestamp(UNIVERSE_CACHE.stat().st_mtime, tz=timezone.utc)
+        value_as_of = _uni_ts.strftime("%d %b %Y")
+    except Exception:
+        value_as_of = latest_date
+    value_html = render_value_screen(value_rows, value_as_of)
 
     n_total = len(returns)
     n_open = int((returns.status == "open").sum()) if not returns.empty else 0
@@ -6108,6 +6353,7 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
         returns, prices, meta, universe_outlook,
         diversification_data=diversification_data,
         basket_first_date=first_purchase,
+        log_tickers=log_tickers_set,
     )
     aux_json = json.dumps(aux_payload, separators=(",", ":"))
     # v1.9 Pocket Lesson: bake the curated tip pool into the page payload.
@@ -6130,6 +6376,7 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     rating_moves_html = render_rating_moves(rating_moves or [], prior_analyst_exists)
     _module_defs = [
         ("bigbrain", "Big Brain says", bigbrain_html),
+        ("value_screen", "Value screen", value_html),
         ("outlook", "Industry outlook", industry_html),
         ("news", "News", news_html),
         ("predictions", "Market expectations", market_expectations_html),
@@ -7260,6 +7507,49 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     .ia-bar-label{{font-size:9.5px}}
     .ia-table th,.ia-table td{{padding:8px 6px;font-size:11.5px}}
   }}
+
+  /* v2.6 Value screen — scorecard table of quality+value names near 52w low */
+  .vs-head{{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:6px}}
+  .vs-head h3{{margin:0;font-family:var(--font-display);font-size:18px;font-weight:400;
+    color:var(--text);letter-spacing:-0.01em}}
+  .vs-head h3::before{{content:"\\1F50E";margin-right:8px;font-size:15px}}
+  .vs-sub{{font-family:var(--font-mono);font-size:10px;color:var(--text-dim);
+    letter-spacing:.04em;text-transform:lowercase;margin-left:auto}}
+  .vs-legend{{font-family:var(--font-ui);font-size:11px;color:var(--text-dim);
+    margin:0 0 10px;line-height:1.45}}
+  .vs-legend b{{color:var(--text-2);font-weight:600}}
+  .vs-empty{{font-family:var(--font-ui);font-size:12px;color:var(--text-dim);font-style:italic;margin:4px 0 0}}
+  .vs-nav{{display:flex;align-items:center;justify-content:flex-end;gap:8px;margin-bottom:8px}}
+  .vs-arrow{{cursor:pointer;background:var(--surface-2);border:1px solid var(--border);
+    color:var(--text);border-radius:7px;width:28px;height:26px;font-size:16px;line-height:1;
+    display:flex;align-items:center;justify-content:center;font-family:var(--font-mono);
+    transition:border-color .12s,color .12s}}
+  .vs-arrow:hover{{border-color:var(--accent);color:var(--accent)}}
+  .vs-page-ind{{font-family:var(--font-mono);font-size:11px;color:var(--text-dim);min-width:34px;text-align:center}}
+  .vs-scroll{{width:100%;overflow-x:auto}}
+  .vs-table{{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums;min-width:560px}}
+  .vs-table th{{text-align:left;padding:7px 9px;font-size:9.5px;color:var(--text-dim);
+    letter-spacing:.06em;text-transform:uppercase;border-bottom:1px solid var(--border);font-weight:400}}
+  .vs-table th.num{{text-align:right}}
+  .vs-table td{{padding:8px 9px;border-bottom:1px solid var(--border);font-size:12px;color:var(--text-2)}}
+  .vs-table tbody tr:last-child td{{border-bottom:none}}
+  .vs-table .num{{text-align:right;font-family:var(--font-mono);font-size:11.5px}}
+  /* Scoped under .vs-table so these beat the `.vs-table td` colour (0,1,1) */
+  /* Metric cells: bright readable text; magnitude is encoded by the inline
+     background tint (deeper = stronger vs the others shown). */
+  .vs-table td.vs-cell{{color:var(--text)}}
+  .vs-table .vs-pass{{color:var(--up);font-weight:500}}
+  .vs-table .vs-fail{{color:var(--text-dim)}}
+  .vs-table .vs-mid{{color:var(--accent);font-weight:500}}
+  .vs-table .vs-near{{color:var(--accent)}}
+  .vs-passcount{{font-weight:700}}
+  .vs-tkr{{white-space:nowrap}}
+  .vs-sym{{font-family:var(--font-mono);font-weight:700;font-size:13px;color:var(--text);letter-spacing:.02em}}
+  .vs-price{{font-family:var(--font-mono);font-size:10.5px;color:var(--text-dim);margin-left:7px}}
+  .vs-bb-tag{{font-family:var(--font-mono);font-size:8.5px;font-weight:700;color:#8b9bff;
+    background:rgba(139,155,255,.16);border-radius:4px;padding:1px 4px;margin-left:6px;letter-spacing:.05em}}
+  .vs-sector{{color:var(--text-dim);font-size:11.5px}}
+  .vs-row.vs-bb{{background:rgba(139,155,255,.06)}}
 
   /* Basket diversification — pairwise-correlation portfolio lens */
   .div-section{{
@@ -9029,6 +9319,27 @@ document.querySelectorAll('.market-expectations-section').forEach(sec => {{
     if (start >= rows.length) start = 0;
     paint();
   }});
+}});
+// v2.6 Value screen: page the scorecard rows in fixed windows with flip arrows.
+document.querySelectorAll('.value-screen-section[data-vs-pages]').forEach(sec => {{
+  const table = sec.querySelector('.vs-table');
+  const size = parseInt((table && table.dataset.vsPage) || '0', 10);
+  const rows = Array.from(sec.querySelectorAll('.vs-row'));
+  if (!size || rows.length <= size) return;
+  const npages = Math.ceil(rows.length / size);
+  const ind = sec.querySelector('.vs-page-cur');
+  let cur = 0;
+  const paint = () => {{
+    rows.forEach((r, i) => {{
+      r.style.display = (i >= cur * size && i < (cur + 1) * size) ? '' : 'none';
+    }});
+    if (ind) ind.textContent = (cur + 1);
+  }};
+  paint();
+  const prev = sec.querySelector('.vs-prev');
+  const next = sec.querySelector('.vs-next');
+  if (prev) prev.addEventListener('click', () => {{ cur = (cur - 1 + npages) % npages; paint(); }});
+  if (next) next.addEventListener('click', () => {{ cur = (cur + 1) % npages; paint(); }});
 }});
 // T9/T10: generic ticker-clickable handler. Anything bearing the class +
 // data-ticker opens the modal. Used by the rating-moves panel ticker spans

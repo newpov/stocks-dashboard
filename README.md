@@ -323,6 +323,33 @@ the real build appends, the demo skips. A pinned **macro callout** also appears
 above the board when a tracked prediction market moves ≥ 8pp build-over-build
 (see Market expectations).
 
+### Value screen — quality + value near a 52-week low (v2.6)
+
+A fundamentals lens (Big Brain reads technicals, Industry outlook reads returns;
+this reads the balance sheet). It screens the S&P 500 universe for names trading
+**near their 52-week low** that also clear quality/value checks — "quality on
+sale" — built transparently from public yfinance fundamentals, not a proprietary
+rating.
+
+**Six filters, all required.** #1 **near a 52-week low** is the gate (within 10%
+of the low — it's what makes this *this* screen); a name must then also clear
+**cheap vs sector** (P/E below its sector's median P/E), **positive free cash
+flow**, **ROE > 10%**, **positive revenue growth**, and **debt/equity < 1.5**.
+Results are a scorecard table (P/E, P/B, ROE, Rev, FCF, D/E, 52w position,
+pass-count); **each cell shades by how strong that value is versus the others
+shown** (deeper = better — so a 32% ROE reads darker than 11%), and every column
+heading carries a hover explanation. Ranked by deepest discount to sector peers,
+**up to 20 names, 10 per page** with flip arrows. Each row shows the price next
+to the ticker and a **`BB` tag** when Big Brain also flagged it (fundamental-cheap
+*and* technically-stacking pointing at the same name). ROE stands in for ROIC
+(yfinance has no ROIC); the sector-relative multiple is the value proxy (no DCF).
+
+**Discovery-only.** Like Industry outlook, it surfaces *new* ideas and
+**excludes names you already hold** — it won't surface or re-rank your open
+positions, so it's not the panel for sizing up something you already own.
+**Refreshed monthly** (it rides the universe cache), so the subtitle reads
+"as of {date}" — the data is only as fresh as that monthly fetch.
+
 ### Market expectations — prediction-market sentiment (v2.3)
 
 A forward-looking *sentiment* layer the rest of the page lacks: implied
@@ -675,7 +702,7 @@ pattern for the same reason.
 stocks-dashboard/
 ├── README.md                          ← this file
 ├── LICENSE                            ← MIT
-├── CHANGELOG.md                       ← version history (v1.0 → v2.5)
+├── CHANGELOG.md                       ← version history (v1.0 → v2.6)
 ├── demo.html                          ← standalone self-contained demo (CI-rebuilt daily)
 ├── build.py                           ← the build pipeline
 ├── test_bigbrain.py                   ← pytest suite for Big Brain + signal map
@@ -793,50 +820,72 @@ Full deploy instructions: [worker/README.md](worker/README.md).
 
 ---
 
-## Setup if you're forking this
+## Setup — fork & build it on your own machine
 
-1. **Fork the repo** on GitHub. You get `<your-username>/stocks-dashboard`.
-2. **Bring your own data** — replace `log.xlsx` with your Trading 212 export,
-   or delete it and edit **`transactions.csv`**. The CSV loader is
-   broker-agnostic: it accepts common header variants (`symbol`/`ticker`,
-   `quantity`/`shares`, `side`/`action`, `date`/`time`, …) and free-text actions
-   ("Market buy", "Sold", "B"), so most brokers' exports work with little or no
-   editing. Only **ticker, date, action** are required — with no quantity column,
-   each row simply counts as one unit.
-3. **Enable Pages**: Settings → Pages → Source: "Deploy from a branch" →
-   branch `main`, folder `/docs`. The URL becomes
-   `<your-username>.github.io/stocks-dashboard`.
-4. **(Optional) Deploy the Worker** for live news per the
-   [worker/README.md](worker/README.md).
-5. **Edit `universe.csv`** to taste — it's just a list of tickers to compare
-   industry performance against. The default is the full S&P 500 (503
-   tickers across 112 industries); shrink it to a smaller hand-picked
-   list if you want a faster monthly refresh.
-6. **First build**: trigger Actions → Scheduled rebuild → Run workflow.
-   The first run takes ~2 minutes because all caches are cold.
-7. **(Optional) Weighting model** — by default each position counts as one equal
-   unit (privacy-driven, no monetary scale). If your `transactions.csv` carries
-   real share quantities in its `shares` column (or your `log.xlsx` has a
-   quantity column such as "No. of shares"), build with
-   `python build.py --weight value` — or set `WEIGHT_MODE=value` — to
-   capital-weight the basket by `shares × price` instead.
-8. **(Optional) Watchlist-only** — no trade history at all? Put the tickers you
-   want to follow in `watchlist.csv` and build with
-   `python build.py --watchlist-only`. Each ticker is treated as one
-   equal-weight holding from the start of its price window, so you get the full
-   per-ticker briefing (signals, analyst, news, Big Brain, Signal map) without
-   modelling a single trade — the fastest way to try the dashboard on names you
-   care about.
+New to GitHub? These steps take you from zero to your own dashboard open in a
+browser. **You'll need [Python 3.10+](https://www.python.org/downloads/) and
+[Git](https://git-scm.com/downloads) installed first.**
 
-To run locally without pushing:
+1. **Fork the repo.** Click **Fork** (top-right of this page). You now have your
+   own copy at `https://github.com/<your-username>/stocks-dashboard`.
 
-```bash
-python -m venv .venv
-.venv\Scripts\activate          # Windows (use 'source .venv/bin/activate' on macOS/Linux)
-pip install -r requirements.txt
-python build.py
-# open docs/index.html in any browser
-```
+2. **Clone it to your computer.** In a terminal:
+   ```bash
+   git clone https://github.com/<your-username>/stocks-dashboard.git
+   cd stocks-dashboard
+   ```
+
+3. **Install the dependencies** (in an isolated virtual environment):
+   ```bash
+   python -m venv .venv
+   .venv\Scripts\activate          # Windows
+   source .venv/bin/activate       # macOS / Linux
+   pip install -r requirements.txt
+   ```
+
+4. **Add your data.** Edit **`transactions.csv`** — replace the sample rows with
+   your own trades, or paste in your broker's export. Only **ticker, date,
+   action** are required; the loader is broker-agnostic (accepts `symbol`/`ticker`,
+   `quantity`/`shares`, `side`/`action` and free-text actions like "Market buy" /
+   "Sold"). No quantity column? Each row just counts as one unit.
+   *(No trades to log? Skip to the watchlist option under "Going further".)*
+
+5. **Build it:**
+   ```bash
+   python build.py
+   ```
+   The first run takes ~1–2 minutes (it downloads prices and warms the caches);
+   later runs take seconds.
+
+6. **Open it.** Double-click **`docs/index.html`**, or serve it locally:
+   ```bash
+   python -m http.server 8765 --directory docs
+   # then open http://localhost:8765 in your browser
+   ```
+
+That's the whole loop — re-run step 5 whenever you want a fresh build.
+
+### Publish it online (GitHub Pages) — optional
+
+1. Commit and push your build: `git add docs && git commit -m "build" && git push`.
+2. On GitHub: **Settings → Pages → Source → "Deploy from a branch" → branch
+   `main`, folder `/docs`**.
+3. It goes live at `https://<your-username>.github.io/stocks-dashboard`. (The
+   bundled GitHub Action also rebuilds the public `demo.html` daily.)
+
+### Going further — optional
+
+- **No trade history?** List tickers in **`watchlist.csv`** and run
+  `python build.py --watchlist-only` — each is tracked equal-weight from the
+  start of its price window, giving the full per-ticker briefing (signals,
+  analyst, news, Big Brain, Value screen, Signal map) without modelling a trade.
+- **Capital-weighting.** By default each position is one equal unit (no monetary
+  scale). If your data carries real share quantities, run
+  `python build.py --weight value` (or set `WEIGHT_MODE=value`) to weight the
+  basket by `shares × price`.
+- **Comparison universe.** Edit **`universe.csv`** (default: the full S&P 500) —
+  shrink it for a faster monthly industry-outlook / value-screen refresh.
+- **Live news.** Deploy the optional [Cloudflare Worker](worker/README.md).
 
 ---
 

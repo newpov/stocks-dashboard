@@ -14,6 +14,62 @@ than a barely-working prototype.
 
 ---
 
+## v2.6 — Value screen · 20 June 2026
+
+A new discovery lens. Where Big Brain reads *technical* signal-stacking and
+Industry outlook reads *returns*, the **Value screen** reads **fundamentals**:
+it surfaces S&P 500 names trading **near their 52-week low** that also clear a
+set of quality/value checks — the "quality on sale" idea, built transparently
+from public data (no proprietary black-box rating).
+
+### Added
+- **Value screen** — a new module below Big Brain, above Industry outlook. Six
+  filters: **near a 52-week low** (a required gate — it's what makes this *this*
+  screen), then scored on **cheap vs sector** (P/E below the sector's median P/E),
+  **positive free cash flow**, **ROE &gt; 10%**, **positive revenue growth**, and
+  **debt/equity &lt; 1.5**. A name must pass **all 6** (the near-low gate uses a
+  tight &le;10% band, tuned against real counts); results are a scorecard table
+  (P/E, P/B, ROE, Rev, FCF, D/E, 52w, pass-count) whose **cells shade by strength
+  vs the others shown** (deeper = better; column headings carry hover
+  explanations), ranked by deepest discount to sector peers, **up to 20 names in
+  pages of 10** with flip arrows. Each row shows the price next to the ticker and
+  a **`BB` tag** when Big Brain also flagged the name (fundamental-cheap *and*
+  technically-stacking agree).
+- **Universe fundamentals** — the monthly universe fetch now also caches
+  `trailingPE`, `priceToBook`, `returnOnEquity`, `revenueGrowth`, `freeCashflow`,
+  and `debtToEquity` (plus each name's 52-week-range position and sector), so the
+  screen costs nothing per build. (ROE stands in for ROIC, which yfinance doesn't
+  expose; "intrinsic value" is approximated by the sector-relative multiple — no
+  DCF.)
+
+### Notes
+- **Discovery-only — excludes names you already hold.** Like Industry outlook and
+  the Big Brain universe lane, this screen surfaces *new* ideas; it does not
+  surface or re-rank your open positions. If you're sizing up a name you already
+  own, this isn't the panel for it (by design).
+- **Refreshed monthly.** The screen rides the universe cache (~30-day TTL), so the
+  subtitle reads "as of {date}" — the data is only as fresh as that monthly fetch,
+  not today's build.
+
+### Also in v2.6
+- **Big Brain pages by ownership** — with a full board, page 1 is now the names
+  you *don't* own (ideas) and page 2 the names you *do*, so each arrow flip is a
+  clean discovery-vs-portfolio switch (was 2-ideas-+-2-owned per page).
+- **Industry-outlook count fix** — the "see all" drill-down modal now matches the
+  card's headline count: it excludes held names and names without a 12-month
+  return, so a card saying "4 tracked stocks" no longer opens a list of 7.
+- **README setup rewrite** — the fork-and-build instructions are now a clean,
+  beginner-friendly numbered walkthrough (fork → clone → install → add data →
+  build → open), with GitHub Pages and advanced options split out separately.
+
+### Tests
+- `test_value_screen.py` — filters, the 52w-low gate, scoring, sector-median P/E
+  (incl. the small-sector fallback), the all-6 floor + 20-row cap, sort order,
+  held-name exclusion, `BB` tagging, and the render (table, pagination, subtitle,
+  column-header tooltips, strength shading, empty state). Suite now 105 tests.
+
+---
+
 ## v2.5 — Deeper market expectations, 8-card Big Brain, cap-weighted outlook · 20 June 2026
 
 A breadth-and-polish pass driven by use. **Market expectations** stopped showing
