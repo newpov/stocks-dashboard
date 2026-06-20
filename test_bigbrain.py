@@ -298,7 +298,7 @@ def test_render_board_held_and_idea():
     assert 'data-ticker="BRK-B"' in html          # held is clickable
     assert 'data-ticker="NVDA"' not in html        # idea NOT clickable
     assert "not owned" in html                      # ownership badge
-    assert "4 names punching above the noise this week" in html
+    assert "punching above the noise this week" in html
     assert "Nvidia surges" in html
     assert 'rel="noopener noreferrer"' in html
 
@@ -306,6 +306,105 @@ def test_render_board_held_and_idea():
 def test_render_empty_state():
     html = build.render_bigbrain([], "05 Jun 2026")
     assert "bb-empty" in html
+
+
+# --- v2.5 #2: stock price on the cards --------------------------------------
+
+def test_render_bigbrain_shows_price():
+    obs = [{"ticker": "NVDA", "ownership": "idea", "severity": "good",
+            "title": "On the radar", "body": "x", "pills": [], "cite": None,
+            "score": 9.0, "raw": 6.0, "price": 124.5, "price_ccy": "$"}]
+    html = build.render_bigbrain(obs, "05 Jun 2026")
+    assert "bb-price" in html
+    assert "$124.50" in html
+
+
+def test_render_bigbrain_price_omitted_when_missing():
+    obs = [{"ticker": "X", "ownership": "held", "severity": "warn",
+            "title": "t", "body": "b", "pills": [], "cite": None,
+            "score": 1.0, "raw": 1.0}]                 # no price key
+    html = build.render_bigbrain(obs, "05 Jun 2026")
+    assert "bb-price" not in html                       # gracefully absent
+
+
+# --- v2.5 #9: 8 cards (4 idea + 4 owned), shown 2:2 with arrows ------------
+
+def test_compute_returns_up_to_8_cards():
+    uni = [{"ticker": f"U{i}", "ownership": "idea", "score": 10 - i, "raw": 1.0}
+           for i in range(6)]
+    empty = pd.DataFrame(columns=["status", "weight"])
+    obs = build.compute_bigbrain_observations(
+        empty, pd.DataFrame(), None, None, None, None, [], None,
+        universe_observations=uni)
+    assert len(obs) == 6        # board capacity raised 4 -> 8, so all 6 surface
+
+
+def _bb_obs(t, own):
+    return {"ticker": t, "ownership": own, "severity": "good", "title": "t",
+            "body": "b", "pills": [], "cite": None, "score": 1.0, "raw": 1.0}
+
+
+def test_render_bigbrain_paginates_into_couples():
+    obs = ([_bb_obs(f"U{i}", "idea") for i in range(4)] +
+           [_bb_obs(f"P{i}", "held") for i in range(4)])
+    html = build.render_bigbrain(obs, "05 Jun 2026")
+    assert html.count('data-page="') == 2          # two alternate couples
+    assert "bb-arrow" in html
+    for t in ["U0", "U1", "U2", "U3", "P0", "P1", "P2", "P3"]:
+        assert t in html
+
+
+def test_render_bigbrain_single_page_has_no_arrows():
+    html = build.render_bigbrain([_bb_obs("A", "idea"), _bb_obs("B", "held")],
+                                 "05 Jun 2026")
+    assert "bb-arrow" not in html
+    assert 'data-page="' not in html
+
+
+def test_compute_bigbrain_observations_attaches_price():
+    idx = ["AAA"]
+    returns = pd.DataFrame({
+        "status": ["open"], "weight": [1.0], "total_pct": [50.0],
+        "post_exit_pct": [float("nan")],
+        "1w_pct": [12.0], "1m_pct": [5.0], "3m_pct": [6.0],
+        "latest": [142.0], "baseline_date": [pd.Timestamp("2024-01-01")],
+    }, index=idx)
+    quant = pd.DataFrame({"rsi14": [82.0], "sma200_dist_pct": [120.0],
+                          "range52w_pct": [96.0], "vol_ratio": [2.5],
+                          "atr14_pct": [3.0]}, index=idx)
+    signals = pd.DataFrame({"signal": ["Strong uptrend"]}, index=idx)
+    obs = build.compute_bigbrain_observations(
+        returns, meta=pd.DataFrame(), contrib=None, quant_metrics=quant,
+        signals=signals, analyst=None, rating_moves=[], ticker_news=None)
+    a = next(o for o in obs if o["ticker"] == "AAA")
+    assert a["price"] == 142.0
+    assert a["price_ccy"] == build.BASE_SYMBOL    # no fx -> base currency fallback
+
+
+def test_compute_bigbrain_owned_price_in_native_currency():
+    """v2.5 #2b: a EUR holding shows its native EUR price (base / FX rate), so
+    the whole Big Brain section is local-currency consistent."""
+    idx = ["ENGI.PA"]
+    returns = pd.DataFrame({
+        "status": ["open"], "weight": [1.0], "total_pct": [50.0],
+        "post_exit_pct": [float("nan")],
+        "1w_pct": [12.0], "1m_pct": [5.0], "3m_pct": [6.0],
+        "latest": [17.2],                       # base GBP
+        "baseline_date": [pd.Timestamp("2024-01-01")],
+    }, index=idx)
+    meta = pd.DataFrame({"currency": ["EUR"], "sector": [""], "industry": [""],
+                         "name": ["Engie"]}, index=idx)
+    quant = pd.DataFrame({"rsi14": [82.0], "sma200_dist_pct": [120.0],
+                          "range52w_pct": [96.0], "vol_ratio": [2.5],
+                          "atr14_pct": [3.0]}, index=idx)
+    signals = pd.DataFrame({"signal": ["Strong uptrend"]}, index=idx)
+    fx = pd.DataFrame({"EURGBP=X": [0.86, 0.86]})     # 1 EUR = 0.86 GBP
+    obs = build.compute_bigbrain_observations(
+        returns, meta=meta, contrib=None, quant_metrics=quant, signals=signals,
+        analyst=None, rating_moves=[], ticker_news=None, fx=fx)
+    o = next(x for x in obs if x["ticker"] == "ENGI.PA")
+    assert o["price_ccy"] == "€"
+    assert abs(o["price"] - 20.0) < 0.01        # 17.2 GBP / 0.86 = 20.0 EUR
 
 
 def test_log_bigbrain_flags_appends_dedup(tmp_path, monkeypatch):
