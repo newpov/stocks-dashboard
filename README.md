@@ -22,6 +22,9 @@ public and reusable — fork it, point it at your own broker export, and you
 have your own dashboard for the cost of a free GitHub account and a few
 minutes of setup.
 
+> **In a hurry?** [`QUICKSTART.md`](QUICKSTART.md) is the 30-second version —
+> clone, `pip install`, `python build.py --demo`. This README is the full tour.
+
 ## Demo
 
 Want to see what the dashboard looks like without forking or running anything?
@@ -350,6 +353,30 @@ positions, so it's not the panel for sizing up something you already own.
 **Refreshed monthly** (it rides the universe cache), so the subtitle reads
 "as of {date}" — the data is only as fresh as that monthly fetch.
 
+### Watchlist — names you track, with an entry read (v2.7)
+
+Tickers you're following but **don't (yet) hold**, listed in **`watchlist.csv`**
+(only the `ticker` column is required; an optional `note` is free text). They're
+priced and FX-converted alongside the basket but **never enter the basket math**
+(no weight, no P&L) — and they're discovery-only, so the screen is about *getting
+in*, not managing a position.
+
+Each card pairs the 12-month sparkline with an **entry read**: a tone-coloured
+**verdict** — **Buy zone** (near its low *and* oversold or with Street upside),
+**Cooling off** (overbought / stretched above its 200-day), or **Watching** —
+plus **trigger chips** (near 52-week low, oversold, unusual volume, below/above
+the 200-day, Street upside to mean target) and a one-line **news cite**. The
+triggers reuse the same thresholds as Big Brain, read off the technicals already
+computed for every ticker; the analyst + news fetch is extended to watch-only
+names so the upside chip and cite work too. Anything missing for a given name
+(no analyst coverage, a delisted symbol) simply drops that chip — the card never
+breaks.
+
+Because watch names carry no position, no share counts or amounts are involved —
+it slots into the shapes-not-amounts model cleanly. (Want to *track performance*
+of a watchlist instead, with each name equal-weighted from its start? That's the
+separate `--watchlist-only` build mode below.)
+
 ### Market expectations — prediction-market sentiment (v2.3)
 
 A forward-looking *sentiment* layer the rest of the page lacks: implied
@@ -427,26 +454,32 @@ just under the hero stats (when something changed since you last looked):
 
 1. **Big Brain says**: "what should I look at first, including things I'm
    missing" — the four highest-signal names (2 discovery + 2 basket).
-2. **Outlook + News**: "what should I read about today" — new stocks and the
+2. **Value screen**: "what quality names are on sale" — S&P 500 fundamentals near
+   a 52-week low that clear the six quality/value filters (discovery-only).
+3. **Outlook + News**: "what should I read about today" — new stocks and the
    market backdrop.
-3. **Market expectations**: "what is the crowd pricing" — prediction-market
+4. **Market expectations**: "what is the crowd pricing" — prediction-market
    (Kalshi + Polymarket) implied odds for macro events, with since-last-build
    deltas.
-4. **Main table**: detailed per-stock view with sorting + filtering.
-5. **Re-entry ideas**: "of stocks I've held before, where do analysts see
+5. **Main table**: detailed per-stock view with sorting + filtering.
+6. **Re-entry ideas**: "of stocks I've held before, where do analysts see
    most upside" — buy candidates.
-6. **Rating moves** (paired under Re-entry): "did analyst views shift" —
-   target-price changes ≥ 5% and recommendation shifts vs a stable baseline.
-7. **Exit strategy**: "of my current losers, which should I cut" — sell
+7. **Watchlist**: "names I track but don't hold — should I get in" — each with an
+   entry read (verdict + trigger chips + news cite). Edit `watchlist.csv`.
+8. **Rating moves** (paired under Re-entry): "did analyst views shift" — split
+   into **Price targets** (upsides first, then cuts) and **Recommendations**
+   (upgrades green ↑ first, downgrades red ↓), each row carrying the other's
+   context, vs a stable weekly baseline.
+9. **Exit strategy**: "of my current losers, which should I cut" — sell
    candidates, with concrete 2× ATR suggested stops.
-8. **Basket diversification**: portfolio-level lens — pairwise correlations,
-   most-correlated pairs (concentration risk), and best diversifiers.
-9. **Signal map** (paired under diversification): a beeswarm of holdings along
-   the bearish↔bullish signal axis, coloured by return — a fast read of what
-   the tape says about your book.
-10. **Industry attribution**: "which of my sector bets are paying off" —
+10. **Basket diversification**: portfolio-level lens — pairwise correlations,
+    most-correlated pairs (concentration risk), and best diversifiers.
+11. **Signal map** (paired under diversification): a beeswarm of holdings along
+    the bearish↔bullish signal axis, coloured by return — a fast read of what
+    the tape says about your book.
+12. **Industry attribution**: "which of my sector bets are paying off" —
     equal-weight return contribution by industry.
-11. **Regrets / Lucky escapes**: retrospective — did I sell too early or
+13. **Regrets / Lucky escapes**: retrospective — did I sell too early or
     exit just in time.
 
 This ordering matches how the author actually reviews the portfolio: lead with
@@ -702,7 +735,7 @@ pattern for the same reason.
 stocks-dashboard/
 ├── README.md                          ← this file
 ├── LICENSE                            ← MIT
-├── CHANGELOG.md                       ← version history (v1.0 → v2.6)
+├── CHANGELOG.md                       ← version history (v1.0 → v2.7)
 ├── demo.html                          ← standalone self-contained demo (CI-rebuilt daily)
 ├── build.py                           ← the build pipeline
 ├── test_bigbrain.py                   ← pytest suite for Big Brain + signal map

@@ -19,6 +19,7 @@ Thumbs.db
 # Private data — author's real transaction log
 # (transactions.csv is the public demo source; log.xlsx is real and stays local)
 log.xlsx
+.~lock.*#          # LibreOffice/OneDrive lock files (e.g. while log.xlsx is open)
 
 # Local planning / scratch docs not meant for the repo
 # Glob forms so future planning/spec docs are ignored automatically
@@ -40,6 +41,9 @@ v23-polish-plan.md
 gemini tips.md
 audit_implement.md
 dashboard-audit.md
+
+# Archived old specs/plans moved out of the root (local scratch)
+temp/
 
 # Brainstorming visual-companion mockups (local design scratch)
 .superpowers/

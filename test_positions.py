@@ -109,6 +109,49 @@ def test_basket_mtm_freezes_closed_position_at_realized():
     assert abs(basket.iloc[-1] - 25.0) < 0.5
 
 
+# --- v2.7 cost-basis reset on a full exit + re-entry -------------------------
+
+def test_rebuy_after_full_exit_resets_baseline():
+    """Bought, fully sold, rebought later: baseline = the RE-BUY price, not the
+    blend of the long-closed original and the re-buy. (CSCO bug)"""
+    dates = _bdates(60)
+    px = pd.DataFrame({"CSCO": np.concatenate([
+        np.full(20, 100.0),               # original era ~100
+        np.linspace(100.0, 200.0, 20),    # ramp
+        np.full(20, 200.0),               # re-buy era ~200, flat after
+    ])}, index=dates)
+    txns = pd.DataFrame({
+        "ticker": ["CSCO"] * 3,
+        "date": [dates[0], dates[2], dates[45]],     # buy@100, SELL all@100, rebuy@200
+        "action": ["BUY", "SELL", "BUY"],
+        "shares": [10.0, 10.0, 10.0],                # full exit, then re-entry
+    })
+    r = build.build_positions(txns, px).loc["CSCO"]
+    assert r["status"] == "open"
+    assert abs(r["baseline"] - 200.0) < 1e-6         # re-buy price (NOT mean(100,200)=150)
+    assert abs(r["total_pct"]) < 1e-6                # flat since re-buy
+    assert pd.Timestamp(r["baseline_date"]) == dates[45]   # chart starts at the re-buy
+    assert abs(r["unrealized_pnl"]) < 1e-6           # held flat -> no paper gain
+
+
+def test_partial_trim_does_not_reset_basis():
+    """A partial sell (net stays > 0) is NOT a full exit, so both buys keep
+    contributing to the cost basis."""
+    dates = _bdates(40)
+    px = pd.DataFrame({"AAA": np.concatenate([np.full(20, 100.0),
+                                              np.full(20, 150.0)])}, index=dates)
+    txns = pd.DataFrame({
+        "ticker": ["AAA"] * 3,
+        "date": [dates[0], dates[5], dates[25]],
+        "action": ["BUY", "SELL", "BUY"],
+        "shares": [10.0, 3.0, 5.0],                  # buy10, trim3 (net7), add5
+    })
+    r = build.build_positions(txns, px).loc["AAA"]
+    assert r["status"] == "open"
+    # one cycle -> qty-weighted avg of both buys: (10*100 + 5*150)/15
+    assert abs(r["baseline"] - (1750.0 / 15.0)) < 1e-6
+
+
 # --- v2.4 value-weight mode (opt-in, needs real share quantities) ------------
 
 def test_value_mode_uses_real_shares():

@@ -1885,18 +1885,53 @@ def snapshot_prior_analyst() -> None:
         print(f"WARN couldn't snapshot prior analyst cache: {e}", file=sys.stderr)
 
 
+# Rating strength order (lower = more bullish). Used for direction + sorting.
+_REC_RANK = {"strong_buy": 0, "buy": 1, "outperform": 1, "hold": 2,
+             "neutral": 2, "underperform": 3, "sell": 3, "strong_sell": 4}
+
+
+def _norm_rec(r) -> str:
+    """Normalize a recommendation string; the no-coverage sentinel -> ''."""
+    r = str(r or "").strip().lower()
+    return "" if r in ("", "none", "n/a", "na", "-", "—") else r
+
+
+def _rec_direction(before, after) -> "str | None":
+    """v2.7 #4: 'up' for an upgrade/initiation, 'down' for a downgrade/coverage
+    drop, None for a lateral move (same rank, e.g. buy<->outperform).
+    No-coverage ('' / 'none') is the weakest state: none->X reads as an upgrade,
+    X->none as a downgrade."""
+    b, a = _norm_rec(before), _norm_rec(after)
+    if b == a:
+        return None
+    rb = _REC_RANK.get(b)   # None when no-coverage
+    ra = _REC_RANK.get(a)
+    if ra is None:          # coverage dropped
+        return "down"
+    if rb is None:          # initiation from no-coverage
+        return "up"
+    if ra < rb:
+        return "up"         # rank decreased -> more bullish
+    if ra > rb:
+        return "down"
+    return None             # same rank, different label -> lateral
+
+
 def compute_rating_moves(prior_path: Path,
                          current: pd.DataFrame,
                          min_target_pct: float = 5.0,
-                         max_results: int = 12) -> list[dict]:
+                         max_results: int = 200) -> list[dict]:
     """T9: diff prior vs current analyst cache, surface material moves.
 
     A "move" is one of:
       - target_price: abs % change in target_mean >= min_target_pct
       - recommendation: recommendation string changed (e.g. hold -> buy)
 
-    Each result row: {ticker, kind, before, after, pct_change, abs_pct}.
-    Sorted by abs_pct descending so the most material moves bubble to the top.
+    Each raw row: {ticker, kind, before, after, pct_change, abs_pct} plus the
+    ticker's CURRENT context {cur_rec, cur_target} (v2.7 #4) so the display can
+    show the recommendation alongside a target move and vice-versa. Big Brain
+    consumes these raw per-kind rows (kind=="target"); render_rating_moves splits
+    them into the Price-targets and Recommendations groups.
     Returns [] if prior cache is missing (first build after install)."""
     if not prior_path.exists() or current.empty:
         return []
@@ -1911,49 +1946,32 @@ def compute_rating_moves(prior_path: Path,
     moves: list[dict] = []
     for tkr in common:
         p_row, c_row = prior.loc[tkr], current.loc[tkr]
-        # Target-price move
         p_tgt = p_row.get("target_mean")
         c_tgt = c_row.get("target_mean")
+        cur_target = float(c_tgt) if (c_tgt is not None and pd.notna(c_tgt)) else None
+        cur_rec = _norm_rec(c_row.get("recommendation"))
+        # Target-price move
         if (p_tgt is not None and c_tgt is not None
                 and pd.notna(p_tgt) and pd.notna(c_tgt)
                 and float(p_tgt) > 0):
             pct = (float(c_tgt) / float(p_tgt) - 1) * 100
             if abs(pct) >= min_target_pct:
                 moves.append({
-                    "ticker": tkr,
-                    "kind": "target",
-                    "before": float(p_tgt),
-                    "after":  float(c_tgt),
-                    "pct_change": pct,
-                    "abs_pct":   abs(pct),
+                    "ticker": tkr, "kind": "target",
+                    "before": float(p_tgt), "after": float(c_tgt),
+                    "pct_change": pct, "abs_pct": abs(pct),
+                    "cur_rec": cur_rec, "cur_target": cur_target,
                 })
-        # Recommendation move
-        p_rec = str(p_row.get("recommendation") or "").strip().lower()
-        c_rec = str(c_row.get("recommendation") or "").strip().lower()
-        if p_rec and c_rec and p_rec != c_rec:
+        # Recommendation move (no-coverage transitions included)
+        p_rec, c_rec = _norm_rec(p_row.get("recommendation")), cur_rec
+        if p_rec != c_rec and (p_rec or c_rec):
             moves.append({
-                "ticker": tkr,
-                "kind": "recommendation",
-                "before": p_rec,
-                "after":  c_rec,
-                "pct_change": 0.0,
-                # Synthetic sort weight so rec changes appear among similar-
-                # magnitude target moves (10pp keeps them visible without
-                # always dominating large target moves).
-                "abs_pct": 10.0,
+                "ticker": tkr, "kind": "recommendation",
+                "before": p_rec, "after": c_rec,
+                "pct_change": 0.0, "abs_pct": 10.0,
+                "cur_rec": cur_rec, "cur_target": cur_target,
             })
-    # v2.5 #4: target-price moves lead (by magnitude, unchanged); recommendation
-    # rows follow, ordered by the *resulting* rating strength (strong buy -> buy
-    # -> hold -> sell -> coverage-dropped), not alphabetically.
-    _rec_rank = {"strong_buy": 0, "buy": 1, "outperform": 1, "hold": 2,
-                 "neutral": 2, "underperform": 3, "sell": 3, "strong_sell": 4}
-
-    def _order(m):
-        if m["kind"] == "target":
-            return (0, -m["abs_pct"], m["ticker"])
-        rank = _rec_rank.get(str(m.get("after", "")).strip().lower(), 9)
-        return (1, rank, m["ticker"])
-    moves.sort(key=_order)
+    moves.sort(key=lambda m: (-m["abs_pct"], m["ticker"]))
     return moves[:max_results]
 
 
@@ -2222,13 +2240,45 @@ def build_positions(transactions: pd.DataFrame, prices: pd.DataFrame,
         if raw_bought <= 0:
             continue
 
-        # Average-cost basis straight from the rows (each row is 1 unit, so this
-        # reduces to the simple mean buy / sell price).
-        avg_buy_price = float((buys.shares * buys.price).sum() / raw_bought)
-        avg_sell_price = (float((sells.shares * sells.price).sum() / raw_sold)
-                          if raw_sold > 0 else float("nan"))
+        # v2.7: split the trade history into CYCLES separated by full exits
+        # (running net units -> 0 after a sell). The cost basis is taken from the
+        # ACTIVE cycle only — the current open lot, or the last closed cycle — so
+        # a long-ago entry that was fully sold can't blend into the basis of a
+        # later re-entry (the "sold a year ago, rebought, baseline still +50%"
+        # bug). A partial trim (net stays > 0) is NOT a full exit, so both buys
+        # keep contributing. Falls back to the simple all-time average when there
+        # are no buys in the active cycle (defensive; shouldn't happen).
+        cycles: list[dict] = []
+        cur_b: list[tuple] = []          # (date, shares, price) within the cycle
+        cur_s: list[tuple] = []
+        net = 0.0
+        for _r in txns.itertuples(index=False):
+            _sh, _px = float(_r.shares), float(_r.price)
+            if str(_r.action).upper() == "BUY":
+                cur_b.append((_r.date, _sh, _px)); net += _sh
+            else:
+                cur_s.append((_r.date, _sh, _px)); net -= _sh
+                if net <= 1e-6 and cur_b:            # position fully closed
+                    cycles.append({"buys": cur_b, "sells": cur_s})
+                    cur_b, cur_s, net = [], [], 0.0
+        if cur_b or cur_s:
+            cycles.append({"buys": cur_b, "sells": cur_s})
+        active = cycles[-1] if cycles else {"buys": [], "sells": []}
 
-        first_buy_date = pd.Timestamp(buys.date.min())
+        def _wavg(rows: list[tuple]) -> float:
+            tot = sum(sh for _, sh, _p in rows)
+            return float(sum(sh * p for _, sh, p in rows) / tot) if tot > 0 else float("nan")
+
+        avg_buy_price = (_wavg(active["buys"]) if active["buys"]
+                         else float((buys.shares * buys.price).sum() / raw_bought))
+        avg_sell_price = (_wavg(active["sells"]) if active["sells"]
+                          else (float((sells.shares * sells.price).sum() / raw_sold)
+                                if raw_sold > 0 else float("nan")))
+
+        # Baseline/"held since" date = the active cycle's first buy (the re-buy
+        # for a re-entered name), so the modal chart starts at the current lot.
+        first_buy_date = (pd.Timestamp(active["buys"][0][0]) if active["buys"]
+                          else pd.Timestamp(buys.date.min()))
         last_action_date = pd.Timestamp(txns.date.max())
         latest = float(ticker_series.iloc[-1])
 
@@ -2488,6 +2538,22 @@ def compute_drawdown_series(basket: pd.Series) -> pd.Series:
     mult = 1 + basket / 100.0
     running_peak = mult.cummax()
     return (mult / running_peak - 1) * 100
+
+
+def _date_fraction(d, start, end) -> float:
+    """v2.7 #6: fraction in [0,1] of date `d` across the [start, end] domain,
+    clamped. Returns 0.0 for a zero/negative span. Used so the alpha + drawdown
+    sparklines map x by *calendar date* over the main chart's full date span
+    (basket start -> today) — a date then lands at the same x in all three,
+    instead of each series stretching its own length across the full width."""
+    span = end - start
+    span_s = span.total_seconds() if hasattr(span, "total_seconds") else float(span)
+    if span_s <= 0:
+        return 0.0
+    cur = d - start
+    cur_s = cur.total_seconds() if hasattr(cur, "total_seconds") else float(cur)
+    f = cur_s / span_s
+    return 0.0 if f < 0 else (1.0 if f > 1 else f)
 
 
 def compute_signals(prices: pd.DataFrame) -> pd.DataFrame:
@@ -3495,6 +3561,29 @@ def render_watchlist(watchlist_payload: dict, meta: pd.DataFrame) -> str:
             gradient_id="grad-up" if total >= 0 else "grad-down",
         )
         note_html = f'<div class="wl-note">{note}</div>' if note else ""
+        # v2.7 entry-signal layer (read with .get so a non-enriched payload still renders).
+        verdict = d.get("verdict")
+        verdict_html = ""
+        if verdict:
+            verdict_html = (f'<div class="wl-verdict wl-v-{verdict["tone"]}">'
+                            f'{_esc(verdict["label"])}</div>')
+        chips = d.get("triggers") or []
+        chips_html = ""
+        if chips:
+            chips_html = '<div class="wl-chips">' + "".join(
+                f'<span class="wl-chip wl-c-{c["tone"]}">{_esc(c["label"])}</span>'
+                for c in chips) + "</div>"
+        cite = d.get("news_cite")
+        cite_html = ""
+        if cite and cite.get("title"):
+            src = _esc(cite.get("publisher") or "")
+            title = _esc(cite["title"])
+            link = cite.get("link") or ""
+            inner = (f'<a href="{_esc(link)}" target="_blank" rel="noopener">{title}</a>'
+                     if link else title)
+            cite_html = (f'<div class="wl-cite">{inner}'
+                         + (f' <span class="wl-cite-src">&mdash; {src}</span>' if src else "")
+                         + '</div>')
         cards.append(
             f'<div class="wl-card" data-ticker="{tkr}">'
             f'  <div class="wl-head">'
@@ -3504,17 +3593,104 @@ def render_watchlist(watchlist_payload: dict, meta: pd.DataFrame) -> str:
             f'  <div class="wl-name">{name}</div>'
             f'  <div class="wl-price"><span class="wl-latest">{latest_str}</span>{gbp_line}</div>'
             f'  <div class="wl-spark {cls}">{sparkline}</div>'
+            f'  {verdict_html}{chips_html}{cite_html}'
             f'  <div class="wl-foot"><span class="wl-period">12-month</span>{note_html}</div>'
             f'</div>'
         )
     return f"""<section class="watchlist-section">
   <div class="wl-head-row">
     <h3>Watchlist <span class="muted">({len(watchlist_payload)})</span></h3>
-    <p class="muted">12-month price history for tickers you're following but
-    don't (yet) hold. Add or remove via <code>watchlist.csv</code>. Click a card for the full chart.</p>
+    <p class="muted">Names you're tracking but don't (yet) hold &mdash; each with an
+    entry read (near-low / oversold / unusual volume / Street upside). Add or
+    remove via <code>watchlist.csv</code>. Click a card for the full chart.</p>
   </div>
   <div class="wl-grid">{''.join(cards)}</div>
 </section>"""
+
+
+def _analyst_empty() -> pd.DataFrame:
+    """Empty analyst frame with the columns build_watchlist_signals reads
+    (keeps tests terse; production passes the real analyst cache)."""
+    return pd.DataFrame(columns=["target_mean", "recommendation", "num_analysts"])
+
+
+def build_watchlist_signals(
+    watchlist_payload: dict,
+    quant_metrics: "pd.DataFrame | None",
+    analyst: "pd.DataFrame | None",
+    ticker_news: "pd.DataFrame | None",
+    meta: pd.DataFrame,
+) -> dict:
+    """Enrich each watchlist payload entry with an entry-signal layer:
+    triggers[] (chips), a verdict, and a news cite. Pure + total: any missing
+    source is skipped, never raised. Thresholds mirror Big Brain."""
+    if not watchlist_payload:
+        return watchlist_payload
+    now = pd.Timestamp.now(tz="UTC")
+    has_q = quant_metrics is not None and not quant_metrics.empty
+    has_a = analyst is not None and not analyst.empty
+
+    def _news_cite(tkr):
+        if ticker_news is None or tkr not in ticker_news.index:
+            return None
+        raw = ticker_news.loc[tkr, "items_json"]
+        try:
+            items = json.loads(raw) if isinstance(raw, str) and raw else []
+        except (ValueError, TypeError):
+            items = []
+        return _bb_news_cite(items, now)
+
+    for tkr, d in watchlist_payload.items():
+        triggers: list[dict] = []
+        # --- technical chips (from quant_metrics) ---------------------------
+        if has_q and tkr in quant_metrics.index:
+            row = quant_metrics.loc[tkr]
+            r52 = row.get("range52w_pct")
+            rsi = row.get("rsi14")
+            vol = row.get("vol_ratio")
+            sma = row.get("sma200_dist_pct")
+            if pd.notna(r52) and float(r52) <= 10:
+                triggers.append({"label": "Near low", "tone": "buy"})
+            if pd.notna(rsi):
+                if float(rsi) < 30:
+                    triggers.append({"label": "Oversold", "tone": "buy"})
+                elif float(rsi) > 70:
+                    triggers.append({"label": "Overbought", "tone": "caution"})
+            if pd.notna(vol) and float(vol) > 2.0:
+                triggers.append({"label": f"Vol {float(vol):.1f}×", "tone": "neutral"})
+            if pd.notna(sma):
+                if float(sma) < 0:
+                    triggers.append({"label": "Below 200-day", "tone": "buy"})
+                elif float(sma) > 15:
+                    triggers.append({"label": "Extended", "tone": "caution"})
+        # --- analyst upside chip --------------------------------------------
+        upside = None
+        if has_a and tkr in analyst.index:
+            a = analyst.loc[tkr]
+            target = a.get("target_mean")
+            # Prefer the analyst frame's own current_price (captured with the
+            # target -> guaranteed same native unit, so the pence divisor cancels
+            # exactly as in the main holdings table). Fall back to native_latest.
+            cur = a.get("current_price")
+            if cur is None or pd.isna(cur) or float(cur) <= 0:
+                cur = d.get("native_latest") or d.get("latest")
+            if target is not None and pd.notna(target) and float(target) > 0 and cur:
+                upside = (float(target) / float(cur) - 1) * 100
+                if upside > 0:
+                    triggers.append({"label": f"+{upside:.0f}% to target", "tone": "buy"})
+        # --- verdict (function of the chip stack) ---------------------------
+        labels = {t["label"] for t in triggers}
+        has_upside = upside is not None and upside > 0
+        if "Near low" in labels and ("Oversold" in labels or has_upside):
+            verdict = {"label": "Buy zone", "tone": "buy"}
+        elif "Extended" in labels or "Overbought" in labels:
+            verdict = {"label": "Cooling off", "tone": "caution"}
+        else:
+            verdict = {"label": "Watching", "tone": "neutral"}
+        d["triggers"] = triggers
+        d["verdict"] = verdict
+        d["news_cite"] = _news_cite(tkr)
+    return watchlist_payload
 
 
 def build_analyst_payload(candidates: list[str], analyst: pd.DataFrame,
@@ -5260,13 +5436,90 @@ def render_news(news_items: list[dict]) -> str:
 </section>"""
 
 
+def _rec_label(rec: str) -> "tuple[str, str]":
+    """(display label, css class) for a normalized rec key."""
+    return _REC_LABELS.get(_norm_rec(rec), ("&mdash;", "an-rec-none"))
+
+
+_RM_GROUP_CAP = 10      # max rows per group
+_RM_GROUP_RESERVE = 4   # slots kept for the opposite direction (cuts / downgrades)
+
+
+def _cap_with_reserve(good: list, bad: list,
+                      total: int = _RM_GROUP_CAP,
+                      reserve: int = _RM_GROUP_RESERVE) -> list:
+    """Show `good` first (priority), but reserve up to `reserve` slots for `bad`
+    when any exist, so the opposite direction never fully disappears under the
+    cap. Falls back to all-`good` when there's no `bad` (e.g. no target cuts)."""
+    keep_bad = min(len(bad), reserve)
+    good_show = good[: max(total - keep_bad, 0)]
+    bad_show = bad[: total - len(good_show)]
+    return good_show + bad_show
+
+
+def _rm_target_row(m: dict) -> str:
+    """A price-target row. Direct grid children so the $ columns align across
+    rows: ticker | before | arrow | after | pct | rec(context)."""
+    tkr = _esc(m["ticker"])
+    pct = m["pct_change"]
+    pcls = "pos" if pct >= 0 else "neg"
+    sign = "+" if pct >= 0 else ""
+    clabel, ccls = _rec_label(m.get("cur_rec", ""))
+    return (
+        f'<div class="rm-row rm-row--target" data-ticker="{tkr}">'
+        f'<span class="rm-tkr ticker-clickable" data-ticker="{tkr}">{tkr}</span>'
+        f'<span class="rm-from">${m["before"]:,.2f}</span>'
+        f'<span class="rm-arrow">&rarr;</span>'
+        f'<span class="rm-to">${m["after"]:,.2f}</span>'
+        f'<span class="rm-pct {pcls}">{sign}{pct:.1f}%</span>'
+        f'<span class="rm-rec rm-rec-static {ccls}">{clabel}</span>'
+        f'</div>'
+    )
+
+
+def _rm_rec_row(m: dict) -> str:
+    """A recommendation-change row. Grid children: ticker | target(context) |
+    rec move (arrow + before -> after)."""
+    tkr = _esc(m["ticker"])
+    d = _rec_direction(m["before"], m["after"])
+    if d == "up":
+        dir_cls, arrow = "rm-up", "&uarr;"
+    elif d == "down":
+        dir_cls, arrow = "rm-down", "&darr;"
+    else:
+        dir_cls, arrow = "rm-lat", "&rarr;"
+    blabel, _ = _rec_label(m["before"])
+    alabel, _ = _rec_label(m["after"])
+    ct = m.get("cur_target")
+    tgt_ctx = (f'<span class="rm-target rm-target-static">${ct:,.2f}</span>'
+               if ct is not None else
+               '<span class="rm-target rm-target-static">&mdash;</span>')
+    return (
+        f'<div class="rm-row rm-row--rec" data-ticker="{tkr}">'
+        f'<span class="rm-tkr ticker-clickable" data-ticker="{tkr}">{tkr}</span>'
+        f'{tgt_ctx}'
+        f'<span class="rm-rec rm-rec-move {dir_cls}">'
+        f'<span class="rm-rec-arrow">{arrow}</span>'
+        f'<span class="rm-rec-from">{blabel}</span>'
+        f'<span class="rm-arrow">&rarr;</span>'
+        f'<span class="rm-rec-to">{alabel}</span>'
+        f'</span>'
+        f'</div>'
+    )
+
+
 def render_rating_moves(moves: list[dict], prior_exists: bool) -> str:
-    """T9: rating-moves panel rendering. Empty-state copy depends on whether
-    the prior cache exists: first build says "tracking starts next build";
-    later quiet builds say "no material moves since last refresh"."""
+    """v2.7 #4: split into two groups so BOTH kinds always show:
+      - Price targets (upsides first, then cuts by magnitude) — each row also
+        shows the current recommendation.
+      - Recommendations (upgrades/initiations first, then downgrades) — each row
+        flags direction (green up arrow / red down arrow) + the current target.
+    Empty-state copy depends on whether a prior snapshot exists."""
     head = '<h3>Rating moves</h3>'
     sub = ('<span class="muted rm-sub">vs last build &middot; target &geq; 5% or rec change</span>')
-    if not moves:
+    targets = [m for m in moves if m["kind"] == "target"]
+    recs = [m for m in moves if m["kind"] == "recommendation"]
+    if not targets and not recs:
         empty_msg = ("Tracking begins next build &mdash; this is the first "
                      "snapshot of the analyst cache."
                      if not prior_exists
@@ -5275,38 +5528,48 @@ def render_rating_moves(moves: list[dict], prior_exists: bool) -> str:
   <div class="rm-head">{head}{sub}</div>
   <p class="muted rm-empty">{empty_msg}</p>
 </section>"""
-    rows_html = []
-    for m in moves:
-        tkr = _esc(m["ticker"])
-        if m["kind"] == "target":
-            pct = m["pct_change"]
-            arrow_cls = "pos" if pct >= 0 else "neg"
-            sign = "+" if pct >= 0 else ""
-            row = (
-                f'<div class="rm-row" data-ticker="{tkr}">'
-                f'  <span class="rm-tkr ticker-clickable" data-ticker="{tkr}">{tkr}</span>'
-                f'  <span class="rm-kind">target</span>'
-                f'  <span class="rm-from">${m["before"]:,.2f}</span>'
-                f'  <span class="rm-arrow">&rarr;</span>'
-                f'  <span class="rm-to">${m["after"]:,.2f}</span>'
-                f'  <span class="rm-pct {arrow_cls}">{sign}{pct:.1f}%</span>'
-                f'</div>'
-            )
-        else:  # recommendation
-            row = (
-                f'<div class="rm-row" data-ticker="{tkr}">'
-                f'  <span class="rm-tkr ticker-clickable" data-ticker="{tkr}">{tkr}</span>'
-                f'  <span class="rm-kind">rec</span>'
-                f'  <span class="rm-from">{_esc(str(m["before"]))}</span>'
-                f'  <span class="rm-arrow">&rarr;</span>'
-                f'  <span class="rm-to">{_esc(str(m["after"]))}</span>'
-                f'  <span class="rm-pct">&mdash;</span>'
-                f'</div>'
-            )
-        rows_html.append(row)
+    # Price targets: upsides first (desc), then cuts by magnitude (desc) — but a
+    # few slots are reserved for cuts so a big -X% never disappears under the cap.
+    ups = sorted([m for m in targets if m["pct_change"] >= 0],
+                 key=lambda m: (-m["pct_change"], m["ticker"]))
+    cuts = sorted([m for m in targets if m["pct_change"] < 0],
+                  key=lambda m: (m["pct_change"], m["ticker"]))   # most negative first
+    targets_display = _cap_with_reserve(ups, cuts)
+    # Recommendations: upgrades/initiations first, then downgrades; within a
+    # group by resulting rating strength, then ticker. Downgrades get reserved
+    # slots too, mirroring the targets group.
+    def _rec_rank_key(m):
+        return (_REC_RANK.get(_norm_rec(m["after"]), 9), m["ticker"])
+    # Green upgrades must RESULT in buy or stronger (no "upgrade to hold").
+    rec_up = sorted([m for m in recs
+                     if _rec_direction(m["before"], m["after"]) == "up"
+                     and _REC_RANK.get(_norm_rec(m["after"]), 9) <= 1],
+                    key=_rec_rank_key)
+    rec_down = sorted([m for m in recs
+                       if _rec_direction(m["before"], m["after"]) == "down"],
+                      key=_rec_rank_key)
+    recs_display = _cap_with_reserve(rec_up, rec_down)
+
+    groups = []
+    if targets_display:
+        rows = "".join(_rm_target_row(m) for m in targets_display)
+        groups.append(
+            '<div class="rm-group rm-group--targets">'
+            '<div class="rm-group-label">Price targets '
+            '<span class="muted">&middot; upsides first</span></div>'
+            f'<div class="rm-list">{rows}</div></div>'
+        )
+    if recs_display:
+        rows = "".join(_rm_rec_row(m) for m in recs_display)
+        groups.append(
+            '<div class="rm-group rm-group--recs">'
+            '<div class="rm-group-label">Recommendations '
+            '<span class="muted">&middot; upgrades first</span></div>'
+            f'<div class="rm-list">{rows}</div></div>'
+        )
     return f"""<section class="rating-moves-section">
   <div class="rm-head">{head}{sub}</div>
-  <div class="rm-list">{''.join(rows_html)}</div>
+  <div class="rm-cols">{''.join(groups)}</div>
 </section>"""
 
 
@@ -5810,10 +6073,15 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     attribution_html = render_industry_attribution(attribution_rows, basket_avg)
     regret_html = render_regret_tracker(returns, meta)
     untracked_html = render_untracked(untracked) if untracked is not None else ""
-    # Watchlist plumbing is preserved; the section is temporarily hidden — the
-    # analyst panel takes its left-rail slot until the watchlist comes back.
+    # v2.7: revived + enriched watchlist. Base card data, then an entry-signal
+    # layer (verdict + trigger chips + news cite) reusing already-computed
+    # quant/analyst/news. The module is reinstated next to "Re-entry ideas".
     watchlist_payload = (build_watchlist_payload(watchlist, prices, prices_native, meta)
                          if watchlist is not None and not watchlist.empty else {})
+    if watchlist_payload:
+        watchlist_payload = build_watchlist_signals(
+            watchlist_payload, quant_metrics, analyst, ticker_news, meta)
+    watchlist_html = render_watchlist(watchlist_payload, meta)
     candidates = analyst_candidates or []
     analyst_rows = (build_analyst_payload(candidates, analyst, prices_native, meta,
                                           signals=signals, quant_metrics=quant_metrics)
@@ -5977,12 +6245,24 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     # the label for the at-a-glance "are we currently ahead?" signal. Cosmetic
     # follow-up: hover shows date + value at the nearest point via JS overlay
     # (data-dates / data-values attributes consumed by setupAlphaHover()).
+    # v2.7 #6: shared calendar domain (basket start -> today) so the alpha +
+    # drawdown sparklines map x by DATE over the same span as the main chart,
+    # instead of each stretching its own length across the full width.
+    _spark_dom_start = basket.index[0] if not basket.empty else None
+    _spark_dom_end = basket.index[-1] if not basket.empty else None
+    _spark_dom_iso = ("" if _spark_dom_start is None
+                      else _spark_dom_start.strftime("%Y-%m-%d"))
+    _spark_dom_end_iso = ("" if _spark_dom_end is None
+                          else _spark_dom_end.strftime("%Y-%m-%d"))
+
     rolling_alpha = compute_rolling_alpha(basket, bench, window_days=30)
     if rolling_alpha.empty or len(rolling_alpha) < 5:
         alpha_sparkline_html = ""
     else:
         SW, SH = 240, 36  # viewBox in svg units
-        pad_x, pad_y = 2, 4
+        # pad_x = 0: horizontal inset is handled by the .spark-plot CSS wrapper
+        # (padding-left/right = the chart's padL/padR) so the plot area matches.
+        pad_x, pad_y = 0, 4
         vals = rolling_alpha.tolist()
         dates = [d.strftime("%Y-%m-%d") for d in rolling_alpha.index]
         vmin, vmax = min(vals), max(vals)
@@ -5994,7 +6274,10 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
         def _y(v: float) -> float:
             return pad_y + (vmax - v) / vrange * (SH - 2 * pad_y)
         def _x(i: int) -> float:
-            return pad_x + i / max(n - 1, 1) * (SW - 2 * pad_x)
+            if _spark_dom_start is None or _spark_dom_end is None:
+                return pad_x + i / max(n - 1, 1) * (SW - 2 * pad_x)
+            f = _date_fraction(rolling_alpha.index[i], _spark_dom_start, _spark_dom_end)
+            return pad_x + f * (SW - 2 * pad_x)
         points = " ".join(f"{_x(i):.1f},{_y(v):.2f}" for i, v in enumerate(vals))
         baseline_y = _y(0.0) if zero_in_range else None
         baseline_svg = (
@@ -6047,14 +6330,16 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
         values_attr = ",".join(f"{v:.3f}" for v in vals)
         alpha_sparkline_html = (
             f'<div class="alpha-sparkline-wrap" id="alpha-sparkline-wrap">'
-            f'  <div class="alpha-sparkline-head">'
+            f'  <div class="alpha-sparkline-head spark-plot">'
             f'    <span class="alpha-sparkline-label">30-day rolling &alpha; vs SPY</span>'
             f'    <span class="alpha-sparkline-latest {latest_cls}" id="alpha-sparkline-latest" '
             f'          data-default-text="{latest:+.1f} pp">{latest:+.1f} pp</span>'
             f'  </div>'
+            f'  <div class="spark-plot">'
             f'  <svg class="alpha-sparkline" id="alpha-sparkline-svg" '
             f'       viewBox="0 0 {SW} {SH}" preserveAspectRatio="none" '
             f'       data-dates="{dates_attr}" data-values="{values_attr}" '
+            f'       data-domain-start="{_spark_dom_iso}" data-domain-end="{_spark_dom_end_iso}" '
             f'       data-baseline-y="{baseline_y if baseline_y is not None else -1}">'
             f'    {baseline_svg}'
             f'    {polyline_svg}'
@@ -6063,6 +6348,7 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
             f'    <circle class="alpha-dot" cx="0" cy="0" r="2.2" '
             f'            fill="{stroke_color}" opacity="0" pointer-events="none"/>'
             f'  </svg>'
+            f'  </div>'
             f'</div>'
         )
 
@@ -6076,7 +6362,7 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
         dd_sparkline_html = ""
     else:
         DW, DH = 240, 30
-        dpad_x, dpad_y = 2, 3
+        dpad_x, dpad_y = 0, 3   # x inset via .spark-plot CSS wrapper (match chart)
         dd_vals = dd_series.tolist()
         # All values <= 0. Y axis goes from 0 at the top to min(dd) at the bottom.
         dd_min = min(dd_vals + [0.0])
@@ -6086,7 +6372,10 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
             # v in [dd_min, 0]; 0 -> top, dd_min -> bottom.
             return dpad_y + (-v) / dd_range * (DH - 2 * dpad_y)
         def _dx(i: int) -> float:
-            return dpad_x + i / max(nd - 1, 1) * (DW - 2 * dpad_x)
+            if _spark_dom_start is None or _spark_dom_end is None:
+                return dpad_x + i / max(nd - 1, 1) * (DW - 2 * dpad_x)
+            f = _date_fraction(dd_series.index[i], _spark_dom_start, _spark_dom_end)
+            return dpad_x + f * (DW - 2 * dpad_x)
         dd_dates = [d.strftime("%Y-%m-%d") for d in dd_series.index]
         dd_points = " ".join(f"{_dx(i):.1f},{_dy(v):.2f}" for i, v in enumerate(dd_vals))
         # Filled area: polyline + bottom-right + bottom-left corners.
@@ -6100,15 +6389,17 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
         dd_values_attr = ",".join(f"{v:.3f}" for v in dd_vals)
         dd_sparkline_html = (
             f'<div class="dd-sparkline-wrap" id="dd-sparkline-wrap">'
-            f'  <div class="dd-sparkline-head">'
+            f'  <div class="dd-sparkline-head spark-plot">'
             f'    <span class="dd-sparkline-label">Drawdown from prior peak '
             f'<span class="dd-sparkline-meta">&middot; worst {dd_worst:+.1f}%</span></span>'
             f'    <span class="dd-sparkline-latest" id="dd-sparkline-latest" '
             f'          data-default-text="{dd_latest:+.1f}%">{dd_latest:+.1f}%</span>'
             f'  </div>'
+            f'  <div class="spark-plot">'
             f'  <svg class="dd-sparkline" id="dd-sparkline-svg" '
             f'       viewBox="0 0 {DW} {DH}" preserveAspectRatio="none" '
-            f'       data-dates="{dd_dates_attr}" data-values="{dd_values_attr}">'
+            f'       data-dates="{dd_dates_attr}" data-values="{dd_values_attr}" '
+            f'       data-domain-start="{_spark_dom_iso}" data-domain-end="{_spark_dom_end_iso}">'
             f'    <path d="{dd_area}" class="dd-sparkline-fill"/>'
             f'    <polyline points="{dd_points}" fill="none" stroke="var(--down)" '
             f'              stroke-width="1.2" stroke-linejoin="round"/>'
@@ -6117,6 +6408,7 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
             f'    <circle class="dd-dot" cx="0" cy="0" r="2.2" '
             f'            fill="var(--down)" opacity="0" pointer-events="none"/>'
             f'  </svg>'
+            f'  </div>'
             f'</div>'
         )
 
@@ -6320,10 +6612,14 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
                      if o.get("ownership") == "idea"]
     _pred_probs = {r["theme"]: round(float(r["probability"]), 1)
                    for r in (prediction_rows or [])}
+    # v2.7: also track the value-screen membership so "since your last visit"
+    # surfaces newly-qualifying value names (parallel to new Big Brain ideas).
+    _value_tickers = [r["ticker"] for r in (value_rows or [])]
     last_look_json = json.dumps({
         "build_id": build_timestamp,
         "basket_return": round(float(basket_final), 2),
         "idea_tickers": _idea_tickers,
+        "value_tickers": _value_tickers,
         "predictions": _pred_probs,
     }, separators=(",", ":"))
     if demo_mode:
@@ -6382,6 +6678,7 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
         ("predictions", "Market expectations", market_expectations_html),
         ("holdings", "Holdings", holdings_html),
         ("analyst", "Re-entry ideas", analyst_html),
+        ("watchlist", "Watchlist", watchlist_html),
         ("rating_moves", "Rating moves", rating_moves_html),
         ("detractors", "Exit strategy", detractors_html),
         ("diversification", "Basket diversification", diversification_html),
@@ -6944,6 +7241,10 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
   .hero-chart-svg-wrap{{position:relative;width:100%;height:380px}}
   .hero-chart-svg{{width:100%;height:100%;display:block}}
   /* T7: 30-day rolling alpha sparkline beneath the hero chart. */
+  /* v2.7 #6: inset the sparkline plot (head + svg) to match the hero chart's
+     padL=48 / padR=56 px so a calendar date lands at the same x across the
+     chart and both sparklines (which now map x by date over the basket span). */
+  .spark-plot{{padding-left:48px;padding-right:56px;box-sizing:border-box}}
   .alpha-sparkline-wrap{{margin-top:14px;padding-top:10px;
     border-top:1px solid var(--border)}}
   .alpha-sparkline-head{{display:flex;justify-content:space-between;align-items:baseline;
@@ -7179,30 +7480,49 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     letter-spacing:0.04em}}
   .rm-empty{{font-family:var(--font-mono);font-size:11px;color:var(--text-dim);
     font-style:italic;margin:8px 0 0}}
+  /* v2.7 #4: two side-by-side columns -> Price targets | Recommendations.
+     Each list is its own grid with fixed numeric columns so the $ values line
+     up across rows. Columns stack on narrow screens. */
+  .rm-cols{{display:grid;grid-template-columns:1fr 1fr;gap:18px 30px}}
+  .rm-group-label{{font-family:var(--font-mono);font-size:10px;font-weight:700;
+    text-transform:uppercase;letter-spacing:0.08em;color:var(--accent);
+    padding-bottom:5px;border-bottom:1px solid var(--border);margin-bottom:2px}}
+  .rm-group-label .muted{{font-weight:400;text-transform:none;letter-spacing:0}}
   .rm-list{{display:flex;flex-direction:column;gap:0}}
-  .rm-row{{display:grid;grid-template-columns:60px 50px 1fr 16px 1fr 70px;
-    gap:8px;align-items:center;padding:8px 0;border-bottom:1px solid var(--border);
+  .rm-row{{align-items:center;padding:7px 0;border-bottom:1px solid var(--border);
     font-family:var(--font-mono);font-size:11.5px;color:var(--text);
-    transition:background 0.1s ease;}}
+    transition:background 0.1s ease}}
   .rm-row:last-child{{border-bottom:none}}
   .rm-row:hover{{background:rgba(245,158,11,0.04)}}
-  .rm-tkr{{font-weight:600;letter-spacing:0.04em;cursor:pointer}}
+  .rm-tkr{{font-weight:600;letter-spacing:0.03em;cursor:pointer}}
   .rm-tkr:hover{{color:var(--accent)}}
-  .rm-kind{{color:var(--text-dim);font-size:10px;text-transform:uppercase;
-    letter-spacing:0.06em}}
-  .rm-from{{color:var(--text-dim)}}
-  .rm-arrow{{color:var(--text-dim);text-align:center;font-size:11px}}
-  .rm-to{{color:var(--text);font-weight:500}}
+  /* Price-target rows: ticker | before | -> | after | pct | rec(context). */
+  .rm-row--target{{display:grid;
+    grid-template-columns:52px 74px 12px 74px 56px minmax(40px,1fr);column-gap:6px}}
+  .rm-from{{color:var(--text-dim);text-align:right}}
+  .rm-to{{color:var(--text);font-weight:500;text-align:right}}
+  .rm-arrow{{color:var(--text-dim);font-size:11px;text-align:center}}
   .rm-pct{{font-weight:600;text-align:right}}
-  @media (max-width:700px){{
-    .rm-row{{grid-template-columns:50px 1fr 1fr 60px;
-      grid-template-areas:"tkr kind kind pct" "from arrow to pct";gap:4px 6px}}
-    .rm-tkr{{grid-area:tkr}}
-    .rm-kind{{grid-area:kind}}
-    .rm-from{{grid-area:from}}
-    .rm-arrow{{grid-area:arrow}}
-    .rm-to{{grid-area:to}}
-    .rm-pct{{grid-area:pct;align-self:start}}
+  .rm-pct.pos{{color:var(--up)}}
+  .rm-pct.neg{{color:var(--down)}}
+  .rm-row--target .rm-rec{{justify-self:end}}
+  /* Recommendation rows: ticker | target(context) | rec move. */
+  .rm-row--rec{{display:grid;grid-template-columns:52px 78px minmax(80px,1fr);column-gap:8px}}
+  .rm-target-static{{color:var(--text-dim);text-align:right}}
+  .rm-rec{{display:inline-flex;align-items:center;gap:5px;justify-content:flex-end}}
+  .rm-row--rec .rm-rec{{justify-self:end}}
+  .rm-rec-arrow{{font-weight:700;font-size:12px}}
+  .rm-rec-from{{color:var(--text-dim)}}
+  .rm-rec.rm-up{{color:var(--up)}}
+  .rm-rec.rm-up .rm-rec-to{{color:var(--up);font-weight:600}}
+  .rm-rec.rm-up .rm-arrow{{color:var(--up)}}
+  .rm-rec.rm-down{{color:var(--down)}}
+  .rm-rec.rm-down .rm-rec-to{{color:var(--down);font-weight:600}}
+  .rm-rec.rm-down .rm-arrow{{color:var(--down)}}
+  .rm-rec.rm-lat .rm-rec-to{{color:var(--text);font-weight:600}}
+  .rm-rec-static{{opacity:0.85;font-weight:500}}
+  @media (max-width:760px){{
+    .rm-cols{{grid-template-columns:1fr;gap:16px}}
   }}
   /* v2.2 Big Brain discovery board -- full-width 2x2, colour-coded by card
      type. Tiers: warn=red, watch=amber, good=green, idea=blue. All theme-var
@@ -7458,6 +7778,25 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     font-size:9.5px;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.08em}}
   .wl-note{{color:var(--text-2);font-family:var(--font-ui);text-transform:none;letter-spacing:0;
     font-size:10.5px;text-align:right;max-width:60%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
+  /* v2.7 watchlist entry-signal layer — tone classes scoped under the section to
+     avoid the specificity collision seen with the value-screen .vs-pass bug. */
+  .watchlist-section .wl-verdict{{display:inline-block;font-size:10.5px;font-weight:700;
+    letter-spacing:0.02em;padding:2px 8px;border-radius:999px;margin:8px 0 6px;
+    border:1px solid var(--text-dim);color:var(--text-dim);background:var(--surface-2)}}
+  .watchlist-section .wl-v-buy{{border-color:var(--up);color:var(--up)}}
+  .watchlist-section .wl-v-caution{{border-color:var(--accent);color:var(--accent)}}
+  .watchlist-section .wl-v-neutral{{border-color:var(--text-dim);color:var(--text-dim)}}
+  .watchlist-section .wl-chips{{display:flex;flex-wrap:wrap;gap:4px;margin:2px 0 6px}}
+  .watchlist-section .wl-chip{{font-size:9.5px;font-weight:600;padding:2px 6px;border-radius:6px;
+    white-space:nowrap;border:1px solid var(--border);color:var(--text-2);background:var(--ink-soft)}}
+  .watchlist-section .wl-c-buy{{border-color:var(--up);color:var(--up)}}
+  .watchlist-section .wl-c-caution{{border-color:var(--accent);color:var(--accent)}}
+  .watchlist-section .wl-c-neutral{{color:var(--text-2)}}
+  .watchlist-section .wl-cite{{font-size:10.5px;color:var(--text-dim);margin:2px 0 0;
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
+  .watchlist-section .wl-cite a{{color:var(--text-dim);text-decoration:none}}
+  .watchlist-section .wl-cite a:hover{{text-decoration:underline;color:var(--text-2)}}
+  .watchlist-section .wl-cite-src{{opacity:0.8}}
 
   /* Industry attribution (performance attribution of open positions) */
   .attribution-section{{
@@ -8575,6 +8914,69 @@ function renderHeroChart() {{
     }}
   }}
 
+  // v2.7 #2: UK fiscal-year-start markers (~6 Apr each year). Map a calendar
+  // date to x by interpolating between the basket's index-placed weekly points
+  // so the marker lands exactly on the chart's own x grid (not a parallel one).
+  function xForDate(targetMs) {{
+    const ds = basket.dates;
+    if (!ds.length) return null;
+    const d0 = Date.parse(ds[0] + 'T00:00:00');
+    const dN = Date.parse(ds[ds.length - 1] + 'T00:00:00');
+    if (targetMs < d0 || targetMs > dN) return null;   // outside range -> skip
+    for (let i = 1; i < ds.length; i++) {{
+      const di = Date.parse(ds[i] + 'T00:00:00');
+      if (targetMs <= di) {{
+        const dprev = Date.parse(ds[i - 1] + 'T00:00:00');
+        const f = (targetMs - dprev) / Math.max(di - dprev, 1);
+        return basket.xs[i - 1] + f * (basket.xs[i] - basket.xs[i - 1]);
+      }}
+    }}
+    return basket.xs[basket.xs.length - 1];
+  }}
+  let fyHtml = '';
+  if (basket.dates.length) {{
+    const yr0 = new Date(basket.dates[0] + 'T00:00:00').getFullYear();
+    const yr1 = new Date(basket.dates[basket.dates.length - 1] + 'T00:00:00').getFullYear();
+    for (let yr = yr0; yr <= yr1; yr++) {{
+      const fyMs = Date.parse(yr + '-04-06T00:00:00');   // UK tax year starts 6 Apr
+      const fxx = xForDate(fyMs);
+      if (fxx == null) continue;
+      const lbl = `FY${{String(yr % 100).padStart(2, '0')}}/${{String((yr + 1) % 100).padStart(2, '0')}}`;
+      fyHtml += `<line x1="${{fxx.toFixed(1)}}" y1="${{padT}}" x2="${{fxx.toFixed(1)}}" y2="${{(padT + innerH).toFixed(1)}}" stroke="#6b7185" stroke-width="0.8" stroke-dasharray="2 4" opacity="0.45"/>`;
+      fyHtml += `<text x="${{(fxx + 3).toFixed(1)}}" y="${{(padT + 9).toFixed(1)}}" fill="#6b7185" font-size="8.5" font-family="Geist Mono, monospace" opacity="0.85">${{lbl}}</text>`;
+    }}
+  }}
+  // v2.7: last-COMPLETED UK fiscal year return (6 Apr -> 6 Apr), shown top-left.
+  let fyStatHtml = '';
+  if (basket.dates.length) {{
+    const valForDate = (targetMs) => {{
+      const ds = basket.dates;
+      const d0 = Date.parse(ds[0] + 'T00:00:00');
+      const dN = Date.parse(ds[ds.length - 1] + 'T00:00:00');
+      if (targetMs < d0 || targetMs > dN) return null;
+      for (let i = 1; i < ds.length; i++) {{
+        const di = Date.parse(ds[i] + 'T00:00:00');
+        if (targetMs <= di) {{
+          const dp = Date.parse(ds[i - 1] + 'T00:00:00');
+          const f = (targetMs - dp) / Math.max(di - dp, 1);
+          return basket.vals[i - 1] + f * (basket.vals[i] - basket.vals[i - 1]);
+        }}
+      }}
+      return basket.vals[basket.vals.length - 1];
+    }};
+    const today = new Date();
+    const fyEndYr = (today >= new Date(today.getFullYear(), 3, 6))
+                    ? today.getFullYear() : today.getFullYear() - 1;
+    const vS = valForDate(Date.parse((fyEndYr - 1) + '-04-06T00:00:00'));
+    const vE = valForDate(Date.parse(fyEndYr + '-04-06T00:00:00'));
+    if (vS !== null && vE !== null) {{
+      const fyRet = ((1 + vE / 100) / (1 + vS / 100) - 1) * 100;
+      const col = fyRet >= 0 ? '#34d399' : '#f87171';
+      const lbl = `FY${{String((fyEndYr - 1) % 100).padStart(2, '0')}}/${{String(fyEndYr % 100).padStart(2, '0')}}`;
+      fyStatHtml = `<text x="${{(padL + 5).toFixed(1)}}" y="${{(padT + 11).toFixed(1)}}" font-family="Geist Mono, monospace" font-size="11" font-weight="600"><tspan fill="#6b7185">${{lbl}} </tspan><tspan fill="${{col}}">${{fyRet >= 0 ? '+' : ''}}${{fyRet.toFixed(1)}}%</tspan><title>Basket return over the last completed UK fiscal year (6 Apr ${{fyEndYr - 1}} to 6 Apr ${{fyEndYr}})</title></text>`;
+    }}
+  }}
+
   let html = '';
   // Y grid (with axis labels)
   html += yTicks.map(t =>
@@ -8599,12 +9001,16 @@ function renderHeroChart() {{
   html += xTicks.map(t =>
     `<text x="${{t.x.toFixed(1)}}" y="${{xLabelY.toFixed(1)}}" fill="#6b7185" font-size="10" font-family="Geist Mono, monospace" text-anchor="middle">${{fmtDate(t.date)}}</text>`
   ).join('');
+  // v2.7 #2: UK FY-start vertical markers (drawn under the data lines).
+  html += fyHtml;
   // SPY line (dashed)
   if (spy.xs.length) {{
     html += `<polyline points="${{spyPL}}" fill="none" stroke="${{spyColor}}" stroke-width="1.4" stroke-dasharray="4 3" stroke-linejoin="round"/>`;
   }}
   // Basket line
   html += `<polyline points="${{basketPL}}" fill="none" stroke="${{basketColor}}" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"/>`;
+  // v2.7: last-completed fiscal-year return (top-left, on top of the line).
+  html += fyStatHtml;
 
   // End labels (basket + SPY) + vs-SPY delta badge
   html += `<text x="${{(padL + innerW + 6).toFixed(1)}}" y="${{(basket.ys[n-1] + 4).toFixed(1)}}" fill="${{basketColor}}" font-size="11" font-family="Geist Mono, monospace" font-weight="500">${{basketEnd >= 0 ? '+' : ''}}${{basketEnd.toFixed(1)}}%</text>`;
@@ -9911,6 +10317,9 @@ document.getElementById('hero-chart').addEventListener('click', (e) => {{
   const prevIdeas = prev.idea_tickers || [];
   const newIdeas = (LAST_LOOK.idea_tickers || []).filter(t => !prevIdeas.includes(t));
   if (newIdeas.length) items.push(`<b>${{newIdeas.length}}</b> new idea${{newIdeas.length > 1 ? 's' : ''}}: ${{newIdeas.join(', ')}}`);
+  const prevValue = prev.value_tickers || [];
+  const newValue = (LAST_LOOK.value_tickers || []).filter(t => !prevValue.includes(t));
+  if (newValue.length) items.push(`<b>${{newValue.length}}</b> new value pick${{newValue.length > 1 ? 's' : ''}}: ${{newValue.join(', ')}}`);
   const pm = [], pp = LAST_LOOK.predictions || {{}}, ppp = prev.predictions || {{}};
   for (const k in pp) {{ if (k in ppp) {{ const d = pp[k] - ppp[k]; if (Math.abs(d) >= 3) pm.push(`${{k}} ${{d >= 0 ? '+' : ''}}${{d.toFixed(0)}}pp`); }} }}
   if (pm.length) items.push(pm.join(' &middot; '));
@@ -10214,11 +10623,22 @@ document.getElementById('hero-chart').addEventListener('click', (e) => {{
   const cross = svg.querySelector('.alpha-cross');
   const dot   = svg.querySelector('.alpha-dot');
   const vb = svg.viewBox.baseVal;   // {{x, y, width, height}}
-  const padX = 2, padY = 4;
+  const padX = 0, padY = 4;
   const vmin = Math.min(...values), vmax = Math.max(...values);
   const vrange = Math.max(vmax - vmin, 1e-9);
   const n = values.length;
-  const xAt = (i) => padX + i / Math.max(n - 1, 1) * (vb.width - 2 * padX);
+  // v2.7 #6: map x by DATE over the shared [domainStart,domainEnd] span (same as
+  // the build side) so hover crosshairs land on the calendar-correct point.
+  const domStart = Date.parse((svg.dataset.domainStart || '') + 'T00:00:00');
+  const domEnd   = Date.parse((svg.dataset.domainEnd   || '') + 'T00:00:00');
+  const useDomain = !Number.isNaN(domStart) && !Number.isNaN(domEnd) && domEnd > domStart;
+  const domSpan = Math.max(domEnd - domStart, 1);
+  const dateMs = dates.map(d => Date.parse(d + 'T00:00:00'));
+  const xAt = (i) => {{
+    if (!useDomain) return padX + i / Math.max(n - 1, 1) * (vb.width - 2 * padX);
+    let f = (dateMs[i] - domStart) / domSpan; f = f < 0 ? 0 : (f > 1 ? 1 : f);
+    return padX + f * (vb.width - 2 * padX);
+  }};
   const yAt = (v) => padY + (vmax - v) / vrange * (vb.height - 2 * padY);
   const defaultText = latestEl.dataset.defaultText;
   const defaultCls = latestEl.classList.contains('neg') ? 'neg' : 'pos';
@@ -10275,14 +10695,24 @@ document.getElementById('hero-chart').addEventListener('click', (e) => {{
   const cross = svg.querySelector('.dd-cross');
   const dot   = svg.querySelector('.dd-dot');
   const vb = svg.viewBox.baseVal;
-  const padX = 2, padY = 3;
+  const padX = 0, padY = 3;
   // Match the build-side _dx / _dy mapping (DH-2*padY active height, value
   // floor = min(values + [0])). Important: values are <= 0, so y=padY is the
   // 0% top of the chart and y=DH-padY is the worst drawdown.
   const ddMin = Math.min(...values, 0);
   const ddRange = Math.max(Math.abs(ddMin), 1e-9);
   const n = values.length;
-  const xAt = (i) => padX + i / Math.max(n - 1, 1) * (vb.width - 2 * padX);
+  // v2.7 #6: date-domain x mapping (mirror of the alpha sparkline + build side).
+  const domStart = Date.parse((svg.dataset.domainStart || '') + 'T00:00:00');
+  const domEnd   = Date.parse((svg.dataset.domainEnd   || '') + 'T00:00:00');
+  const useDomain = !Number.isNaN(domStart) && !Number.isNaN(domEnd) && domEnd > domStart;
+  const domSpan = Math.max(domEnd - domStart, 1);
+  const dateMs = dates.map(d => Date.parse(d + 'T00:00:00'));
+  const xAt = (i) => {{
+    if (!useDomain) return padX + i / Math.max(n - 1, 1) * (vb.width - 2 * padX);
+    let f = (dateMs[i] - domStart) / domSpan; f = f < 0 ? 0 : (f > 1 ? 1 : f);
+    return padX + f * (vb.width - 2 * padX);
+  }};
   const yAt = (v) => padY + (-v) / ddRange * (vb.height - 2 * padY);
   const defaultText = latestEl.dataset.defaultText;
 
@@ -10568,7 +10998,9 @@ def main(demo: bool = False, watchlist_only: bool = False) -> None:
     # means typical builds refresh nothing — only ~one batch fetch per week.
     # `analyst_candidates` still drives the "Re-entry ideas" panel, which is
     # closed-positions-only ("should I buy back in?").
-    all_fetch_tickers = sorted(returns.index.tolist()) if not returns.empty else []
+    # v2.7: include watch-only names so the enriched watchlist can show Street
+    # upside + news cites (they already have technicals via signals/quant_metrics).
+    all_fetch_tickers = sorted(set(returns.index.tolist()) | watch_tickers)
     analyst_candidates = sorted(returns[returns.status == "closed"].index.tolist()) \
         if not returns.empty else []
     analyst_cache = load_analyst_cache()

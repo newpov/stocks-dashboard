@@ -14,6 +14,72 @@ than a barely-working prototype.
 
 ---
 
+## v2.7 — Watchlist revived + enriched · 21 June 2026
+
+The Watchlist module comes back as an actionable entry funnel, plus a "chart
+time-axis" pass (FY markers + sparkline alignment), a rating-moves redesign, and
+the value screen joins the "since your last visit" diff.
+
+### Added
+- **Watchlist module reinstated**, placed next to **Re-entry ideas** (its natural
+  "entry vs re-entry" counterpart), visible by default and draggable/hideable like
+  any module. Dormant since the analyst panel took its left-rail slot.
+- **Per-name entry signal** on each watchlist card: a tone-coloured **verdict**
+  (**Buy zone** = near low *and* oversold or with Street upside · **Cooling off** =
+  overbought / stretched above the 200-day · **Watching** = default), a row of
+  **trigger chips** (near 52-week low, oversold, unusual volume, below/above the
+  200-day, `+N% to target`), and a one-line **news cite**. Thresholds reuse the
+  Big Brain engine; chips read off the technicals already computed per ticker.
+  Analyst + news fetch is extended to watch-only tickers (`all_fetch_tickers`
+  unions the watchlist; closed-only Re-entry candidates unchanged).
+- **Rating moves, redesigned (#4).** Now **two side-by-side columns** (stacking on
+  mobile) so the section reads as a tidy grid instead of a sparse single list:
+  **Price targets** (upsides first, then cuts by magnitude — each row aligns
+  `$before → $after  ±%` and shows the current rec) and **Recommendations**
+  (green ↑ upgrades first, red ↓ downgrades — each shows the current target).
+  Capped at **10 per column**, with a few slots **reserved for the opposite
+  direction** so a big cut/downgrade never disappears. Green upgrades must
+  **result in BUY or stronger** (no "upgrade to hold"). Big Brain still consumes
+  the raw per-kind rows.
+- **Hero chart: last-completed fiscal-year return.** A fourth figure (top-left,
+  e.g. `FY25/26 +37.0%`) showing the basket's return over the last finished UK
+  fiscal year (6 Apr → 6 Apr), alongside the FY-start markers.
+- **UK fiscal-year markers on the hero chart (#2).** Faint dashed verticals at
+  ~6 Apr each year (`FY25/26`, `FY26/27`), placed by interpolating the chart's
+  own date→x grid.
+- **Sparkline calendar alignment (#6).** The 30-day rolling-alpha and drawdown
+  sparklines now map x by **date** over the basket's full span (shared with the
+  main chart) and inset their plot area to match the chart's padding — so a given
+  calendar date lands at the same x in all three. The alpha line now starts
+  partway across (where its rolling window begins) instead of stretching from the
+  left edge. New `_date_fraction` helper; hover crosshairs updated to match.
+- **Value screen joins "since your last visit."** The localStorage diff now
+  surfaces **new value-screen names** alongside new Big Brain ideas.
+
+### Fixed
+- **Cost basis resets on a full exit + re-entry.** `build_positions` now splits a
+  ticker's history into trade cycles separated by full exits (running net units →
+  0) and takes the baseline/return from the **active cycle only**. Previously a
+  name bought, fully sold, then rebought later kept averaging the long-closed
+  original entry into the cost basis — so the baseline (and modal chart) showed a
+  large gain even when the *current* lot was roughly flat (e.g. CSCO). A partial
+  trim (net stays > 0) is not a full exit, so it still keeps both buys. Also fixes
+  the modal chart start date (now the re-buy) and unrealized P&L for re-entered
+  names. (Prices remain trade-date market closes — a proxy, not real fills.)
+
+### Notes
+- **Discovery-only / shapes-not-amounts.** Watch names carry no position, so no
+  share counts or amounts surface. Missing data for a name (no analyst coverage,
+  a delisted symbol) drops that chip gracefully — the card never breaks.
+- `watchlist.csv` schema is unchanged: `ticker` required, `note` optional. The
+  separate `--watchlist-only` build mode (track a watchlist's performance
+  equal-weighted) is untouched.
+- New `QUICKSTART.md` — a concise fork-and-build guide for people who don't want
+  the full README.
+- New `test_watchlist_signals.py` + `test_chart_align.py`; `test_rating_moves.py`
+  rewritten for the split two-column model; `test_positions.py` gains cost-basis
+  reset cases. Suite now ~135 tests.
+
 ## v2.6 — Value screen · 20 June 2026
 
 A new discovery lens. Where Big Brain reads *technical* signal-stacking and
