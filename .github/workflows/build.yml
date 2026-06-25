@@ -56,10 +56,8 @@ jobs:
       - name: Rebuild docs/index.html from committed snapshot
         run: python build.py --from-snapshot
 
-      - name: Privacy + sanity gate (skips publish on failure)
-        run: |
-          python -m pytest test_snapshot_privacy.py -q
-          python sanity_check.py
+      - name: Sanity + privacy gate (skips publish on failure)
+        run: python sanity_check.py
 
       - name: Commit & push if anything changed
         run: |

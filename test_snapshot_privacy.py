@@ -1,5 +1,8 @@
 import pandas as pd
 import build
+# The canonical privacy guard lives in sanity_check.py so CI can run it without
+# pytest (CI's requirements.txt has no pytest). Tests reuse the same function.
+from sanity_check import assert_snapshot_is_clean
 
 
 def _real_txns():
@@ -10,19 +13,6 @@ def _real_txns():
         ("LLY",  "2024-10-21", "BUY", 4.0),
         ("LLY",  "2025-03-10", "SELL", 4.0),    # full exit
     ], columns=["ticker", "date", "action", "shares"])
-
-
-def assert_snapshot_is_clean(snap: pd.DataFrame):
-    """Reusable leakage guard — the single source of truth for 'safe to publish'."""
-    assert list(snap.columns) == ["ticker", "date", "action", "shares"]
-    assert set(snap["action"].unique()) <= {"BUY", "SELL"}
-    buys = snap[snap["action"] == "BUY"]["shares"]
-    sells = snap[snap["action"] == "SELL"]["shares"]
-    assert (buys == 1).all(), "every BUY must be exactly 1 unit (no quantity leak)"
-    assert (sells >= 1).all(), "SELL units must be positive integers"
-    assert (sells == sells.round()).all(), "SELL units must be whole (no fractional ratios)"
-    parsed = pd.to_datetime(snap["date"], format="%Y-%m-%d", errors="raise")
-    assert (parsed.dt.normalize() == parsed).all()
 
 
 def test_exported_snapshot_passes_privacy_guard():

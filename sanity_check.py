@@ -50,6 +50,21 @@ def write_last_count(n: int, meta_path: Path = LAST_PUBLISH_META) -> None:
          "date": datetime.now(timezone.utc).strftime("%Y-%m-%d")}), encoding="utf-8")
 
 
+def assert_snapshot_is_clean(snap: pd.DataFrame):
+    """Privacy guard — the single source of truth for 'safe to publish'. Raises
+    AssertionError on any leak. Imported by test_snapshot_privacy.py and run in
+    CI via main() below (so the gate needs no pytest)."""
+    assert list(snap.columns) == ["ticker", "date", "action", "shares"]
+    assert set(snap["action"].unique()) <= {"BUY", "SELL"}
+    buys = snap[snap["action"] == "BUY"]["shares"]
+    sells = snap[snap["action"] == "SELL"]["shares"]
+    assert (buys == 1).all(), "every BUY must be exactly 1 unit (no quantity leak)"
+    assert (sells >= 1).all(), "SELL units must be positive integers"
+    assert (sells == sells.round()).all(), "SELL units must be whole (no fractional ratios)"
+    parsed = pd.to_datetime(snap["date"], format="%Y-%m-%d", errors="raise")
+    assert (parsed.dt.normalize() == parsed).all()
+
+
 def check_output_files(html: Path, payload: Path, min_kb: int = 500):
     if not html.exists():
         _fail(f"missing {html}")
@@ -69,6 +84,11 @@ def main():
     if not SNAPSHOT.exists():
         _fail("basket.snapshot.csv missing — nothing to publish")
     df = pd.read_csv(SNAPSHOT)
+    try:
+        assert_snapshot_is_clean(df)
+    except AssertionError as e:
+        _fail(f"snapshot privacy guard: {e}")
+    print("  privacy guard: snapshot is clean")
     last = read_last_count()
     n = check_position_count(df, last_count=last)
     check_output_files(HTML, PAYLOAD)
