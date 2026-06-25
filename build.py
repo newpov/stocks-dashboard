@@ -10914,6 +10914,26 @@ refreshNewsFromWorker();
 """
 
 
+def resolve_basket_source(demo: bool, watchlist_only: bool, from_snapshot: bool,
+                          log_exists: bool, snapshot_exists: bool) -> str:
+    """Decide which basket source a non-demo build renders from.
+
+    Returns one of: "watchlist", "log", "snapshot", "csv".
+    Forker safety: the committed snapshot is only used when log.xlsx is present
+    (author) or --from-snapshot is passed (CI); a plain clone falls through to
+    its own transactions.csv.
+    """
+    if watchlist_only:
+        return "watchlist"
+    if demo:
+        return "csv"
+    if log_exists:
+        return "log"          # author: regenerate snapshot from log, then render it
+    if from_snapshot and snapshot_exists:
+        return "snapshot"     # CI: render the committed snapshot
+    return "csv"              # forker / sample
+
+
 def main(demo: bool = False, watchlist_only: bool = False) -> None:
     # --demo forces the public-facing sample build: never reads log.xlsx (even
     # if present), writes to repo-root demo.html, and inlines SortableJS so
