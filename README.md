@@ -1,6 +1,6 @@
 # Stocks dashboard
 
-[![Version](https://img.shields.io/badge/version-v2.8-f59e0b)](https://github.com/newpov/stocks-dashboard/tags)
+[![Version](https://img.shields.io/github/v/tag/newpov/stocks-dashboard?label=version&color=f59e0b)](https://github.com/newpov/stocks-dashboard/tags)
 [![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](LICENSE)
 [![Demo](https://img.shields.io/badge/demo-download%20%26%20open-blue.svg)](demo.html)
 [![Changelog](https://img.shields.io/badge/changelog-versions-purple.svg)](CHANGELOG.md)
