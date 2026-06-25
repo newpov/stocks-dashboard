@@ -8,11 +8,13 @@ name: Scheduled rebuild
 #     yfinance closes for the demo build.
 #   - manual button via the Actions tab
 #
-# IMPORTANT: this workflow only rebuilds the standalone `demo.html` (built
-# from transactions.csv). It deliberately does NOT touch docs/index.html —
-# that file is rebuilt locally from log.xlsx by the author and pushed when
-# they want to refresh the public site. Without this guard, CI would
-# overwrite the real-data dashboard with sample-data on every cron run.
+# IMPORTANT: this workflow rebuilds BOTH the standalone `demo.html` (from
+# transactions.csv) AND the real `docs/index.html` (from the committed,
+# privacy-safe `basket.snapshot.csv` — never from log.xlsx, which stays local).
+# The docs build is gated by the privacy guard + sanity checks below; if either
+# fails the job stops before committing, so the last-good published page stays
+# live. The author regenerates basket.snapshot.csv locally (from log.xlsx) when
+# they trade and commits just that file; CI does the daily market-data refresh.
 on:
   push:
     branches: [main]
@@ -20,6 +22,7 @@ on:
       - 'build.py'
       - 'requirements.txt'
       - 'transactions.csv'
+      - 'basket.snapshot.csv'
       - 'watchlist.csv'
       - 'universe.csv'
       - '.github/workflows/**'
@@ -50,14 +53,22 @@ jobs:
       - name: Rebuild demo.html (standalone, self-contained)
         run: python build.py --demo
 
+      - name: Rebuild docs/index.html from committed snapshot
+        run: python build.py --from-snapshot
+
+      - name: Privacy + sanity gate (skips publish on failure)
+        run: |
+          python -m pytest test_snapshot_privacy.py -q
+          python sanity_check.py
+
       - name: Commit & push if anything changed
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add demo.html data/
+          git add docs demo.html data/
           if git diff --staged --quiet; then
             echo "No changes to commit"
           else
-            git commit -m "Demo rebuild $(date -u +'%Y-%m-%d %H:%M UTC')"
+            git commit -m "Daily rebuild $(date -u +'%Y-%m-%d %H:%M UTC')"
             git push
           fi

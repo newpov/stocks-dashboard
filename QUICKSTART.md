@@ -52,4 +52,7 @@ python -m http.server 8765 --directory docs   # preview docs/ locally
 - **Hosting:** push `docs/` to GitHub Pages (or open the file directly). The
   optional Cloudflare Worker in `worker/` only powers the live-news refresh and
   degrades gracefully when absent.
+- **Auto-refresh:** the dashboard rebuilds and publishes daily via GitHub Actions
+  (08:00 UTC); you can trigger an immediate refresh from the GitHub mobile app's
+  Actions tab using **Run workflow**.
 - **Not financial advice** — it's a personal tracking/learning exercise.
