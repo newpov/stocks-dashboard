@@ -146,5 +146,6 @@ def test_render_big_cut_survives_many_upsides(tmp_path):
 
 
 def test_render_empty_states():
-    assert "Tracking begins next build" in build.render_rating_moves([], prior_exists=False)
+    # v2.8: empty-state copy reflects the rolling 2-week baseline model
+    assert "Building the 2-week history" in build.render_rating_moves([], prior_exists=False)
     assert "No material moves" in build.render_rating_moves([], prior_exists=True)

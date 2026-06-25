@@ -63,6 +63,13 @@ ANALYST_CACHE = ROOT / "data" / "analyst_cache.parquet"
 # rating moves (target price changes, recommendation shifts) since last run.
 # Written just before ANALYST_CACHE gets overwritten in main().
 PRIOR_ANALYST_CACHE = ROOT / "data" / "prior_analyst_cache.parquet"
+# v2.8: rolling rating-moves baseline that survives CI. The old mtime-based
+# "weekly baseline" broke once CI owned the build -- git checkout resets every
+# file's mtime each run, so the baseline never aged. Instead we commit a rolling
+# history of daily analyst snapshots and pick a sliding ~2-week baseline from it.
+ANALYST_HISTORY = ROOT / "data" / "analyst_history.parquet"
+RATING_WINDOW_DAYS = 14        # compare today vs ~this many days ago
+RATING_HISTORY_KEEP_DAYS = 18  # prune history a little beyond the window
 ANALYST_TTL_DAYS = 7    # refetch a ticker's analyst data when older than this
 TICKER_NEWS_CACHE = ROOT / "data" / "ticker_news_cache.parquet"
 TICKER_NEWS_TTL_DAYS = 7   # same 7-day cadence as analyst data
@@ -1939,6 +1946,92 @@ def snapshot_prior_analyst() -> None:
         print(f"WARN couldn't snapshot prior analyst cache: {e}", file=sys.stderr)
 
 
+def append_analyst_history(analyst: pd.DataFrame, today,
+                           history_path: Path = ANALYST_HISTORY,
+                           keep_days: int = RATING_HISTORY_KEEP_DAYS) -> pd.DataFrame:
+    """Append today's analyst snapshot (target_mean + recommendation per ticker)
+    to the rolling history parquet, replacing any existing same-day rows and
+    pruning anything older than keep_days. The history is committed so the
+    rolling rating-moves baseline survives stateless CI runs. Returns the updated
+    long-form frame: [snapshot_date, ticker, target_mean, recommendation]."""
+    today = pd.Timestamp(today).normalize()
+    cols = ["target_mean", "recommendation"]
+    out_cols = ["snapshot_date", "ticker"] + cols
+    if analyst is not None and not analyst.empty:
+        cur = analyst.reset_index()
+        cur = cur.rename(columns={cur.columns[0]: "ticker"})
+        for c in cols:
+            if c not in cur.columns:
+                cur[c] = pd.NA
+        cur = cur[["ticker"] + cols].copy()
+        cur.insert(0, "snapshot_date", today)
+    else:
+        cur = pd.DataFrame(columns=out_cols)
+    if history_path.exists():
+        try:
+            hist = pd.read_parquet(history_path)
+        except Exception:
+            hist = pd.DataFrame(columns=out_cols)
+    else:
+        hist = pd.DataFrame(columns=out_cols)
+    if not hist.empty:
+        hist["snapshot_date"] = pd.to_datetime(hist["snapshot_date"]).dt.normalize()
+        hist = hist[hist["snapshot_date"] != today]   # idempotent same-day replace
+    combined = pd.concat([hist, cur], ignore_index=True)
+    if not combined.empty:
+        combined["snapshot_date"] = pd.to_datetime(combined["snapshot_date"]).dt.normalize()
+        cutoff = today - pd.Timedelta(days=keep_days)
+        combined = combined[combined["snapshot_date"] >= cutoff].reset_index(drop=True)
+    history_path.parent.mkdir(parents=True, exist_ok=True)
+    combined.to_parquet(history_path)
+    return combined
+
+
+def select_rating_baseline(history: pd.DataFrame, today,
+                           window_days: int = RATING_WINDOW_DAYS):
+    """Pick the rolling baseline ~window_days ago: the most recent snapshot on or
+    before today-window_days, else the oldest available (ramp-up during the first
+    ~2 weeks of history). Returns (baseline_date, baseline_df) with baseline_df
+    ticker-indexed (target_mean + recommendation). Returns (None, empty) when the
+    only snapshot is today's -- no usable baseline yet."""
+    if history is None or history.empty:
+        return None, pd.DataFrame()
+    h = history.copy()
+    h["snapshot_date"] = pd.to_datetime(h["snapshot_date"]).dt.normalize()
+    today = pd.Timestamp(today).normalize()
+    dates = sorted(pd.to_datetime(h["snapshot_date"].unique()))
+    if not dates:
+        return None, pd.DataFrame()
+    cutoff = today - pd.Timedelta(days=window_days)
+    eligible = [d for d in dates if d <= cutoff]
+    baseline_date = max(eligible) if eligible else min(dates)
+    if pd.Timestamp(baseline_date).normalize() == today:
+        return None, pd.DataFrame()
+    base = h[h["snapshot_date"] == baseline_date].drop(columns=["snapshot_date"])
+    base = base.set_index("ticker")
+    return pd.Timestamp(baseline_date), base
+
+
+def seed_rating_history(prior_path: Path, today,
+                        history_path: Path = ANALYST_HISTORY,
+                        window_days: int = RATING_WINDOW_DAYS) -> bool:
+    """One-time cold-start backfill: if there is no rolling history yet but a
+    legacy prior-analyst baseline exists, seed it as a snapshot dated ~window_days
+    ago so rating moves render immediately instead of staying blank for two weeks
+    while the history accrues. Returns True if it seeded."""
+    if history_path.exists() or not prior_path.exists():
+        return False
+    try:
+        prior = pd.read_parquet(prior_path)
+    except Exception:
+        return False
+    if prior.empty:
+        return False
+    seed_date = pd.Timestamp(today).normalize() - pd.Timedelta(days=window_days)
+    append_analyst_history(prior, seed_date, history_path)
+    return True
+
+
 # Rating strength order (lower = more bullish). Used for direction + sorting.
 _REC_RANK = {"strong_buy": 0, "buy": 1, "outperform": 1, "hold": 2,
              "neutral": 2, "underperform": 3, "sell": 3, "strong_sell": 4}
@@ -1971,10 +2064,11 @@ def _rec_direction(before, after) -> "str | None":
     return None             # same rank, different label -> lateral
 
 
-def compute_rating_moves(prior_path: Path,
+def compute_rating_moves(prior_path: "Path | None",
                          current: pd.DataFrame,
                          min_target_pct: float = 5.0,
-                         max_results: int = 200) -> list[dict]:
+                         max_results: int = 200,
+                         prior_df: "pd.DataFrame | None" = None) -> list[dict]:
     """T9: diff prior vs current analyst cache, surface material moves.
 
     A "move" is one of:
@@ -1986,15 +2080,22 @@ def compute_rating_moves(prior_path: Path,
     show the recommendation alongside a target move and vice-versa. Big Brain
     consumes these raw per-kind rows (kind=="target"); render_rating_moves splits
     them into the Price-targets and Recommendations groups.
-    Returns [] if prior cache is missing (first build after install)."""
-    if not prior_path.exists() or current.empty:
+    A baseline may be supplied directly as ``prior_df`` (the v2.8 rolling-window
+    path); otherwise it is read from ``prior_path``. Returns [] when there is no
+    usable baseline (first build / empty history)."""
+    if current is None or current.empty:
         return []
-    try:
-        prior = pd.read_parquet(prior_path)
-    except Exception as e:
-        print(f"WARN couldn't read prior analyst cache: {e}", file=sys.stderr)
+    if prior_df is not None:
+        prior = prior_df
+    elif prior_path is None or not prior_path.exists():
         return []
-    if prior.empty:
+    else:
+        try:
+            prior = pd.read_parquet(prior_path)
+        except Exception as e:
+            print(f"WARN couldn't read prior analyst cache: {e}", file=sys.stderr)
+            return []
+    if prior is None or prior.empty:
         return []
     common = prior.index.intersection(current.index)
     moves: list[dict] = []
@@ -5562,22 +5663,36 @@ def _rm_rec_row(m: dict) -> str:
     )
 
 
-def render_rating_moves(moves: list[dict], prior_exists: bool) -> str:
+def render_rating_moves(moves: list[dict], prior_exists: bool,
+                        baseline_date=None) -> str:
     """v2.7 #4: split into two groups so BOTH kinds always show:
       - Price targets (upsides first, then cuts by magnitude) — each row also
         shows the current recommendation.
       - Recommendations (upgrades/initiations first, then downgrades) — each row
         flags direction (green up arrow / red down arrow) + the current target.
-    Empty-state copy depends on whether a prior snapshot exists."""
+    v2.8: moves are measured against a rolling ~2-week baseline; when its date is
+    known we show "since <date>" so the window is never a mystery (and a stale
+    note if the baseline is unusually old). Empty-state copy depends on whether a
+    baseline exists yet."""
     head = '<h3>Rating moves</h3>'
-    sub = ('<span class="muted rm-sub">vs last build &middot; target &geq; 5% or rec change</span>')
+    if baseline_date is not None:
+        _bd = pd.Timestamp(baseline_date)
+        _label = f"{_bd.day} {_bd.strftime('%b')}"
+        _age = (pd.Timestamp(datetime.now(timezone.utc).date()).normalize()
+                - _bd.normalize()).days
+        _stale = f' &middot; baseline {_age}d old' if _age > 16 else ''
+        sub = (f'<span class="muted rm-sub">since {_label} &middot; '
+               f'target &geq; 5% or rec change{_stale}</span>')
+    else:
+        sub = ('<span class="muted rm-sub">rolling ~2-week window &middot; '
+               'target &geq; 5% or rec change</span>')
     targets = [m for m in moves if m["kind"] == "target"]
     recs = [m for m in moves if m["kind"] == "recommendation"]
     if not targets and not recs:
-        empty_msg = ("Tracking begins next build &mdash; this is the first "
-                     "snapshot of the analyst cache."
+        empty_msg = ("Building the 2-week history &mdash; rating moves appear as "
+                     "daily analyst snapshots accumulate."
                      if not prior_exists
-                     else "No material moves since the last refresh.")
+                     else "No material moves in the last ~2 weeks.")
         return f"""<section class="rating-moves-section">
   <div class="rm-head">{head}{sub}</div>
   <p class="muted rm-empty">{empty_msg}</p>
@@ -6108,6 +6223,7 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
                 build_health: dict | None = None,
                 rating_moves: list[dict] | None = None,
                 prior_analyst_exists: bool = False,
+                rating_baseline_date=None,
                 unusual_vol: list[dict] | None = None,
                 bb_universe_obs: list[dict] | None = None,
                 prediction_rows: list[dict] | None = None) -> str:
@@ -6723,7 +6839,8 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     holdings_html = f'<section class="panel active" id="panel-0">{toolbar_html}{table_html}</section>'
     # Rating-moves panel sits directly under Re-entry ideas in the default
     # order -- both are analyst-signal modules, so they read as a pair.
-    rating_moves_html = render_rating_moves(rating_moves or [], prior_analyst_exists)
+    rating_moves_html = render_rating_moves(rating_moves or [], prior_analyst_exists,
+                                            baseline_date=rating_baseline_date)
     _module_defs = [
         ("bigbrain", "Big Brain says", bigbrain_html),
         ("value_screen", "Value screen", value_html),
@@ -11106,18 +11223,34 @@ def main(demo: bool = False, watchlist_only: bool = False,
     analyst_candidates = sorted(returns[returns.status == "closed"].index.tolist()) \
         if not returns.empty else []
     analyst_cache = load_analyst_cache()
-    # T9: snapshot the cache BEFORE fetch_analyst_data writes today's version,
-    # so the next render_html can diff "today vs yesterday" for rating moves.
-    snapshot_prior_analyst()
+    if demo:
+        # Demo keeps the simple "snapshot the cache before fetch overwrites it"
+        # diff -- its rating moves are illustrative, not tracked over time.
+        snapshot_prior_analyst()
     if all_fetch_tickers:
         analyst, analyst_failed = fetch_analyst_data(all_fetch_tickers, analyst_cache)
     else:
         analyst, analyst_failed = analyst_cache, set()
-    rating_moves = compute_rating_moves(PRIOR_ANALYST_CACHE, analyst)
+    # v2.8 rating-moves baseline. Real build: a rolling ~2-week window selected
+    # from a committed analyst-snapshot history (survives stateless CI, unlike the
+    # old mtime-based prior). Demo: the last-build prior cache.
+    rating_baseline_date = None
+    if not demo:
+        _today = pd.Timestamp(datetime.now(timezone.utc).date())
+        seed_rating_history(PRIOR_ANALYST_CACHE, _today)   # cold-start backfill
+        _hist = append_analyst_history(analyst, _today)
+        rating_baseline_date, _baseline_df = select_rating_baseline(_hist, _today)
+        rating_moves = compute_rating_moves(None, analyst, prior_df=_baseline_df)
+    else:
+        rating_moves = compute_rating_moves(PRIOR_ANALYST_CACHE, analyst)
+    rating_prior_exists = ((rating_baseline_date is not None) if not demo
+                           else PRIOR_ANALYST_CACHE.exists())
     if rating_moves:
-        print(f"Rating moves: {len(rating_moves)} material moves vs last build")
-    elif not PRIOR_ANALYST_CACHE.exists():
-        print("Rating moves: no prior cache (first build) -- tracking begins next build")
+        _since = (f" since {rating_baseline_date.date()}"
+                  if rating_baseline_date is not None else "")
+        print(f"Rating moves: {len(rating_moves)} material moves{_since}")
+    elif not demo and rating_baseline_date is None:
+        print("Rating moves: building history -- the 2-week window fills in over the next fortnight")
 
     # Per-ticker news: same 7-day TTL pattern as analyst cache. Most builds
     # reuse the parquet; a fresh fetch happens roughly once per week per ticker.
@@ -11255,7 +11388,8 @@ def main(demo: bool = False, watchlist_only: bool = False,
                        sortable_inline_js=sortable_inline_js,
                        build_health=build_health,
                        rating_moves=rating_moves,
-                       prior_analyst_exists=PRIOR_ANALYST_CACHE.exists(),
+                       prior_analyst_exists=rating_prior_exists,
+                       rating_baseline_date=rating_baseline_date,
                        unusual_vol=unusual_vol,
                        bb_universe_obs=bb_universe_obs,
                        prediction_rows=prediction_rows)
