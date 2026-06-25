@@ -1055,6 +1055,14 @@ def export_basket_snapshot(transactions: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def write_basket_snapshot(transactions: pd.DataFrame) -> pd.DataFrame:
+    """Regenerate basket.snapshot.csv from the real ticker'd transactions."""
+    snap = export_basket_snapshot(transactions)
+    snap.to_csv(BASKET_SNAPSHOT_CSV, index=False)
+    print(f"  wrote {len(snap)} normalized rows -> {BASKET_SNAPSHOT_CSV.name}")
+    return snap
+
+
 # ISIN country prefix → yfinance exchange suffix.
 # Empty string = the security trades unsuffixed (typically US-listed).
 # Notes:
