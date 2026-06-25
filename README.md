@@ -922,10 +922,12 @@ equal-weight units. No £ amounts, no real share quantities. CI renders
 runs a sanity gate (privacy guard + build invariant checks), and pushes if the
 gate passes. If the gate fails, the last-good page stays live.
 
-**After a new trade.** The author runs `python build.py` locally (which reads
-`log.xlsx` to regenerate `basket.snapshot.csv`), then commits **only
-`basket.snapshot.csv`** — not `docs/index.html`. CI picks it up on the next
-run and publishes the updated page. `log.xlsx` never leaves the machine.
+**After a new trade.** The author runs `python build.py --export-snapshot`
+(regenerates `basket.snapshot.csv` from `log.xlsx` in seconds — no full build,
+no network), commits **only `basket.snapshot.csv`** — not `docs/index.html` —
+and pushes. CI rebuilds and publishes the updated page within a few minutes.
+`log.xlsx` never leaves the machine. (Run a full `python build.py` instead if
+you also want a local preview before pushing.)
 
 **For forkers.** The committed snapshot is the author's basket. A forker who
 enables CI on their fork will get the `--from-snapshot` step rendering that

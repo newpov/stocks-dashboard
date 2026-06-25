@@ -59,6 +59,19 @@ regenerate that file.
 - **New test files:** `test_snapshot_export.py`, `test_snapshot_privacy.py`,
   `test_snapshot_source.py`, `test_sanity_check.py`.
 
+### Fixed (post-launch)
+- **`--export-snapshot` fast path.** Regenerates `basket.snapshot.csv` from
+  `log.xlsx` in seconds (no full build, no network) — the routine post-trade step.
+- **DEMO MODE banner on the real CI page.** The sample-build gate keyed off
+  "`log.xlsx` absent", which is also true for the CI snapshot build, so the real
+  dashboard wrongly showed the demo banner (and inlined its payload + skipped the
+  Big-Brain "since" memory). Now gated on the resolved source via
+  `_is_sample_build`, with a regression test pinning `source=="snapshot"` as a
+  real build.
+- **CI gate needs no pytest.** The privacy guard now lives in `sanity_check.py`,
+  so the gate is a single `python sanity_check.py` (CI's `requirements.txt` has no
+  pytest; the first run failed there and the fail-safe correctly skipped publish).
+
 ### Notes
 - **Strict-privacy normalization side effects.** Generating a privacy-safe
   snapshot from `log.xlsx` means quantities are dropped and positions are

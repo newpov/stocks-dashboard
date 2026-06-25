@@ -8,6 +8,17 @@ def R(**kw):
     return build.resolve_basket_source(**base)
 
 
+def test_sample_build_flag_gates_demo_banner_and_inline():
+    # The DEMO/sample banner + self-inlined payload must show ONLY for the
+    # sample/demo build, never for the real author ("log") or CI ("snapshot")
+    # builds. The "snapshot" case is the exact v2.8 bug that shipped the banner.
+    assert build._is_sample_build(False, "csv") is True       # forker / bundled sample
+    assert build._is_sample_build(True, "csv") is True        # explicit --demo
+    assert build._is_sample_build(False, "log") is False      # real author build
+    assert build._is_sample_build(False, "snapshot") is False  # CI real publish build
+    assert build._is_sample_build(False, "watchlist") is False  # has its own banner
+
+
 def test_watchlist_only_wins():
     assert R(watchlist_only=True, log_exists=True) == "watchlist"
 

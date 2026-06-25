@@ -11066,6 +11066,16 @@ def resolve_basket_source(demo: bool, watchlist_only: bool, from_snapshot: bool,
     return "csv"              # forker / sample
 
 
+def _is_sample_build(demo: bool, source: str) -> bool:
+    """True when the page should show the DEMO/sample banner and self-inline its
+    data (the bundled transactions.csv sample or an explicit --demo). The real
+    author build ("log") and the CI publish build ("snapshot") are NOT sample
+    builds — they render the real basket, so they get the sidecar payload and no
+    banner. ("watchlist" has its own banner.) This is the guard that the v2.8 CI
+    publish initially got wrong (log.xlsx absent in CI was mistaken for demo)."""
+    return demo or source == "csv"
+
+
 def main(demo: bool = False, watchlist_only: bool = False,
          from_snapshot: bool = False) -> None:
     # Source selection (see resolve_basket_source for forker safety):
@@ -11383,7 +11393,7 @@ def main(demo: bool = False, watchlist_only: bool = False,
                        universe_outlook=universe_outlook,
                        quant_metrics=quant_metrics,
                        ticker_news=ticker_news,
-                       demo_mode=demo or not LOG_XLSX.exists(),
+                       demo_mode=_is_sample_build(demo, source),
                        watchlist_only=watchlist_only,
                        sortable_inline_js=sortable_inline_js,
                        build_health=build_health,
@@ -11420,8 +11430,23 @@ if __name__ == "__main__":
     parser.add_argument("--from-snapshot", action="store_true",
                         help="Render docs/index.html from the committed "
                              "basket.snapshot.csv (CI publish path; no log.xlsx).")
+    parser.add_argument("--export-snapshot", action="store_true",
+                        help="Fast path after a trade: regenerate basket.snapshot.csv "
+                             "from log.xlsx and exit (no full build, no network). "
+                             "Then commit basket.snapshot.csv and push; CI republishes.")
     args = parser.parse_args()
     if args.weight:
         WEIGHT_MODE = args.weight   # module-level rebind; functions read this global
+    if args.export_snapshot:
+        if not LOG_XLSX.exists():
+            print(f"--export-snapshot needs {LOG_XLSX.name} (author-only); nothing to do.")
+            sys.exit(1)
+        _txns, _ = load_transactions_from_log()
+        snap = write_basket_snapshot(_txns)
+        print(f"Snapshot regenerated ({len(snap)} rows). Next:\n"
+              f"  git add basket.snapshot.csv\n"
+              f"  git commit -m \"trade update\"\n"
+              f"  git push        # CI rebuilds + republishes")
+        sys.exit(0)
     main(demo=args.demo, watchlist_only=args.watchlist_only,
          from_snapshot=args.from_snapshot)
