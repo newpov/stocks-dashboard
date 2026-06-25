@@ -37,6 +37,7 @@ import yfinance as yf
 ROOT = Path(__file__).parent
 TRANSACTIONS_CSV = ROOT / "transactions.csv"
 LOG_XLSX = ROOT / "log.xlsx"           # Trading 212-style real transaction log
+BASKET_SNAPSHOT_CSV = ROOT / "basket.snapshot.csv"   # public, normalized basket for CI
 
 # v2.4 weighting model. "equal" = each position is one unit (privacy-driven,
 # the author's default; no monetary scale). "value" = capital-weighted by real
@@ -1014,6 +1015,45 @@ def load_transactions() -> pd.DataFrame:
     df = df[df["shares"] > 0]
     df = df.dropna(subset=["date"])
     return df.sort_values(["ticker", "date"]).reset_index(drop=True)
+
+
+def export_basket_snapshot(transactions: pd.DataFrame) -> pd.DataFrame:
+    """Normalize the real ticker'd transactions into a privacy-safe snapshot.
+
+    Strict-privacy equal-weight rules:
+      - every BUY  -> 1 unit
+      - full-exit SELL (real net -> 0) -> K units, K = normalized open units in
+        the cycle, forcing normalized net -> 0 (keeps the cost-basis cycle reset)
+      - partial trim (real net stays > 0) -> omitted (accounting-neutral in
+        equal-weight; avoids 0-share rows the loader would drop)
+
+    Manual-fund/untracked rows are not present (caller passes only ticker'd
+    transactions), so they are excluded by construction. Output schema matches
+    transactions.csv: ticker,date,action,shares (dates as YYYY-MM-DD strings).
+    """
+    out_rows = []
+    for ticker, grp in transactions.sort_values("date").groupby("ticker", sort=True):
+        net = 0.0          # real units — drives full-exit detection
+        open_units = 0     # normalized units open in the current cycle
+        for r in grp.itertuples(index=False):
+            action = str(r.action).upper()
+            sh = float(r.shares)
+            if action == "BUY":
+                out_rows.append((ticker, r.date, "BUY", 1))
+                net += sh
+                open_units += 1
+            elif action == "SELL":
+                net -= sh
+                if net <= 1e-6:                       # full exit -> close cycle
+                    out_rows.append((ticker, r.date, "SELL", open_units))
+                    net = 0.0
+                    open_units = 0
+                # else: partial trim -> emit nothing (net already decremented)
+    out = pd.DataFrame(out_rows, columns=["ticker", "date", "action", "shares"])
+    if not out.empty:
+        out["date"] = pd.to_datetime(out["date"]).dt.strftime("%Y-%m-%d")
+        out["shares"] = out["shares"].astype(int)
+    return out
 
 
 # ISIN country prefix → yfinance exchange suffix.

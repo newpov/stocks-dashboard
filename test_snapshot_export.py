@@ -1,0 +1,65 @@
+import pandas as pd
+import build
+
+
+def _txns(rows):
+    return pd.DataFrame(rows, columns=["ticker", "date", "action", "shares"])
+
+
+def test_single_buy_becomes_one_unit():
+    df = _txns([("AAA", "2025-01-02", "BUY", 15.0)])
+    snap = build.export_basket_snapshot(df)
+    assert list(snap.columns) == ["ticker", "date", "action", "shares"]
+    assert snap.iloc[0].tolist() == ["AAA", "2025-01-02", "BUY", 1]
+
+
+def test_multiple_buys_each_one_unit():
+    df = _txns([
+        ("AMD", "2025-01-15", "BUY", 12.0),
+        ("AMD", "2025-07-08", "BUY", 8.0),
+    ])
+    snap = build.export_basket_snapshot(df)
+    assert (snap["action"] == "BUY").all()
+    assert snap["shares"].tolist() == [1, 1]
+    assert snap["date"].tolist() == ["2025-01-15", "2025-07-08"]
+
+
+def test_full_exit_sell_closes_cycle_with_unit_count():
+    df = _txns([
+        ("LLY", "2024-10-21", "BUY", 4.0),
+        ("LLY", "2025-03-10", "SELL", 4.0),
+    ])
+    snap = build.export_basket_snapshot(df)
+    assert snap["action"].tolist() == ["BUY", "SELL"]
+    assert snap["shares"].tolist() == [1, 1]
+
+
+def test_full_exit_after_two_buys_sell_unit_count_is_two():
+    df = _txns([
+        ("X", "2025-01-02", "BUY", 5.0),
+        ("X", "2025-02-02", "BUY", 7.0),
+        ("X", "2025-03-02", "SELL", 12.0),
+    ])
+    snap = build.export_basket_snapshot(df)
+    assert snap["shares"].tolist() == [1, 1, 2]
+
+
+def test_partial_trim_is_omitted():
+    df = _txns([
+        ("NVDA", "2025-01-02", "BUY", 30.0),
+        ("NVDA", "2025-04-22", "SELL", 10.0),
+    ])
+    snap = build.export_basket_snapshot(df)
+    assert snap["action"].tolist() == ["BUY"]
+    assert snap["shares"].tolist() == [1]
+
+
+def test_rebuy_after_full_exit_two_cycles():
+    df = _txns([
+        ("CSCO", "2024-01-02", "BUY", 10.0),
+        ("CSCO", "2024-06-02", "SELL", 10.0),
+        ("CSCO", "2026-05-13", "BUY", 10.0),
+    ])
+    snap = build.export_basket_snapshot(df)
+    assert snap["action"].tolist() == ["BUY", "SELL", "BUY"]
+    assert snap["shares"].tolist() == [1, 1, 1]
