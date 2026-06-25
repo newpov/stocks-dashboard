@@ -63,3 +63,23 @@ def test_rebuy_after_full_exit_two_cycles():
     snap = build.export_basket_snapshot(df)
     assert snap["action"].tolist() == ["BUY", "SELL", "BUY"]
     assert snap["shares"].tolist() == [1, 1, 1]
+
+
+def test_orphan_sell_emits_nothing():
+    # a SELL with no preceding BUY must not produce a bogus SELL 0 row
+    df = _txns([("ZZZ", "2025-01-02", "SELL", 5.0)])
+    snap = build.export_basket_snapshot(df)
+    assert snap.empty
+    assert snap["shares"].dtype.kind == "i"   # int dtype even when empty
+
+
+def test_no_zero_share_sell_rows_ever():
+    df = _txns([
+        ("NVDA", "2025-01-02", "BUY", 30.0),
+        ("NVDA", "2025-04-22", "SELL", 10.0),   # partial -> omitted
+        ("LLY",  "2024-10-21", "BUY", 4.0),
+        ("LLY",  "2025-03-10", "SELL", 4.0),    # full exit
+    ])
+    snap = build.export_basket_snapshot(df)
+    sells = snap[snap["action"] == "SELL"]["shares"]
+    assert (sells >= 1).all()

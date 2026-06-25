@@ -1044,15 +1044,14 @@ def export_basket_snapshot(transactions: pd.DataFrame) -> pd.DataFrame:
                 open_units += 1
             elif action == "SELL":
                 net -= sh
-                if net <= 1e-6:                       # full exit -> close cycle
+                if net <= 1e-6 and open_units > 0:    # full exit -> close cycle
                     out_rows.append((ticker, r.date, "SELL", open_units))
                     net = 0.0
                     open_units = 0
-                # else: partial trim -> emit nothing (net already decremented)
+                # else: partial trim or orphan sell -> emit nothing
     out = pd.DataFrame(out_rows, columns=["ticker", "date", "action", "shares"])
-    if not out.empty:
-        out["date"] = pd.to_datetime(out["date"]).dt.strftime("%Y-%m-%d")
-        out["shares"] = out["shares"].astype(int)
+    out["date"] = pd.to_datetime(out["date"]).dt.strftime("%Y-%m-%d")
+    out["shares"] = out["shares"].astype(int)
     return out
 
 
