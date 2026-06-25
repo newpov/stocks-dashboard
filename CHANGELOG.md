@@ -41,10 +41,18 @@ regenerate that file.
 - **Sanity gate (privacy guard + sanity checks).** Before publishing, CI runs two
   separate checks: `test_snapshot_privacy.py` (the privacy guard — confirms the
   committed snapshot carries no monetary amounts or real share quantities) and
-  `sanity_check.py` (position-count floor + output-file existence/size/JSON
-  checks). The build itself also runs `validate_build_invariants` (non-empty
-  prices and positions, finite basket series). A failed gate skips the publish
-  step and leaves the last-good page live.
+  `sanity_check.py` (position-count floor **and a band vs the last published
+  count**, so an accidentally-truncated basket can't publish + output-file
+  existence/size/JSON checks). The build itself also runs
+  `validate_build_invariants` (non-empty prices and positions, finite basket
+  series). A failed gate skips the publish step and leaves the last-good page live.
+- **Rating moves: rolling ~2-week baseline.** Under daily CI the old mtime-based
+  "weekly baseline" broke (git checkout resets file mtimes every run, so the
+  baseline never aged). Replaced with a committed history of daily analyst
+  snapshots (`data/analyst_history.parquet`) + a sliding ~14-day baseline, and
+  the panel now shows the baseline date ("since 11 Jun") so the comparison window
+  is never a mystery. A cold-start seed backfills the prior baseline so moves show
+  immediately rather than staying blank while the history accrues.
 - **`snapshot_baseline_diff.py`** — a diagnostic helper that compares the
   snapshot against the author's local build so regressions from the strict-
   privacy normalization are easy to spot before committing.
