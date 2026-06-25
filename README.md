@@ -929,9 +929,11 @@ run and publishes the updated page. `log.xlsx` never leaves the machine.
 
 **For forkers.** The committed snapshot is the author's basket. A forker who
 enables CI on their fork will get the `--from-snapshot` step rendering that
-snapshot, not their own trades. To publish their own basket via CI, they should
-generate their own snapshot from their `transactions.csv` and commit it, or
-simply repoint the CI step to build from `transactions.csv` directly.
+snapshot, not their own trades. To publish their own basket via CI, repoint that
+workflow step to build from their own data — drop `--from-snapshot` so it runs
+plain `python build.py` (which uses their `log.xlsx` if present, otherwise their
+`transactions.csv`). The snapshot mechanism is the author's convenience for
+keeping `log.xlsx` off GitHub; forkers can publish straight from their own source.
 
 ### Going further — optional
 

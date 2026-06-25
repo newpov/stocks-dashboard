@@ -38,11 +38,13 @@ regenerate that file.
   who clones and runs plain `python build.py` or `python build.py --demo`
   continues to build from their own `transactions.csv` — the committed snapshot
   is inert for them.
-- **Sanity gate (privacy guard + build invariants).** CI runs `sanity_check.py`
-  before publishing: the privacy guard confirms no monetary amounts entered the
-  output, and the build invariant checks confirm the output file exists and passes
-  basic structural tests. A failed gate skips the publish step and leaves the
-  last-good page live.
+- **Sanity gate (privacy guard + sanity checks).** Before publishing, CI runs two
+  separate checks: `test_snapshot_privacy.py` (the privacy guard — confirms the
+  committed snapshot carries no monetary amounts or real share quantities) and
+  `sanity_check.py` (position-count floor + output-file existence/size/JSON
+  checks). The build itself also runs `validate_build_invariants` (non-empty
+  prices and positions, finite basket series). A failed gate skips the publish
+  step and leaves the last-good page live.
 - **`snapshot_baseline_diff.py`** — a diagnostic helper that compares the
   snapshot against the author's local build so regressions from the strict-
   privacy normalization are easy to spot before committing.
