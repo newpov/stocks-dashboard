@@ -10914,6 +10914,21 @@ refreshNewsFromWorker();
 """
 
 
+def validate_build_invariants(basket, prices_native, positions) -> None:
+    """Cheap build-time invariants for the real publish build. Raise SystemExit
+    (non-zero) so CI skips the commit and the last-good page stays live."""
+    import math
+    if prices_native is None or prices_native.empty:
+        raise SystemExit("BUILD INVARIANT: no market prices fetched")
+    if basket is None or len(basket) == 0:
+        raise SystemExit("BUILD INVARIANT: empty basket MTM series")
+    last = float(basket.iloc[-1])
+    if math.isnan(last) or math.isinf(last):
+        raise SystemExit("BUILD INVARIANT: basket MTM last value is not finite")
+    if positions is None or positions.empty:
+        raise SystemExit("BUILD INVARIANT: no positions")
+
+
 def resolve_basket_source(demo: bool, watchlist_only: bool, from_snapshot: bool,
                           log_exists: bool, snapshot_exists: bool) -> str:
     """Decide which basket source a non-demo build renders from.
@@ -11052,6 +11067,8 @@ def main(demo: bool = False, watchlist_only: bool = False,
           f"{int((returns.status == 'closed').sum())} closed")
 
     basket = compute_basket_mtm_series(transactions, prices)
+    if not demo and not watchlist_only:
+        validate_build_invariants(basket, prices_native, returns)
     print(f"Basket series ({BASE_CCY}): {len(basket)} daily points "
           f"(range {basket.min():+.2f} to {basket.max():+.2f})")
 
