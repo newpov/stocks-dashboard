@@ -14,6 +14,58 @@ than a barely-working prototype.
 
 ---
 
+## v2.8 — CI snapshot publish · 25 June 2026
+
+The dashboard now rebuilds and publishes itself daily without the author's
+laptop. A committed, privacy-safe `basket.snapshot.csv` becomes the single
+source of truth for CI; `log.xlsx` stays local and is only ever used to
+regenerate that file.
+
+### Added
+- **`basket.snapshot.csv`** — a committed privacy-safe snapshot of the basket:
+  tickers + trade dates, normalized to equal-weight units. No £ amounts, no real
+  share quantities. The author regenerates it locally with `python build.py`
+  (which reads `log.xlsx` as before), then commits only this file. CI and the
+  local build both render from the snapshot, so local preview and the published
+  page are built from exactly the same input.
+- **CI publishes `docs/index.html` daily.** The GitHub Actions workflow (daily
+  08:00 UTC cron + manual `workflow_dispatch` + push of source/snapshot files)
+  now renders `docs/index.html` from `basket.snapshot.csv` with fresh market
+  data and commits + pushes it. The laptop dependency for routine dashboard
+  refreshes is gone.
+- **Snapshot path gating.** `build.py` uses the snapshot when `log.xlsx` is
+  present (author's machine) or when `--from-snapshot` is passed (CI). A forker
+  who clones and runs plain `python build.py` or `python build.py --demo`
+  continues to build from their own `transactions.csv` — the committed snapshot
+  is inert for them.
+- **Sanity gate (privacy guard + build invariants).** CI runs `sanity_check.py`
+  before publishing: the privacy guard confirms no monetary amounts entered the
+  output, and the build invariant checks confirm the output file exists and passes
+  basic structural tests. A failed gate skips the publish step and leaves the
+  last-good page live.
+- **`snapshot_baseline_diff.py`** — a diagnostic helper that compares the
+  snapshot against the author's local build so regressions from the strict-
+  privacy normalization are easy to spot before committing.
+- **New test files:** `test_snapshot_export.py`, `test_snapshot_privacy.py`,
+  `test_snapshot_source.py`, `test_sanity_check.py`.
+
+### Notes
+- **Strict-privacy normalization side effects.** Generating a privacy-safe
+  snapshot from `log.xlsx` means quantities are dropped and positions are
+  normalized to equal weight. For a scaled-in name the snapshot records each
+  buy-date close independently, so the effective baseline becomes a simple
+  average of those closes (not quantity-weighted as it would be with real
+  shares). Partial trims are omitted from the snapshot (only the surviving open
+  lots are recorded). These are expected, documented differences versus a
+  quantity-aware local build.
+- **Forker note.** A forker who enables CI on their fork will find the
+  `--from-snapshot` step rendering the committed snapshot — which is the
+  author's basket, not theirs. To publish their own basket via CI they should
+  commit their own snapshot (generated from their `transactions.csv`) or repoint
+  that CI step to build from their `transactions.csv` directly.
+
+---
+
 ## v2.7 — Watchlist revived + enriched · 21 June 2026
 
 The Watchlist module comes back as an actionable entry funnel, plus a "chart
