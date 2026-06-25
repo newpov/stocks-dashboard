@@ -10934,28 +10934,39 @@ def resolve_basket_source(demo: bool, watchlist_only: bool, from_snapshot: bool,
     return "csv"              # forker / sample
 
 
-def main(demo: bool = False, watchlist_only: bool = False) -> None:
-    # --demo forces the public-facing sample build: never reads log.xlsx (even
-    # if present), writes to repo-root demo.html, and inlines SortableJS so
-    # the resulting file is fully self-contained (works opened from disk via
-    # file://, no relative-path dependencies). Without the flag, the build
-    # behaves as before: log.xlsx → docs/index.html with real data; absent →
-    # transactions.csv fallback also into docs/index.html.
+def main(demo: bool = False, watchlist_only: bool = False,
+         from_snapshot: bool = False) -> None:
+    # Source selection (see resolve_basket_source for forker safety):
+    #   --demo            -> sample transactions.csv (self-contained demo.html)
+    #   log.xlsx present  -> AUTHOR build: read the private log ONLY to regenerate
+    #                        the public basket.snapshot.csv, then render FROM the
+    #                        snapshot so local preview == what CI publishes.
+    #   --from-snapshot   -> CI build: render the committed basket.snapshot.csv
+    #                        (log.xlsx absent). Forkers (no log, no flag) fall
+    #                        through to their own transactions.csv.
     t0 = time.time()
-    if watchlist_only:
+    source = resolve_basket_source(
+        demo=demo, watchlist_only=watchlist_only, from_snapshot=from_snapshot,
+        log_exists=LOG_XLSX.exists(), snapshot_exists=BASKET_SNAPSHOT_CSV.exists())
+    untracked = pd.DataFrame()
+    if source == "watchlist":
         print("Watchlist-only mode: ignoring log.xlsx / transactions.csv")
         transactions = pd.DataFrame(columns=["ticker", "date", "action", "shares"])
-        untracked = pd.DataFrame()
-    elif not demo and LOG_XLSX.exists():
-        print(f"Loading transactions from {LOG_XLSX}")
-        transactions, untracked = load_transactions_from_log()
+    elif source == "log":
+        print(f"Loading transactions from {LOG_XLSX} (regenerating snapshot)")
+        real_txns, untracked = load_transactions_from_log()
         if not untracked.empty:
             print(f"  {len(untracked)} untracked manual-fund rows "
-                  f"(no ticker/ISIN) — listed separately in the dashboard")
+                  f"(no ticker/ISIN) — excluded from snapshot")
+        write_basket_snapshot(real_txns)
+        transactions = load_transactions_from_snapshot()
+        untracked = pd.DataFrame()   # manual-fund rows are not in the snapshot
+    elif source == "snapshot":
+        print(f"Loading transactions from {BASKET_SNAPSHOT_CSV} (--from-snapshot)")
+        transactions = load_transactions_from_snapshot()
     else:
         print(f"Loading transactions from {TRANSACTIONS_CSV}")
         transactions = load_transactions()
-        untracked = pd.DataFrame()
     if not watchlist_only:
         n_txns = len(transactions)
         n_buys = int((transactions.action == "BUY").sum())
@@ -11255,7 +11266,11 @@ if __name__ == "__main__":
                         help="Build from watchlist.csv only (no positions): each "
                              "ticker is tracked equal-weight from its window start. "
                              "Lets someone use the dashboard with zero trade history.")
+    parser.add_argument("--from-snapshot", action="store_true",
+                        help="Render docs/index.html from the committed "
+                             "basket.snapshot.csv (CI publish path; no log.xlsx).")
     args = parser.parse_args()
     if args.weight:
         WEIGHT_MODE = args.weight   # module-level rebind; functions read this global
-    main(demo=args.demo, watchlist_only=args.watchlist_only)
+    main(demo=args.demo, watchlist_only=args.watchlist_only,
+         from_snapshot=args.from_snapshot)
