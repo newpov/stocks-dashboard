@@ -83,3 +83,25 @@ def test_no_zero_share_sell_rows_ever():
     snap = build.export_basket_snapshot(df)
     sells = snap[snap["action"] == "SELL"]["shares"]
     assert (sells >= 1).all()
+
+
+def test_snapshot_loads_back_into_positions(tmp_path, monkeypatch):
+    import numpy as np
+    monkeypatch.setattr(build, "BASKET_SNAPSHOT_CSV", tmp_path / "basket.snapshot.csv")
+    real = _txns([
+        ("X", "2025-01-02", "BUY", 5.0),
+        ("X", "2025-02-03", "BUY", 7.0),    # scaled in
+    ])
+    build.write_basket_snapshot(real)
+    loaded = build.load_transactions_from_snapshot()
+    assert set(loaded["action"].unique()) == {"BUY"}
+    assert (loaded["shares"] == 1.0).all()       # equal-weight units survive load
+    assert str(loaded["date"].dtype).startswith("datetime")
+
+    dates = pd.bdate_range("2025-01-02", periods=40)
+    px = pd.DataFrame({"X": np.linspace(100.0, 140.0, 40)}, index=dates)
+    pos = build.build_positions(loaded, px)
+    # simple-average baseline of the two buy-date closes (NOT qty-weighted)
+    b0 = float(px["X"].asof(pd.Timestamp("2025-01-02")))
+    b1 = float(px["X"].asof(pd.Timestamp("2025-02-03")))
+    assert abs(pos.loc["X"]["baseline"] - (b0 + b1) / 2.0) < 1e-6

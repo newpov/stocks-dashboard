@@ -985,7 +985,7 @@ def _normalize_action(v) -> str:
     return ""
 
 
-def load_transactions() -> pd.DataFrame:
+def load_transactions(path: Path = TRANSACTIONS_CSV) -> pd.DataFrame:
     """Load and validate transactions.csv.
 
     Canonical schema: ``ticker, date, action`` (+ optional ``shares``). v2.4
@@ -996,12 +996,12 @@ def load_transactions() -> pd.DataFrame:
     Each row is a single BUY or SELL event, aggregated per ticker into positions
     with prices looked up from yfinance for the transaction dates.
     """
-    df = pd.read_csv(TRANSACTIONS_CSV)
+    df = pd.read_csv(path)
     df = _normalize_txn_columns(df)
     missing = {"ticker", "date", "action"} - set(df.columns)
     if missing:
         raise ValueError(
-            f"transactions.csv is missing required column(s): {sorted(missing)}. "
+            f"{path.name} is missing required column(s): {sorted(missing)}. "
             f"Accepted header names per field: {_TXN_COL_ALIASES}")
     df["ticker"] = df["ticker"].astype(str).str.strip().str.upper()
     df = df[df["ticker"] != ""].copy()
@@ -1015,6 +1015,13 @@ def load_transactions() -> pd.DataFrame:
     df = df[df["shares"] > 0]
     df = df.dropna(subset=["date"])
     return df.sort_values(["ticker", "date"]).reset_index(drop=True)
+
+
+def load_transactions_from_snapshot() -> pd.DataFrame:
+    """Load the committed, normalized basket.snapshot.csv (same schema/validation
+    as transactions.csv). This is the render source for both the author's local
+    build (after regenerating the snapshot) and CI (--from-snapshot)."""
+    return load_transactions(BASKET_SNAPSHOT_CSV)
 
 
 def export_basket_snapshot(transactions: pd.DataFrame) -> pd.DataFrame:
