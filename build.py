@@ -1598,11 +1598,40 @@ def compute_prediction_moves(prior: list[dict], current: list[dict]) -> list[dic
     return rows
 
 
+def _universe_cache_date(path: "Path | None" = None):
+    """The date the universe cache was last refreshed, read from an embedded
+    `cache_date` column — NOT file mtime, which CI's git checkout resets to "now"
+    every run (so an mtime TTL never expires under auto-publish and the cache
+    freezes forever; this is the v2.8 analyst-history lesson applied here).
+    Returns a normalized Timestamp, or None if absent / pre-`cache_date` format.
+    (Resolves UNIVERSE_CACHE at call time, not via a def-time default.)"""
+    path = path or UNIVERSE_CACHE
+    if not path.exists():
+        return None
+    try:
+        df = pd.read_parquet(path)
+    except Exception:
+        return None
+    if "cache_date" not in df.columns or df.empty:
+        return None
+    try:
+        return pd.to_datetime(df["cache_date"].iloc[0]).normalize()
+    except Exception:
+        return None
+
+
+def _universe_cache_age_days(path: "Path | None" = None):
+    cd = _universe_cache_date(path)
+    if cd is None:
+        return None
+    return (pd.Timestamp(datetime.now(timezone.utc).date()).normalize() - cd).days
+
+
 def _universe_cache_is_fresh(ttl_days: int = UNIVERSE_TTL_DAYS) -> bool:
-    if not UNIVERSE_CACHE.exists():
-        return False
-    age_seconds = datetime.now(timezone.utc).timestamp() - UNIVERSE_CACHE.stat().st_mtime
-    return (age_seconds / 86400) < ttl_days
+    age = _universe_cache_age_days()
+    # No cache, or an old pre-`cache_date` parquet → treat as stale so the next
+    # build refetches and rewrites it in the dated format (one-time migration).
+    return age is not None and age < ttl_days
 
 
 def fetch_universe_outlook(universe: list[str], meta_cache: pd.DataFrame,
@@ -1620,8 +1649,9 @@ def fetch_universe_outlook(universe: list[str], meta_cache: pd.DataFrame,
     if _universe_cache_is_fresh(ttl_days):
         try:
             df = pd.read_parquet(UNIVERSE_CACHE)
-            age = (datetime.now(timezone.utc).timestamp() - UNIVERSE_CACHE.stat().st_mtime) / 86400
-            print(f"Universe outlook: cache hit ({len(df)} tickers, {age:.0f}d old)")
+            age = _universe_cache_age_days()
+            print(f"Universe outlook: cache hit ({len(df)} tickers, "
+                  f"{age if age is not None else '?'}d old)")
             return df
         except Exception as e:
             print(f"WARN universe cache read failed: {e}; refetching", file=sys.stderr)
@@ -1710,6 +1740,9 @@ def fetch_universe_outlook(universe: list[str], meta_cache: pd.DataFrame,
     )
     # Market-cap tier — Mega >$200B, Large $10-200B, Mid $2-10B, Small <$2B.
     df["cap_tier"] = df["market_cap"].apply(_cap_tier)
+    # Embed the refresh date so freshness survives CI (mtime would be reset by
+    # git checkout every run). Read back by _universe_cache_date().
+    df["cache_date"] = pd.Timestamp(datetime.now(timezone.utc).date()).strftime("%Y-%m-%d")
 
     UNIVERSE_CACHE.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -6396,12 +6429,11 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     value_rows = build_value_screen(universe_outlook, log_tickers=log_tickers_set,
                                     bb_idea_tickers=_bb_idea_tkrs)
     # "as of" = the universe cache's last refresh (the monthly fetch), not today,
-    # since the screen's data is only as fresh as that fetch.
-    try:
-        _uni_ts = datetime.fromtimestamp(UNIVERSE_CACHE.stat().st_mtime, tz=timezone.utc)
-        value_as_of = _uni_ts.strftime("%d %b %Y")
-    except Exception:
-        value_as_of = latest_date
+    # since the screen's data is only as fresh as that fetch. Use the embedded
+    # cache_date (NOT mtime, which CI resets every run → would always read "today"
+    # on month-old data, the exact M-VAL/M-IND staleness mislabel).
+    _uni_date = _universe_cache_date()
+    value_as_of = (_uni_date.strftime("%d %b %Y") if _uni_date is not None else latest_date)
     value_html = render_value_screen(value_rows, value_as_of)
 
     n_total = len(returns)
@@ -11110,6 +11142,26 @@ refreshNewsFromWorker();
 """
 
 
+def snapshot_latest_date(path: Path = BASKET_SNAPSHOT_CSV):
+    """Latest transaction date in the committed snapshot (what CI publishes from),
+    or None if the file is absent/unreadable."""
+    if not path.exists():
+        return None
+    try:
+        return pd.to_datetime(pd.read_csv(path)["date"], errors="coerce").max()
+    except Exception:
+        return None
+
+
+def snapshot_is_behind_log(snapshot_date, log_date) -> bool:
+    """True when log.xlsx has a newer trade than the committed snapshot — i.e. the
+    published dashboard is stale relative to the author's real ledger. Pure helper
+    so it's testable without the private log. (Both args may be None → False.)"""
+    if snapshot_date is None or log_date is None:
+        return False
+    return pd.Timestamp(log_date).normalize() > pd.Timestamp(snapshot_date).normalize()
+
+
 def validate_build_invariants(basket, prices_native, positions) -> None:
     """Cheap build-time invariants for the real publish build. Raise SystemExit
     (non-zero) so CI skips the commit and the last-good page stays live."""
@@ -11176,6 +11228,17 @@ def main(demo: bool = False, watchlist_only: bool = False,
     elif source == "log":
         print(f"Loading transactions from {LOG_XLSX} (regenerating snapshot)")
         real_txns, untracked = load_transactions_from_log()
+        # Drift check BEFORE we overwrite the committed snapshot: did the author
+        # trade since the snapshot CI publishes from was last regenerated? (The
+        # published page is only as current as basket.snapshot.csv.)
+        _snap_was = snapshot_latest_date()
+        _log_latest = (pd.to_datetime(real_txns["date"], errors="coerce").max()
+                       if not real_txns.empty else None)
+        if snapshot_is_behind_log(_snap_was, _log_latest):
+            print(f"  NOTE: committed snapshot was behind log.xlsx "
+                  f"({_snap_was.date()} -> {pd.Timestamp(_log_latest).date()}); regenerating now. "
+                  f"Commit basket.snapshot.csv + push so CI republishes the update.",
+                  file=sys.stderr)
         if not untracked.empty:
             print(f"  {len(untracked)} untracked manual-fund rows "
                   f"(no ticker/ISIN) — excluded from snapshot")
