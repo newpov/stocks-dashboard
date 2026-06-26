@@ -60,6 +60,7 @@ jobs:
         run: python sanity_check.py
 
       - name: Commit & push if anything changed
+        if: ${{ success() }}   # explicit: never publish if the gate (or any prior step) failed
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"

@@ -65,3 +65,49 @@ def test_meta_roundtrip(tmp_path):
 
 def test_read_last_count_missing(tmp_path):
     assert sc.read_last_count(tmp_path / "nope.json") is None
+
+
+def test_read_last_count_corrupt_returns_none_and_warns(tmp_path, capsys):
+    # A PRESENT-but-corrupt meta must not silently behave like "first run".
+    p = tmp_path / "last_publish_meta.json"
+    p.write_text("{not valid json")
+    assert sc.read_last_count(p) is None
+    assert "unreadable" in capsys.readouterr().err
+
+
+def test_band_skipped_when_band_frac_zero():
+    # SANITY_SKIP_BAND path passes band_frac=0.0 -> band never blocks (floor only).
+    df = pd.DataFrame({"ticker": [f"T{i}" for i in range(30)]})
+    sc.check_position_count(df, last_count=185, band_frac=0.0)   # no raise
+
+
+def test_demo_output_pass(tmp_path):
+    demo = tmp_path / "demo.html"
+    demo.write_bytes(b"x" * (500 * 1024))
+    sc.check_demo_output(demo, min_kb=400)   # no raise
+
+
+def test_demo_output_raises_when_missing(tmp_path):
+    with pytest.raises(SystemExit):
+        sc.check_demo_output(tmp_path / "demo.html", min_kb=400)
+
+
+def test_demo_output_raises_when_tiny(tmp_path):
+    demo = tmp_path / "demo.html"
+    demo.write_bytes(b"x" * (50 * 1024))
+    with pytest.raises(SystemExit):
+        sc.check_demo_output(demo, min_kb=400)
+
+
+def test_clean_guard_rejects_nan_cell():
+    bad = pd.DataFrame({"ticker": ["A"], "date": ["2024-01-02"],
+                        "action": ["BUY"], "shares": [float("nan")]})
+    with pytest.raises(AssertionError):
+        sc.assert_snapshot_is_clean(bad)
+
+
+def test_clean_guard_rejects_fractional_shares():
+    bad = pd.DataFrame({"ticker": ["A"], "date": ["2024-01-02"],
+                        "action": ["SELL"], "shares": [2.5]})
+    with pytest.raises(AssertionError):
+        sc.assert_snapshot_is_clean(bad)

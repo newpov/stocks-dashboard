@@ -46,14 +46,15 @@ def main():
     # without touching the committed basket.snapshot.csv.
     snap = build.export_basket_snapshot(real_txns)
     tmp = Path(tempfile.gettempdir()) / "_baseline_diff_snapshot.csv"
-    snap.to_csv(tmp, index=False)
     _orig = build.BASKET_SNAPSHOT_CSV
     build.BASKET_SNAPSHOT_CSV = tmp
     try:
+        snap.to_csv(tmp, index=False)
         pos_snap = build.build_positions(build.load_transactions_from_snapshot(), prices)
     finally:
         build.BASKET_SNAPSHOT_CSV = _orig
-        os.remove(tmp)
+        if tmp.exists():
+            os.remove(tmp)
 
     # Build comparison table
     rows = []

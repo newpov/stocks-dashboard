@@ -68,6 +68,7 @@ PRIOR_ANALYST_CACHE = ROOT / "data" / "prior_analyst_cache.parquet"
 # file's mtime each run, so the baseline never aged. Instead we commit a rolling
 # history of daily analyst snapshots and pick a sliding ~2-week baseline from it.
 ANALYST_HISTORY = ROOT / "data" / "analyst_history.parquet"
+RATING_SEED_META = ROOT / "data" / "rating_seed.json"  # records the cold-start seed date so the UI can flag a provisional baseline
 RATING_WINDOW_DAYS = 14        # compare today vs ~this many days ago
 RATING_HISTORY_KEEP_DAYS = 18  # prune history a little beyond the window
 ANALYST_TTL_DAYS = 7    # refetch a ticker's analyst data when older than this
@@ -1545,7 +1546,14 @@ def fetch_predictions(themes: list[dict]) -> list[dict]:
         records += fetch_polymarket(pol)
     records = [r for r in records if _pred_num(r.get("volume")) >= PRED_VOLUME_FLOOR]
     records.sort(key=lambda r: -r["probability"])
-    return records[:PRED_MAX_ROWS]
+    records = records[:PRED_MAX_ROWS]
+    # Stamp the ACTUAL fetch date so the "as of" reflects prediction freshness,
+    # not the price-data date (the two differ on weekends, and on demo/CI the
+    # page renders from a committed cache that carries its own real fetch date).
+    asof = pd.Timestamp.now(tz="UTC").strftime("%Y-%m-%d")
+    for r in records:
+        r["fetched_at"] = asof
+    return records
 
 
 def save_predictions_cache(records: list[dict]) -> None:
@@ -2029,7 +2037,30 @@ def seed_rating_history(prior_path: Path, today,
         return False
     seed_date = pd.Timestamp(today).normalize() - pd.Timedelta(days=window_days)
     append_analyst_history(prior, seed_date, history_path)
+    # Record the seed date so the UI can flag this baseline as provisional (it's a
+    # backdated copy of the legacy prior, not a real measurement taken on that day).
+    try:
+        RATING_SEED_META.parent.mkdir(parents=True, exist_ok=True)
+        RATING_SEED_META.write_text(
+            json.dumps({"seed_date": seed_date.strftime("%Y-%m-%d")}), encoding="utf-8")
+    except Exception as e:
+        print(f"WARN couldn't write rating seed meta: {e}", file=sys.stderr)
     return True
+
+
+def rating_baseline_is_seeded(baseline_date, meta_path: Path = RATING_SEED_META) -> bool:
+    """True when the selected rating baseline IS the cold-start seed snapshot (a
+    backdated copy of the legacy prior, not a real measurement on that date). Lets
+    render_rating_moves label it provisional instead of implying a real 2-week read.
+    Once real daily snapshots age past the window, the baseline date no longer
+    matches the seed and this returns False."""
+    if baseline_date is None or not meta_path.exists():
+        return False
+    try:
+        seed = json.loads(meta_path.read_text(encoding="utf-8")).get("seed_date")
+    except Exception:
+        return False
+    return bool(seed) and pd.Timestamp(baseline_date).strftime("%Y-%m-%d") == seed
 
 
 # Rating strength order (lower = more bullish). Used for direction + sorting.
@@ -3240,9 +3271,9 @@ def render_table(returns: pd.DataFrame, weekly: pd.DataFrame, meta: pd.DataFrame
       <th data-col="4" data-num="0">Signal</th>
       <th>Trend</th>
       <th data-col="6" data-num="1" class="num">Last</th>
-      <th data-col="7" data-num="1" class="num dim-mobile">Cost</th>
+      <th data-col="7" data-num="1" class="num dim-mobile" title="Average buy price, estimated from the trade-date closing price (a proxy &mdash; not your actual fill). Per-name returns inherit this small gap.">Cost</th>
       <th data-col="8" data-num="1" class="num dim-mobile">Purchased</th>
-      <th data-col="9" data-num="1" class="num">Since baseline</th>
+      <th data-col="9" data-num="1" class="num" title="Return since the (trade-date-close) cost basis &mdash; a proxy, not your actual fill price.">Since baseline</th>
       <th data-col="10" data-num="1" class="num dim-mobile">1W</th>
       <th data-col="11" data-num="1" class="num dim-mobile">1M</th>
       <th data-col="12" data-num="1" class="num dim-mobile">3M</th>
@@ -3879,6 +3910,16 @@ def build_analyst_payload(candidates: list[str], analyst: pd.DataFrame,
         # back as pence here too, so apply the same divisor for parity with prices_native.
         target_major = float(target) / divisor
         upside_pct = (target_major / current_native - 1) * 100 if current_native else 0.0
+        # Dispersion: a +40% mean off a [-10%, +90%] spread is far less actionable
+        # than the same mean off a tight consensus. Surface high/low (already
+        # fetched) so a wide range is visible rather than hidden behind the mean.
+        def _norm_t(v):
+            return (float(v) / divisor) if (v is not None and pd.notna(v) and float(v) > 0) else None
+        target_high = _norm_t(a.get("target_high"))
+        target_low = _norm_t(a.get("target_low"))
+        spread_pct = (((target_high - target_low) / current_native * 100)
+                      if (target_high is not None and target_low is not None and current_native)
+                      else None)
         rec = (a.get("recommendation") or "").strip().lower()
         # Technical signal — empty/neutral when no data
         if not sig_df.empty and tkr in sig_df.index:
@@ -3901,6 +3942,9 @@ def build_analyst_payload(candidates: list[str], analyst: pd.DataFrame,
             "ccy_symbol": CCY_SYMBOLS.get(ccy, ccy + " "),
             "current": current_native,
             "target_mean": target_major,
+            "target_high": target_high,
+            "target_low": target_low,
+            "spread_pct": spread_pct,
             "upside_pct": upside_pct,
             "num_analysts": int(a["num_analysts"]) if pd.notna(a.get("num_analysts")) else 0,
             "recommendation": rec,
@@ -3953,6 +3997,20 @@ def render_analyst_signals(rows: list[dict], candidate_pool_size: int) -> str:
                 rsi_cls = "an-rsi-neutral"
                 rsi_title = "Neutral momentum (30 < RSI < 70)"
             rsi_html = f'<span class="an-rsi {rsi_cls}" title="{rsi_title}">RSI {rsi:.0f}</span>'
+        # Target dispersion: show the analyst high–low range so a wide (low-
+        # agreement) spread doesn't read like a tight consensus behind the mean.
+        th, tl, spread = d.get("target_high"), d.get("target_low"), d.get("spread_pct")
+        if th is not None and tl is not None:
+            wide = spread is not None and spread >= 40
+            range_html = (
+                f' <span class="an-dot">·</span> '
+                f'<span class="an-range{" an-range-wide" if wide else ""}" '
+                f'title="Analyst target range {ccy_sym}{tl:,.2f}&ndash;{ccy_sym}{th:,.2f}'
+                f'{f" ({spread:.0f}% wide &mdash; low agreement)" if spread is not None else ""}. '
+                f'The +% upside is off the MEAN target.">'
+                f'range {ccy_sym}{tl:,.0f}&ndash;{ccy_sym}{th:,.0f}</span>')
+        else:
+            range_html = ""
         cards.append(
             f'<div class="an-card" data-ticker="{d["ticker"]}">'
             f'  <div class="an-head">'
@@ -3966,7 +4024,7 @@ def render_analyst_signals(rows: list[dict], candidate_pool_size: int) -> str:
             f'  <div class="an-signal sig-{sig_tone}">'
             f'    <span class="an-signal-dot"></span><span class="an-signal-label">{_esc(sig_label)}</span>'
             f'    {rsi_html}</div>'
-            f'  <div class="an-foot">{d["num_analysts"]} analysts</div>'
+            f'  <div class="an-foot">{d["num_analysts"]} analysts{range_html}</div>'
             f'</div>'
         )
     shown = len(rows)
@@ -4190,8 +4248,8 @@ def render_currency_exposure(rows: list[dict]) -> str:
     top = rows[0]
     if top["share"] >= 0.80:
         note = (f'<span class="ccy-note">High concentration in {top["ccy"]} '
-                f'({top["share"] * 100:.0f}% of open positions) &mdash; a stronger '
-                f'home currency materially drags total return.</span>')
+                f'({top["share"] * 100:.0f}% of open positions) &mdash; its FX moves '
+                f'affect a large share of the basket.</span>')
     elif len(rows) == 1:
         note = (f'<span class="ccy-note">All open positions are in {top["ccy"]}.</span>')
     else:
@@ -5141,6 +5199,7 @@ def render_basket_diversification(data: dict | None, meta: pd.DataFrame) -> str:
     if not data:
         return ""
     avg = data["avg_corr"]
+    n_pos = int(data.get("n_positions", 0))
     # Color the headline: low avg = well diversified (green), high = concentrated (red).
     if avg < 0.30:
         avg_cls, avg_meta = "pos", "well diversified"
@@ -5148,6 +5207,10 @@ def render_basket_diversification(data: dict | None, meta: pd.DataFrame) -> str:
         avg_cls, avg_meta = "neg", "highly correlated"
     else:
         avg_cls, avg_meta = "", "moderately diversified"
+    # Count-aware honesty: a low average across only a handful of names is not
+    # real diversification. Flag the small sample instead of asserting it.
+    if n_pos and n_pos < 5 and avg < 0.30:
+        avg_meta = f"low avg correlation &mdash; but only {n_pos} names"
 
     def _ind(t: str) -> str:
         return _industry_label(meta, t)
@@ -5664,7 +5727,7 @@ def _rm_rec_row(m: dict) -> str:
 
 
 def render_rating_moves(moves: list[dict], prior_exists: bool,
-                        baseline_date=None) -> str:
+                        baseline_date=None, baseline_seeded: bool = False) -> str:
     """v2.7 #4: split into two groups so BOTH kinds always show:
       - Price targets (upsides first, then cuts by magnitude) — each row also
         shows the current recommendation.
@@ -5681,8 +5744,14 @@ def render_rating_moves(moves: list[dict], prior_exists: bool,
         _age = (pd.Timestamp(datetime.now(timezone.utc).date()).normalize()
                 - _bd.normalize()).days
         _stale = f' &middot; baseline {_age}d old' if _age > 16 else ''
-        sub = (f'<span class="muted rm-sub">since {_label} &middot; '
-               f'target &geq; 5% or rec change{_stale}</span>')
+        if baseline_seeded:
+            # Cold-start: the baseline is a backdated copy of the legacy snapshot,
+            # not a real measurement on that date — don't imply it was.
+            sub = ('<span class="muted rm-sub">vs seeded baseline &middot; real '
+                   '2-week history still building &middot; target &geq; 5% or rec change</span>')
+        else:
+            sub = (f'<span class="muted rm-sub">since {_label} &middot; '
+                   f'target &geq; 5% or rec change{_stale}</span>')
     else:
         sub = ('<span class="muted rm-sub">rolling ~2-week window &middot; '
                'target &geq; 5% or rec change</span>')
@@ -6224,6 +6293,7 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
                 rating_moves: list[dict] | None = None,
                 prior_analyst_exists: bool = False,
                 rating_baseline_date=None,
+                rating_baseline_seeded: bool = False,
                 unusual_vol: list[dict] | None = None,
                 bb_universe_obs: list[dict] | None = None,
                 prediction_rows: list[dict] | None = None) -> str:
@@ -6311,7 +6381,12 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     _bb_macro_html = render_bigbrain_macro(_bb_top_move, _basket_equity_share(returns, meta))
     bigbrain_html = render_bigbrain(bigbrain_observations, latest_date,
                                     macro_html=_bb_macro_html, memory=bigbrain_memory)
-    market_expectations_html = render_market_expectations(prediction_rows or [], latest_date)
+    # "as of" the prediction-market fetch date carried in the data (honest for
+    # both the live build and the committed-cache demo/CI path); fall back to the
+    # price date only for legacy caches with no stamped fetch date.
+    _pred_asof = next((r.get("fetched_at") for r in (prediction_rows or [])
+                       if r.get("fetched_at")), latest_date)
+    market_expectations_html = render_market_expectations(prediction_rows or [], _pred_asof)
     quadrant_html = render_signal_strip(build_signal_strip_data(returns, quant_metrics, signals))
 
     # v2.6 Value screen — fundamental quality+value names near a 52-week low.
@@ -6379,7 +6454,8 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
 
     hero_sub_html = (
         f'{_total_html} total{_ann_html}{_ytd_html}'
-        f' <span class="hero-sub-meta">&middot; TWR, renormalized as positions enter</span>'
+        f' <span class="hero-sub-meta">&middot; equal-weight basket &middot; '
+        f'avg per-position TWR, renormalized as positions enter</span>'
     )
 
     # T10: unusual-volume chips. Compose a small pinned row of pills for
@@ -6501,7 +6577,7 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
         alpha_sparkline_html = (
             f'<div class="alpha-sparkline-wrap" id="alpha-sparkline-wrap">'
             f'  <div class="alpha-sparkline-head spark-plot">'
-            f'    <span class="alpha-sparkline-label">30-day rolling &alpha; vs SPY</span>'
+            f'    <span class="alpha-sparkline-label" title="Raw excess return vs SPY &mdash; not beta-adjusted, so persistent green can reflect higher market exposure rather than stock-picking skill">30-day excess vs SPY</span>'
             f'    <span class="alpha-sparkline-latest {latest_cls}" id="alpha-sparkline-latest" '
             f'          data-default-text="{latest:+.1f} pp">{latest:+.1f} pp</span>'
             f'  </div>'
@@ -6706,7 +6782,7 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
             sharpe_cls = "neg"
         else:
             sharpe_cls = ""
-        sharpe_meta_str = "vol-adjusted &middot; weekly &times; &radic;52"
+        sharpe_meta_str = "vol-adjusted &middot; weekly &times; &radic;52 &middot; full history"
 
     # T8: Hero stats registry. Renders all 10 stat cards server-side; CSS hides
     # the ones not in the user's selection. Default selection matches what
@@ -6727,9 +6803,9 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
 
     _stats_registry = [
         # slug,             label,                value_html,                    cls,                                meta_html
-        ("total_return",    "Total return",       f"{basket_final:+.1f}%",       _cls(basket_final),                 f"since {first_purchase_str}"),
+        ("total_return",    "Total return",       f"{basket_final:+.1f}%",       _cls(basket_final),                 f"equal-weight &middot; since {first_purchase_str}"),
         ("annualized",      "Annualized",         _ann_value_html,               _ann_cls,                           _ann_meta),
-        ("sharpe",          "Sharpe (1y)",        sharpe_value_str,              sharpe_cls,                         sharpe_meta_str),
+        ("sharpe",          "Sharpe",             sharpe_value_str,              sharpe_cls,                         sharpe_meta_str),
         ("win_rate",        "Win rate",           f"{win_rate:.0f}%",            _cls(win_rate - 50),                f"{n_wins} of {n_closed_total} closed wins"),
         ("win_loss_ratio",  "Win / loss ratio",   wlr_value_str,                 wlr_cls,                            wlr_meta_str),
         ("avg_upside",      "Avg analyst upside", f"{avg_upside:+.1f}%",         _cls(avg_upside),                   f"{n_open_covered} of {n_open} open covered"),
@@ -6840,7 +6916,8 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     # Rating-moves panel sits directly under Re-entry ideas in the default
     # order -- both are analyst-signal modules, so they read as a pair.
     rating_moves_html = render_rating_moves(rating_moves or [], prior_analyst_exists,
-                                            baseline_date=rating_baseline_date)
+                                            baseline_date=rating_baseline_date,
+                                            baseline_seeded=rating_baseline_seeded)
     _module_defs = [
         ("bigbrain", "Big Brain says", bigbrain_html),
         ("value_screen", "Value screen", value_html),
@@ -7909,6 +7986,8 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
   .an-rsi-dim{{color:var(--text-dim);border-color:var(--border);background:transparent}}
   .an-foot{{font-family:var(--font-mono);font-size:9.5px;color:var(--text-dim);
     text-transform:uppercase;letter-spacing:0.08em}}
+  .an-range{{cursor:help;border-bottom:1px dotted var(--border)}}
+  .an-range-wide{{color:var(--down)}}
   @media (max-width:900px){{
     .an-grid{{grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:8px}}
   }}
@@ -11101,6 +11180,14 @@ def main(demo: bool = False, watchlist_only: bool = False,
             print(f"  {len(untracked)} untracked manual-fund rows "
                   f"(no ticker/ISIN) — excluded from snapshot")
         write_basket_snapshot(real_txns)
+        # Privacy guard on the freshly-written artifact BEFORE it can be committed
+        # (CI runs the same check, but only after the author has already pushed).
+        from sanity_check import assert_snapshot_is_clean
+        try:
+            assert_snapshot_is_clean(pd.read_csv(BASKET_SNAPSHOT_CSV))
+        except AssertionError as e:
+            raise SystemExit(f"ABORT: regenerated snapshot failed privacy guard ({e}) "
+                             f"— not safe to commit")
         transactions = load_transactions_from_snapshot()
         untracked = pd.DataFrame()   # manual-fund rows are not in the snapshot
     elif source == "snapshot":
@@ -11245,11 +11332,13 @@ def main(demo: bool = False, watchlist_only: bool = False,
     # from a committed analyst-snapshot history (survives stateless CI, unlike the
     # old mtime-based prior). Demo: the last-build prior cache.
     rating_baseline_date = None
+    rating_baseline_seeded = False
     if not demo:
         _today = pd.Timestamp(datetime.now(timezone.utc).date())
         seed_rating_history(PRIOR_ANALYST_CACHE, _today)   # cold-start backfill
         _hist = append_analyst_history(analyst, _today)
         rating_baseline_date, _baseline_df = select_rating_baseline(_hist, _today)
+        rating_baseline_seeded = rating_baseline_is_seeded(rating_baseline_date)
         rating_moves = compute_rating_moves(None, analyst, prior_df=_baseline_df)
     else:
         rating_moves = compute_rating_moves(PRIOR_ANALYST_CACHE, analyst)
@@ -11400,6 +11489,7 @@ def main(demo: bool = False, watchlist_only: bool = False,
                        rating_moves=rating_moves,
                        prior_analyst_exists=rating_prior_exists,
                        rating_baseline_date=rating_baseline_date,
+                       rating_baseline_seeded=rating_baseline_seeded,
                        unusual_vol=unusual_vol,
                        bb_universe_obs=bb_universe_obs,
                        prediction_rows=prediction_rows)
@@ -11443,7 +11533,17 @@ if __name__ == "__main__":
             sys.exit(1)
         _txns, _ = load_transactions_from_log()
         snap = write_basket_snapshot(_txns)
-        print(f"Snapshot regenerated ({len(snap)} rows). Next:\n"
+        # Privacy guard BEFORE the author commits the public file. CI runs the
+        # same check, but only after this snapshot would already be pushed — so
+        # catch a regressed export here, where a leak can still be stopped.
+        from sanity_check import assert_snapshot_is_clean
+        try:
+            assert_snapshot_is_clean(pd.read_csv(BASKET_SNAPSHOT_CSV))
+        except AssertionError as e:
+            print(f"ABORT: snapshot failed privacy guard ({e}). NOT safe to commit.",
+                  file=sys.stderr)
+            sys.exit(2)
+        print(f"Snapshot regenerated ({len(snap)} rows, privacy guard passed). Next:\n"
               f"  git add basket.snapshot.csv\n"
               f"  git commit -m \"trade update\"\n"
               f"  git push        # CI rebuilds + republishes")
