@@ -1338,16 +1338,39 @@ def download_prices(tickers: list[str]) -> pd.DataFrame:
     return ohlcv.xs("Close", axis=1, level=1).copy()
 
 
+def _benchmark_close_from_df(df: pd.DataFrame) -> pd.Series:
+    """Extract the Close series from a yfinance benchmark frame, robust to BOTH
+    MultiIndex column orderings ((field, ticker) AND (ticker, field)) and to a
+    plain single-level frame. Returns an empty Series when no Close column exists,
+    so a yfinance column-shape change degrades visibly instead of raising KeyError
+    (which the caller's blanket try/except would have turned into a silent empty
+    SPY — disabling alpha + vs-SPY everywhere)."""
+    if df is None or df.empty:
+        return pd.Series(dtype=float)
+    cols = df.columns
+    if isinstance(cols, pd.MultiIndex):
+        for lvl in (0, 1):
+            if "Close" in cols.get_level_values(lvl):
+                s = df.xs("Close", axis=1, level=lvl)
+                return s.iloc[:, 0] if isinstance(s, pd.DataFrame) else s
+        return pd.Series(dtype=float)
+    if "Close" not in cols:
+        return pd.Series(dtype=float)
+    s = df["Close"]
+    return s.iloc[:, 0] if getattr(s, "ndim", 1) > 1 else s
+
+
 def download_benchmark() -> pd.Series:
     end = (datetime.now(timezone.utc) + timedelta(days=1)).strftime("%Y-%m-%d")
     try:
         df = yf.download(BENCHMARK, start=START_DATE, end=end,
                          auto_adjust=True, progress=False, threads=False)
-        if df.empty:
+        s = _benchmark_close_from_df(df)
+        if s.empty:
+            print(f"WARN benchmark {BENCHMARK}: no usable Close in returned frame "
+                  f"(columns={list(df.columns)[:4]}) — alpha + vs-SPY will be "
+                  f"unavailable this build", file=sys.stderr)
             return pd.Series(dtype=float)
-        s = df["Close"]
-        if hasattr(s, "ndim") and s.ndim > 1:
-            s = s.iloc[:, 0]
         if s.index.tz is not None:
             s.index = s.index.tz_localize(None)
         s.name = BENCHMARK
@@ -1844,7 +1867,11 @@ def fetch_meta(tickers: list[str], cache: pd.DataFrame) -> tuple[pd.DataFrame, s
             }, None
         except Exception as e:
             print(f"  meta fail {t}: {e}", file=sys.stderr)
-            return t, {"sector": "", "industry": "", "name": t, "currency": "USD"}, str(e)
+            # Leave currency BLANK (not a "USD" default) on failure: a blank
+            # currency re-triggers the refetch condition next build, so a transient
+            # .info failure can't permanently mask a non-USD ticker as USD (wrong
+            # FX). Blank normalizes to USD at use-time, so nothing breaks meanwhile.
+            return t, {"sector": "", "industry": "", "name": t, "currency": ""}, str(e)
 
     rows = []
     failed: set[str] = set()
@@ -1926,12 +1953,15 @@ def fetch_analyst_data(tickers: list[str], cache: pd.DataFrame,
             }, None
         except Exception as e:
             print(f"  analyst fail {t}: {e}", file=sys.stderr)
+            # fetched_at = NaT (not `now`) so a failed row reads as stale and is
+            # retried next build, instead of being treated as fresh for the full
+            # TTL (which would suppress retries for a week on a transient blip).
             return t, {
                 "target_mean": None, "target_high": None, "target_low": None,
                 "num_analysts": None, "recommendation": "", "rec_mean": None,
                 "current_price": None, "market_cap": None,
                 "pe": None, "pb": None, "roe": None, "rev_growth": None,
-                "fcf": None, "debt_to_equity": None, "fetched_at": now,
+                "fcf": None, "debt_to_equity": None, "fetched_at": pd.NaT,
             }, str(e)
 
     rows = []
