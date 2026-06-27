@@ -64,6 +64,22 @@ def test_fetch_predictions_routes_and_filters(monkeypatch):
     assert [r["theme"] for r in rows] == ["Fed"]   # thin Crash filtered by floor
 
 
+def test_fetch_predictions_per_source_floors(monkeypatch):
+    # M1: the same numeric volume means different things per source. 2000 passes the
+    # Kalshi contract floor (1000) but is below the Polymarket USD floor (5000), so
+    # the floors must be applied per-source, not with one shared threshold.
+    monkeypatch.setattr(build, "fetch_kalshi", lambda th: [
+        {"theme": "Fed", "question": "q", "source": "kalshi",
+         "probability": 60.0, "volume": 2000.0, "end_date": "", "url": None}])
+    monkeypatch.setattr(build, "fetch_polymarket", lambda th: [
+        {"theme": "Crash", "question": "q", "source": "polymarket",
+         "probability": 18.0, "volume": 2000.0, "end_date": "", "url": None}])
+    themes = [{"theme": "Fed", "source": "kalshi", "key": "K"},
+              {"theme": "Crash", "source": "polymarket", "key": "P"}]
+    rows = build.fetch_predictions(themes)
+    assert [r["theme"] for r in rows] == ["Fed"]
+
+
 def test_compute_prediction_moves():
     prior = [{"theme": "Fed", "probability": 66.0},
              {"theme": "Recession", "probability": 23.0}]

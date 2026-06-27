@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import sys
 import time
@@ -909,7 +910,14 @@ PRIOR_PREDICTIONS_CACHE = ROOT / "data" / "prior_predictions_cache.parquet"
 BIGBRAIN_LOG_CSV = ROOT / "data" / "bigbrain_log.csv"   # v2.3 Big Brain flag history
 KALSHI_API = "https://api.elections.kalshi.com/trade-api/v2"
 POLYMARKET_API = "https://gamma-api.polymarket.com"
-PRED_VOLUME_FLOOR = 1000.0   # drop thin/noisy markets (source-native volume units)
+PRED_VOLUME_FLOOR = 1000.0   # legacy single floor (fallback for unknown sources)
+# M1: per-source liquidity floors — the two sources' volumes are NOT commensurable
+# (Kalshi reports contracts traded; Polymarket reports cumulative USD), so a single
+# floor filters one far more aggressively than the other. Tune each in its own unit.
+PRED_VOLUME_FLOORS = {
+    "kalshi": 1000.0,       # contracts traded
+    "polymarket": 5000.0,   # cumulative USD volume
+}
 PRED_MAX_ROWS = 20           # v2.5 #3: deepen the pool; render shows a window
 PRED_WINDOW = 5              # v2.5 #3: themes shown at once; "Reshuffle" cycles
 BB_MACRO_DELTA_PP = 8.0      # min |delta| (pp) for the Big Brain macro callout
@@ -1569,7 +1577,11 @@ def fetch_predictions(themes: list[dict]) -> list[dict]:
         records += fetch_kalshi(kal)
     if pol:
         records += fetch_polymarket(pol)
-    records = [r for r in records if _pred_num(r.get("volume")) >= PRED_VOLUME_FLOOR]
+    records = [
+        r for r in records
+        if _pred_num(r.get("volume"))
+        >= PRED_VOLUME_FLOORS.get(str(r.get("source") or "").lower(), PRED_VOLUME_FLOOR)
+    ]
     records.sort(key=lambda r: -r["probability"])
     records = records[:PRED_MAX_ROWS]
     # Stamp the ACTUAL fetch date so the "as of" reflects prediction freshness,
@@ -2132,11 +2144,64 @@ def rating_baseline_is_seeded(baseline_date, meta_path: Path = RATING_SEED_META)
 _REC_RANK = {"strong_buy": 0, "buy": 1, "outperform": 1, "hold": 2,
              "neutral": 2, "underperform": 3, "sell": 3, "strong_sell": 4}
 
+# No-coverage = weakest state (consistent with _rec_direction); used only for the
+# magnitude math so a none<->X move has a sane rank distance.
+_REC_RANK_NONE = 5
+# Each _REC_RANK step ~= this many % for the cross-kind "biggest moves" sort.
+_REC_STEP_PCT = 5.0
+
+# Free-text / cross-source recommendation synonyms -> a key present in _REC_RANK.
+# yfinance emits underscore keys, but other sources and analyst free-text use
+# spaces, hyphens, or synonyms; mapping them here stops an unrecognized label
+# from masquerading as a no-coverage ("none") transition (M9).
+_REC_ALIASES = {
+    "strong_buy": "strong_buy", "conviction_buy": "strong_buy", "top_pick": "strong_buy",
+    "buy": "buy", "outperform": "outperform", "overweight": "buy", "accumulate": "buy",
+    "moderate_buy": "buy", "add": "buy", "positive": "buy",
+    "hold": "hold", "neutral": "neutral", "market_perform": "hold",
+    "sector_perform": "hold", "peer_perform": "hold", "equal_weight": "hold",
+    "in_line": "hold", "perform": "hold",
+    "underperform": "underperform", "underweight": "sell", "moderate_sell": "sell",
+    "reduce": "sell", "sell": "sell", "negative": "sell",
+    "strong_sell": "strong_sell", "conviction_sell": "strong_sell",
+}
+_REC_NONE = {"", "none", "n/a", "na", "-", "—", "nan"}
+_REC_UNKNOWN_SEEN: set = set()
+
 
 def _norm_rec(r) -> str:
-    """Normalize a recommendation string; the no-coverage sentinel -> ''."""
-    r = str(r or "").strip().lower()
-    return "" if r in ("", "none", "n/a", "na", "-", "—") else r
+    """Normalize a recommendation to a canonical _REC_RANK key; the no-coverage
+    sentinel -> ''. Handles spaced/hyphenated/synonym strings (M9) so an
+    unrecognized label can't masquerade as a 'none' transition. Unknown strings
+    are returned normalized (underscored) and logged once."""
+    raw = str(r or "").strip().lower()
+    if raw in _REC_NONE:
+        return ""
+    key = re.sub(r"[\s\-]+", "_", raw)
+    if key in _REC_ALIASES:
+        return _REC_ALIASES[key]
+    # Substring fallback for free text ("strong buy rating", "sector outperform"):
+    # longest alias first so "outperform" wins over "perform", etc.
+    for alias in sorted(_REC_ALIASES, key=len, reverse=True):
+        if alias in key:
+            return _REC_ALIASES[alias]
+    if key not in _REC_UNKNOWN_SEEN:
+        _REC_UNKNOWN_SEEN.add(key)
+        print(f"WARN unrecognized recommendation '{raw}' (treated as-is)", file=sys.stderr)
+    return key
+
+
+def _rec_rank_mag(r) -> int:
+    """Rank for magnitude math: no-coverage = weakest (past strong_sell)."""
+    rk = _REC_RANK.get(_norm_rec(r))
+    return _REC_RANK_NONE if rk is None else rk
+
+
+def _rec_move_magnitude(before, after) -> float:
+    """Severity of a rec move as an abs-% equivalent, from _REC_RANK distance, so
+    the global 'biggest moves first' sort can rank a strong_sell->strong_buy above
+    a hold->buy nudge instead of tying every rec move at a constant (H7)."""
+    return abs(_rec_rank_mag(after) - _rec_rank_mag(before)) * _REC_STEP_PCT
 
 
 def _rec_direction(before, after) -> "str | None":
@@ -2219,7 +2284,7 @@ def compute_rating_moves(prior_path: "Path | None",
             moves.append({
                 "ticker": tkr, "kind": "recommendation",
                 "before": p_rec, "after": c_rec,
-                "pct_change": 0.0, "abs_pct": 10.0,
+                "pct_change": 0.0, "abs_pct": _rec_move_magnitude(p_rec, c_rec),
                 "cur_rec": cur_rec, "cur_target": cur_target,
             })
     moves.sort(key=lambda m: (-m["abs_pct"], m["ticker"]))
@@ -4180,6 +4245,19 @@ def build_industry_attribution(returns: pd.DataFrame, meta: pd.DataFrame,
     open_pos = returns[returns.status == "open"].copy()
     if open_pos.empty:
         return [], 0.0
+    # Robustness (M10): mirror compute_currency_exposure's per-row guard. Under the
+    # vectorized sums below a NaN weight would silently drop a name from its
+    # industry average while still counting it (holdings-count vs avg mismatch),
+    # and a NaN return would render a phantom 0.0% industry. Coerce weight to the
+    # equal-weight default and drop names with no computed return (can't attribute
+    # a return we don't have).
+    open_pos["weight"] = [
+        float(w) if pd.notna(w) and float(w) > 0 else 1.0
+        for w in open_pos["weight"]
+    ]
+    open_pos = open_pos[pd.notna(open_pos["total_pct"])].copy()
+    if open_pos.empty:
+        return [], 0.0
     # Map ticker -> industry from meta. Tickers with no industry are bucketed
     # as "Other" so basket attribution still sums to the basket total.
     open_pos["industry"] = [
@@ -4434,12 +4512,11 @@ def _bb_severity(flags: list[dict]) -> str:
 
 
 def _bb_match_archetype(ids: set[str]) -> str | None:
-    """Most-specific-first; first match wins. Operates on the set of fired
-    flag ids for one ticker."""
-    if "post_exit" in ids:
-        return "ran_without_you"
-    if "beats_your_sector" in ids:
-        return "missing_idea"
+    """Most-specific-first; first match wins. Operates on the set of fired flag
+    ids for one ticker. The richer current-tape archetypes are checked BEFORE the
+    context fallbacks (post_exit -> ran_without_you, beats_your_sector ->
+    missing_idea) so a sold or idea name that ALSO shows a strong pattern gets the
+    more informative title instead of collapsing to the catch-all (H8)."""
     if {"near_high", "overbought"} <= ids and (
             "fading_volume" in ids or "extended" in ids):
         return "exhausted_winner"
@@ -4458,6 +4535,11 @@ def _bb_match_archetype(ids: set[str]) -> str | None:
         return "capitulation"
     if {"unusual_volume", "big_move_1w", "news_flurry"} <= ids:
         return "catalyst"
+    # Context fallbacks — only when nothing richer fired.
+    if "post_exit" in ids:
+        return "ran_without_you"
+    if "beats_your_sector" in ids:
+        return "missing_idea"
     return None
 
 
@@ -4647,13 +4729,13 @@ def _bb_build_universe_observations(shortlist, quant_metrics, signals, analyst,
             continue
         score, raw, _ = _bb_score(flags)
         archetype = _bb_match_archetype({f["id"] for f in flags})
-        tag, body = _bb_narrative(tkr, flags, archetype)
+        tag, body = _bb_narrative(tkr, flags, archetype, score=score)
         # Native price for the card (v2.5 #2). The universe is the S&P 500
         # (universe.csv), so current_price is USD.
         _px = _bb_num(outlook.loc[tkr].get("current_price")) \
             if (outlook is not None and tkr in outlook.index) else float("nan")
         out.append({
-            "ticker": tkr, "ownership": "idea", "severity": "good",
+            "ticker": tkr, "ownership": "idea", "severity": _bb_severity(flags),
             # Neutral fallback tag: only an archetype (e.g. missing_idea from a
             # beats_your_sector match) earns the "Setup you're missing" claim.
             "title": tag if archetype else "On the radar", "body": body,
@@ -4716,10 +4798,16 @@ def _bb_universe_shortlist(universe_outlook: "pd.DataFrame | None",
     return list(score.sort_values(ascending=False).head(n).index)
 
 
-def _bb_narrative(tkr: str, flags: list[dict], archetype: str | None
-                  ) -> tuple[str, str]:
+_BB_THIN_SCORE = 3.0    # below this, a read rests on one weak/lonely signal
+_BB_THIN_HEDGE = "Early read on a thin signal."
+
+
+def _bb_narrative(tkr: str, flags: list[dict], archetype: str | None,
+                  score: "float | None" = None) -> tuple[str, str]:
     """Return (title_tag, body). Archetype -> bespoke punchy sentence; else a
-    fallback that lists the top fragments. Confident, specific, never advice."""
+    fallback that lists the top fragments. Confident, specific, never advice.
+    When ``score`` is below _BB_THIN_SCORE the body gets an honest hedge so a
+    one-signal read doesn't sound as certain as a multi-domain stack (M-BB)."""
     by_id = {f["id"]: f for f in flags}
 
     def frag(fid, default=""):
@@ -4763,8 +4851,11 @@ def _bb_narrative(tkr: str, flags: list[dict], archetype: str | None
         top = sorted(flags, key=lambda f: -f["weight"])[:3]
         frags = [f["frag"] for f in top if f.get("frag")]
         joined = "; ".join(frags) if frags else "multiple signals"
-        body = f"{tkr}: {len(flags)} signals stacking — {joined}."
+        n = len(flags)
+        body = f"{tkr}: {n} signal{'s' if n != 1 else ''} stacking — {joined}."
 
+    if score is not None and score < _BB_THIN_SCORE:
+        body = f"{body} {_BB_THIN_HEDGE}"
     tag = _BB_TITLE_TAGS.get(archetype or "fallback", _BB_TITLE_TAGS["fallback"])
     return tag, body
 
@@ -4844,7 +4935,7 @@ def compute_bigbrain_observations(
                 continue
             score, raw, _ = _bb_score(flags)
             archetype = _bb_match_archetype({f["id"] for f in flags})
-            tag, body = _bb_narrative(tkr, flags, archetype)
+            tag, body = _bb_narrative(tkr, flags, archetype, score=score)
             # v2.5 #2b: show the holding in its NATIVE currency (Engie -> EUR,
             # US names -> USD) so the whole section is local-currency consistent
             # with the universe ideas. Reconstructed from base price / FX rate.
@@ -4955,27 +5046,27 @@ def compute_bigbrain_memory(log_df, current_prices: dict, today_str: str) -> dic
 
 def _quadrant_signal_score(q, signal_label, row):
     """(strength 0..100, direction +/-1) for one holding, from RSI distance,
-    trend label, 200-DMA side, and momentum. NaN-safe."""
+    trend label, 200-DMA side, and momentum. NaN-safe.
+
+    M-SIG: strength and direction are derived from ONE signed composite (each
+    component carries its own sign), so they can't disagree — a name can't read
+    'bullish' on the axis while its dominant inputs are falling. strength is the
+    composite's magnitude; direction its sign. Conflicting drivers cancel toward
+    the neutral middle (low strength) instead of piling into a confident extreme."""
     sig = str(signal_label or "").strip().lower()
     bull = any(w in sig for w in ("uptrend", "near 12m high", "trending up", "bouncing"))
     bear = any(w in sig for w in ("downtrend", "near 12m low", "trending down", "pullback"))
     rsi = _bb_num(q.get("rsi14")) if q is not None else float("nan")
     sma = _bb_num(q.get("sma200_dist_pct")) if q is not None else float("nan")
     m1 = _bb_num(row.get("1m_pct")) if row is not None else float("nan")
-    m3 = _bb_num(row.get("3m_pct")) if row is not None else float("nan")
-    s_rsi = abs(rsi - 50) / 50 if rsi == rsi else 0.0
-    s_trend = 1.0 if (bull or bear) else 0.0
-    s_mom = min(1.0, (abs(m1) if m1 == m1 else 0.0) / 15)
-    s_sma = min(1.0, (abs(sma) if sma == sma else 0.0) / 50)
-    strength = (0.35 * s_rsi + 0.25 * s_trend + 0.2 * s_mom + 0.2 * s_sma) * 100
-    score = 0
-    if rsi == rsi:
-        score += 1 if rsi > 50 else -1
-    score += 1 if bull else 0
-    score -= 1 if bear else 0
-    if m3 == m3:
-        score += 1 if m3 > 0 else -1
-    direction = 1 if score >= 0 else -1
+    # Signed components, each in [-1, 1] (bullish positive, bearish negative).
+    c_rsi = max(-1.0, min(1.0, (rsi - 50) / 50)) if rsi == rsi else 0.0
+    c_trend = (1.0 if bull else 0.0) - (1.0 if bear else 0.0)
+    c_mom = max(-1.0, min(1.0, m1 / 15)) if m1 == m1 else 0.0
+    c_sma = max(-1.0, min(1.0, sma / 50)) if sma == sma else 0.0
+    composite = 0.35 * c_rsi + 0.25 * c_trend + 0.2 * c_mom + 0.2 * c_sma  # [-1, 1]
+    strength = abs(composite) * 100
+    direction = 1 if composite >= 0 else -1
     return strength, direction
 
 

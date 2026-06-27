@@ -38,6 +38,37 @@ def test_rec_direction():
     assert build._rec_direction("buy", "outperform") is None    # lateral (same rank)
 
 
+# --- M9: rec-string normalization (no phantom 'none' moves) -----------------
+
+def test_norm_rec_handles_spaces_and_aliases():
+    assert build._norm_rec("Strong Buy") == "strong_buy"
+    assert build._norm_rec("STRONG_BUY") == "strong_buy"
+    assert build._norm_rec("Market Perform") == "hold"
+    assert build._norm_rec("Overweight") == "buy"
+    assert build._norm_rec("Underweight") == "sell"
+    assert build._norm_rec("outperform") == "outperform"
+    for sentinel in ("", "none", "N/A", "-", "—", None):
+        assert build._norm_rec(sentinel) == ""
+
+
+def test_spaced_rec_does_not_make_phantom_move(tmp_path):
+    # "Strong Buy" (spaced) vs "strong_buy" must be a no-op, not a phantom move.
+    moves = _moves(tmp_path, ["AAA"], [float("nan")], [float("nan")],
+                   ["Strong Buy"], ["strong_buy"])
+    assert [m for m in moves if m["kind"] == "recommendation"] == []
+
+
+# --- H7: rec-move magnitude ranks by _REC_RANK distance ----------------------
+
+def test_rec_move_magnitude_scales_with_rank_distance(tmp_path):
+    # strong_sell->strong_buy (4 steps) must outrank hold->buy (1 step) in abs_pct.
+    nan = float("nan")
+    moves = _moves(tmp_path, ["BIG", "SMALL"], [nan, nan], [nan, nan],
+                   ["strong_sell", "hold"], ["strong_buy", "buy"])
+    by_tkr = {m["ticker"]: m for m in moves if m["kind"] == "recommendation"}
+    assert by_tkr["BIG"]["abs_pct"] > by_tkr["SMALL"]["abs_pct"]
+
+
 # --- compute attaches current context ---------------------------------------
 
 def test_compute_attaches_current_rec_and_target(tmp_path):

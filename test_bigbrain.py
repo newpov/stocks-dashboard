@@ -88,6 +88,27 @@ def test_archetype_none_returns_none():
     assert build._bb_match_archetype({"big_move_1w"}) is None
 
 
+def test_post_exit_does_not_preempt_richer_archetype():
+    # H8: a sold name that also shows a richer current-tape pattern (divergence)
+    # gets the more informative title, not the catch-all "ran without you".
+    assert build._bb_match_archetype(
+        {"post_exit", "downgrade", "near_high"}) == "divergence"
+    # but with nothing richer, post_exit is still the fallback:
+    assert build._bb_match_archetype({"post_exit", "near_high"}) == "ran_without_you"
+
+
+def test_narrative_thin_signal_is_hedged_strong_is_not():
+    # M-BB: confidence should track signal strength. A 1-flag read is hedged; a
+    # multi-domain stack keeps the confident claim.
+    flags = [_flag("near_high", "trend", 1.0),
+             _flag("overbought", "trend", 2.0, -1),
+             _flag("fading_volume", "flow", 1.0, -1)]
+    _, strong_body = build._bb_narrative("AAA", flags, "exhausted_winner", score=6.0)
+    _, thin_body = build._bb_narrative("AAA", [flags[0]], "exhausted_winner", score=1.0)
+    assert build._BB_THIN_HEDGE not in strong_body
+    assert build._BB_THIN_HEDGE in thin_body
+
+
 def _row(**kw):
     base = {"status": "open", "weight": 100.0, "total_pct": 10.0,
             "1w_pct": 2.0, "1m_pct": 3.0, "3m_pct": 4.0, "latest": 50.0,
@@ -477,6 +498,25 @@ def test_quadrant_signal_score_nan_safe():
     strength, direction = build._quadrant_signal_score(None, "", {})
     assert strength == 0.0
     assert direction in (1, -1)
+
+
+def test_quadrant_direction_consistent_with_strength_drivers():
+    # M-SIG: a name FALLING hard (negative momentum + below 200-day) must not read
+    # "bullish" off a mildly-overbought RSI. Direction comes from the same signed
+    # composite that drives strength, so it tracks the dominant (bearish) inputs.
+    q = pd.Series({"rsi14": 55.0, "sma200_dist_pct": -40.0})
+    row = pd.Series({"1m_pct": -14.0, "3m_pct": -20.0})
+    strength, direction = build._quadrant_signal_score(q, "", row)
+    assert direction == -1
+
+
+def test_quadrant_conflicting_signals_have_low_strength():
+    # Equal-and-opposite drivers should cancel toward the neutral middle, not pile
+    # into a confident (but arbitrary-signed) extreme.
+    q = pd.Series({"rsi14": 50.0, "sma200_dist_pct": 50.0})   # bullish sma
+    row = pd.Series({"1m_pct": -15.0, "3m_pct": 15.0})        # mixed momentum
+    strength, _ = build._quadrant_signal_score(q, "", row)
+    assert strength < 20.0
 
 
 def test_build_signal_strip_data():
