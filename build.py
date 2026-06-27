@@ -2457,10 +2457,23 @@ def download_fx(pairs: list[str]) -> pd.DataFrame:
     return df
 
 
+FX_FILL_LIMIT_DAYS = 7   # M4: max leading gap (rows) to back-fill an FX rate across
+
+
 def convert_to_base(prices: pd.DataFrame, meta: pd.DataFrame,
                     fx: pd.DataFrame, base: str = BASE_CCY) -> pd.DataFrame:
     """Convert native-currency prices to base currency using daily FX rates.
-    Returns a new DataFrame with the same shape but base-currency values."""
+    Returns a new DataFrame with the same shape but base-currency values.
+
+    FX edge-fill (M4): ffill carries a rate forward over interior/trailing gaps
+    (non-trading days); a BOUNDED bfill covers only a short start-of-series
+    calendar misalignment. An *unbounded* bfill would fabricate a flat rate across
+    a long pre-series gap -> biased early baseline. But NaN-ing those dates would
+    drop an early-bought non-base ticker (build_positions consumes base prices),
+    so for a genuine long leading gap we fall back to the earliest known rate WITH
+    a warning -- visible and bounded, never silent, never dropped. A missing pair
+    is likewise left in native units (its % return stays correct) rather than
+    NaN'd out of the basket."""
     out = prices.copy()
     for tkr in prices.columns:
         raw_ccy = str(meta.loc[tkr, "currency"]) if tkr in meta.index else "USD"
@@ -2470,11 +2483,23 @@ def convert_to_base(prices: pd.DataFrame, meta: pd.DataFrame,
         if ccy == base:
             continue
         fx_key = f"{ccy}{base}=X"
-        if fx_key in fx.columns:
-            rate = fx[fx_key].reindex(out.index).ffill().bfill()
-            out[tkr] = out[tkr] * rate
-        else:
+        if fx_key not in fx.columns:
             print(f"WARN no FX series {fx_key}, leaving {tkr} as {ccy}", file=sys.stderr)
+            continue
+        raw_rate = fx[fx_key].reindex(out.index)
+        rate = raw_rate.ffill().bfill(limit=FX_FILL_LIMIT_DAYS)
+        # Any rate still NaN where a price exists = a leading gap longer than the
+        # bound. Don't drop the position: fall back to the earliest known rate and
+        # warn so the partial coverage (approximate early baseline) is visible.
+        gap = rate.isna() & out[tkr].notna()
+        if gap.any():
+            earliest = raw_rate.dropna()
+            if not earliest.empty:
+                print(f"WARN {fx_key}: {int(gap.sum())} date(s) for {tkr} before FX "
+                      f"coverage; using earliest rate (early baseline approximate)",
+                      file=sys.stderr)
+                rate = rate.fillna(float(earliest.iloc[0]))
+        out[tkr] = out[tkr] * rate
     return out
 
 
