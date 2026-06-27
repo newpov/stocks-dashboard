@@ -1282,6 +1282,22 @@ def _txn_price(txn_date: pd.Timestamp, ticker_prices: pd.Series) -> float:
     return float(sub.iloc[-1])
 
 
+def _txn_prices(dates: pd.Series, ticker_prices: pd.Series) -> pd.Series:
+    """Vectorized _txn_price across many transaction dates (C2): for each date the
+    close at-or-before it (nearest prior trading day), NaN before the series
+    starts. Byte-identical to ``dates.apply(lambda d: _txn_price(d, ticker_prices))``
+    but a single sorted-index lookup instead of an O(txns) per-date prefix slice.
+    Handles duplicate same-day rows; result is aligned to ``dates.index``."""
+    s = ticker_prices.dropna()
+    if s.empty:
+        return pd.Series(np.nan, index=dates.index)
+    s = s.sort_index()
+    target = pd.DatetimeIndex(pd.to_datetime(dates.to_numpy()))
+    pos = s.index.get_indexer(target, method="ffill")   # -1 where date precedes series
+    vals = np.where(pos >= 0, s.to_numpy()[pos], np.nan)
+    return pd.Series(vals, index=dates.index)
+
+
 _OHLCV_FIELDS = ["Open", "High", "Low", "Close", "Volume"]
 
 
@@ -2626,7 +2642,7 @@ def build_positions(transactions: pd.DataFrame, prices: pd.DataFrame,
             continue
 
         txns = txns.sort_values("date").copy()
-        txns["price"] = txns["date"].apply(lambda d: _txn_price(d, ticker_series))
+        txns["price"] = _txn_prices(txns["date"], ticker_series)
         txns = txns.dropna(subset=["price"])
         if txns.empty:
             continue
@@ -2777,7 +2793,7 @@ def _basket_mtm_capital_weighted(transactions: pd.DataFrame, p: pd.DataFrame,
             continue
         s = p[tkr]
         txns = txns.sort_values("date").copy()
-        txns["price"] = txns["date"].apply(lambda d: _txn_price(d, s.dropna()))
+        txns["price"] = _txn_prices(txns["date"], s)
         txns = txns.dropna(subset=["price"])
         snapped = []
         for _, row in txns.iterrows():
@@ -2836,7 +2852,7 @@ def compute_basket_mtm_series(transactions: pd.DataFrame, prices: pd.DataFrame,
         if ser.empty:
             continue
         txns = txns.sort_values("date").copy()
-        txns["price"] = txns["date"].apply(lambda d: _txn_price(d, ser))
+        txns["price"] = _txn_prices(txns["date"], ser)
         txns = txns.dropna(subset=["price"])
         # v2.9.4: use the SAME active-cycle basis as build_positions so a re-entered
         # name's entry price + date match the holdings table + modal exactly. (This
@@ -3446,10 +3462,10 @@ def render_table(returns: pd.DataFrame, weekly: pd.DataFrame, meta: pd.DataFrame
 
         sector = str(meta.loc[tkr, "sector"]).strip() if tkr in meta.index else ""
         rows.append(
-            f'<tr data-ticker="{tkr}" data-total="{r.total_pct:.4f}" data-weight="{r.weight:.4f}"'
+            f'<tr data-ticker="{_esc(tkr)}" data-total="{r.total_pct:.4f}" data-weight="{r.weight:.4f}"'
             f' data-sector="{_esc(sector)}">'
             f'<td class="t-ticker">'
-            f'<div class="tkr-main">{tkr}{ccy_badge}{weight_badge}</div>'
+            f'<div class="tkr-main">{_esc(tkr)}{ccy_badge}{weight_badge}</div>'
             f'<div class="tkr-sub">{industry}</div>'
             f'</td>'
             f'{a_target_cell}'
@@ -3518,10 +3534,10 @@ def render_chart_grid(returns: pd.DataFrame, weekly: pd.DataFrame, meta: pd.Data
             '<span class="badge-closed" title="Position closed">CLOSED</span>'
         )
         cards.append(
-            f'<div class="card" data-ticker="{tkr}" data-total="{r.total_pct:.4f}" data-weight="{r.weight:.4f}">'
+            f'<div class="card" data-ticker="{_esc(tkr)}" data-total="{r.total_pct:.4f}" data-weight="{r.weight:.4f}">'
             f'<div class="card-head">'
             f'<div class="card-head-left">'
-            f'<span class="card-tkr">{tkr}{ccy_badge}{weight_badge}</span>'
+            f'<span class="card-tkr">{_esc(tkr)}{ccy_badge}{weight_badge}</span>'
             f'<span class="card-industry">{industry}</span>'
             f'</div>'
             f'<span class="card-pct {_cls(r.total_pct)}">{r.total_pct:+.1f}%</span>'
@@ -3546,8 +3562,8 @@ def render_contributors(contrib: pd.DataFrame, meta: pd.DataFrame, n: int = 5) -
         # one equal-weight unit as of v2.4); contribution below is equal-weight.
         cost_str = f"{BASE_SYMBOL}{r.total_invested:,.0f}"
         return (
-            f'<tr data-ticker="{tkr}">'
-            f'<td class="ct-tkr">{tkr}<div class="ct-ind">{ind}</div></td>'
+            f'<tr data-ticker="{_esc(tkr)}">'
+            f'<td class="ct-tkr">{_esc(tkr)}<div class="ct-ind">{ind}</div></td>'
             f'<td class="num ct-wt">{cost_str}</td>'
             f'<td class="num {_cls(r.total_pct)} ct-ret">{r.total_pct:+.1f}%</td>'
             f'<td class="num {_cls(r.contribution_pp)} ct-contrib">{r.contribution_pp:+.2f} pp</td>'
@@ -3692,8 +3708,8 @@ def render_detractors_strategy(contrib: pd.DataFrame, returns: pd.DataFrame,
                     f'</div>'
                 )
         rows.append(
-            f'<tr data-ticker="{tkr}">'
-            f'<td class="dt-tkr">{tkr}<div class="dt-ind">{ind}</div></td>'
+            f'<tr data-ticker="{_esc(tkr)}">'
+            f'<td class="dt-tkr">{_esc(tkr)}<div class="dt-ind">{ind}</div></td>'
             f'<td class="num dt-cost">{cost_str}</td>'
             f'<td class="num neg dt-ret">{r.total_pct:+.1f}%</td>'
             f'<td class="num neg dt-contrib">{r.contribution_pp:+.2f} pp</td>'
@@ -3726,9 +3742,9 @@ def render_detractors_strategy(contrib: pd.DataFrame, returns: pd.DataFrame,
         rec_label, rec_cls = _REC_LABELS.get(rec_raw, ("—", "an-rec-none"))
         action_label, action_tone = _exit_action(sig_tone, rec_raw)
         mobile_cards.append(
-            f'<div class="dt-mobile-card ticker-clickable" data-ticker="{tkr}">'
+            f'<div class="dt-mobile-card ticker-clickable" data-ticker="{_esc(tkr)}">'
             f'  <div class="dt-mobile-head">'
-            f'    <span class="dt-mobile-tkr">{tkr}</span>'
+            f'    <span class="dt-mobile-tkr">{_esc(tkr)}</span>'
             f'    <span class="dt-mobile-ret neg">{r.total_pct:+.1f}%</span>'
             f'  </div>'
             f'  <div class="dt-mobile-ind">{ind}</div>'
@@ -3788,8 +3804,8 @@ def render_regret_tracker(returns: pd.DataFrame, meta: pd.DataFrame, n: int = 5)
         last_str = f"{BASE_SYMBOL}{r.latest:,.2f}"
         cls = "pos" if r.post_exit_pct >= 0 else "neg"
         return (
-            f'<tr data-ticker="{tkr}">'
-            f'<td class="rg-tkr">{tkr}<div class="rg-ind">{ind}</div></td>'
+            f'<tr data-ticker="{_esc(tkr)}">'
+            f'<td class="rg-tkr">{_esc(tkr)}<div class="rg-ind">{ind}</div></td>'
             f'<td class="num rg-sell">{sell_str}</td>'
             f'<td class="num rg-last">{last_str}</td>'
             f'<td class="num {cls} rg-delta">{r.post_exit_pct:+.1f}%</td>'
@@ -3979,9 +3995,9 @@ def render_watchlist(watchlist_payload: dict, meta: pd.DataFrame) -> str:
                          + (f' <span class="wl-cite-src">&mdash; {src}</span>' if src else "")
                          + '</div>')
         cards.append(
-            f'<div class="wl-card" data-ticker="{tkr}">'
+            f'<div class="wl-card" data-ticker="{_esc(tkr)}">'
             f'  <div class="wl-head">'
-            f'    <div class="wl-tkr">{tkr}<div class="wl-ind">{ind}</div></div>'
+            f'    <div class="wl-tkr">{_esc(tkr)}<div class="wl-ind">{ind}</div></div>'
             f'    <div class="wl-pct {cls}">{total:+.1f}%</div>'
             f'  </div>'
             f'  <div class="wl-name">{name}</div>'
@@ -4220,9 +4236,9 @@ def render_analyst_signals(rows: list[dict], candidate_pool_size: int) -> str:
         else:
             range_html = ""
         cards.append(
-            f'<div class="an-card" data-ticker="{d["ticker"]}">'
+            f'<div class="an-card" data-ticker="{_esc(d["ticker"])}">'
             f'  <div class="an-head">'
-            f'    <div class="an-tkr">{d["ticker"]}<div class="an-ind">{_esc(d["industry"])}</div></div>'
+            f'    <div class="an-tkr">{_esc(d["ticker"])}<div class="an-ind">{_esc(d["industry"])}</div></div>'
             f'    <div class="an-rec {rec_cls}">{label}</div>'
             f'  </div>'
             f'  <div class="an-name">{_esc(d["name"])}</div>'
@@ -5461,9 +5477,9 @@ def render_basket_diversification(data: dict | None, meta: pd.DataFrame) -> str:
             f'<li class="div-row">'
             f'<div class="div-pair">'
             f'<span class="div-pair-syms">'
-            f'<span class="ticker-clickable" data-ticker="{p["a"]}">{p["a"]}</span>'
+            f'<span class="ticker-clickable" data-ticker="{_esc(p["a"])}">{_esc(p["a"])}</span>'
             f' &harr; '
-            f'<span class="ticker-clickable" data-ticker="{p["b"]}">{p["b"]}</span>'
+            f'<span class="ticker-clickable" data-ticker="{_esc(p["b"])}">{_esc(p["b"])}</span>'
             f'</span>'
             f'<div class="div-pair-sub">{_esc(sub)}</div>'
             f'</div>'
@@ -5479,7 +5495,7 @@ def render_basket_diversification(data: dict | None, meta: pd.DataFrame) -> str:
         div_rows.append(
             f'<li class="div-row">'
             f'<div class="div-pair">'
-            f'<span class="div-pair-syms ticker-clickable" data-ticker="{d["ticker"]}">{d["ticker"]}</span>'
+            f'<span class="div-pair-syms ticker-clickable" data-ticker="{_esc(d["ticker"])}">{_esc(d["ticker"])}</span>'
             f'<div class="div-pair-sub">{sub}</div>'
             f'</div>'
             f'<span class="div-val div-val-cool">{d["avg_corr"]:+.2f}</span>'
@@ -7040,6 +7056,16 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
         _ann_cls = "pos" if _ann_pct >= 0 else "neg"
         _ann_meta = f"over {years_elapsed:.1f} years &middot; geometric"
 
+    # L5: the contributor "weight" is just 1 unit in equal mode, so a "£1 basis"
+    # tail invites a position-size misread. Only append a £ basis in value mode,
+    # where the weight is a real cost basis; otherwise show just the name.
+    if WEIGHT_MODE == "value":
+        _top_contrib_meta = f"{best_contrib_name} &middot; {BASE_SYMBOL}{best_contrib_wt:,.0f} basis"
+        _top_detract_meta = f"{worst_contrib_name} &middot; {BASE_SYMBOL}{worst_contrib_wt:,.0f} basis"
+    else:
+        _top_contrib_meta = best_contrib_name
+        _top_detract_meta = worst_contrib_name
+
     _stats_registry = [
         # slug,             label,                value_html,                    cls,                                meta_html
         ("total_return",    "Total return",       f"{basket_final:+.1f}%",       _cls(basket_final),                 f"equal-weight &middot; since {first_purchase_str}"),
@@ -7049,8 +7075,8 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
         ("win_loss_ratio",  "Win / loss ratio",   wlr_value_str,                 wlr_cls,                            wlr_meta_str),
         ("avg_upside",      "Avg analyst upside", f"{avg_upside:+.1f}%",         _cls(avg_upside),                   f"{n_open_covered} of {n_open} open covered"),
         ("max_drawdown",    "Max drawdown",       f"{max_drawdown:.1f}%",        "neg",                              ("trough: " + max_drawdown_date_str) if max_drawdown_date_str else "no drawdown yet"),
-        ("top_contributor", "Top contributor",    f"{best_contrib_pp:+.1f} pp",  "pos",                              f"{best_contrib_name} &middot; {BASE_SYMBOL}{best_contrib_wt:,.0f} basis"),
-        ("top_detractor",   "Top detractor",      f"{worst_contrib_pp:+.1f} pp", "neg",                              f"{worst_contrib_name} &middot; {BASE_SYMBOL}{worst_contrib_wt:,.0f} basis"),
+        ("top_contributor", "Top contributor",    f"{best_contrib_pp:+.1f} pp",  "pos",                              _top_contrib_meta),
+        ("top_detractor",   "Top detractor",      f"{worst_contrib_pp:+.1f} pp", "neg",                              _top_detract_meta),
         ("positions_open",  "Open positions",     f"{n_open}",                   "",                                 f"{n_closed} closed alongside"),
     ]
 

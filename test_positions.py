@@ -16,6 +16,32 @@ def _bdates(n, start="2025-01-02"):
     return pd.bdate_range(start, periods=n)
 
 
+def test_txn_prices_vectorized_matches_loop():
+    """C2: the vectorized _txn_prices must be byte-identical to mapping the scalar
+    _txn_price over each date — including exact matches, non-trading days, dates
+    before the series starts, after it ends, and duplicate same-day rows."""
+    idx = pd.bdate_range("2025-01-06", periods=20)              # Mon-start business days
+    s = pd.Series(np.linspace(100.0, 200.0, 20), index=idx)
+    s.iloc[5] = np.nan                                          # a gap to skip over
+    dates = pd.Series(pd.to_datetime([
+        "2024-12-31",        # before series start -> NaN
+        "2025-01-06",        # exact first trading day
+        "2025-01-11",        # a Saturday -> nearest prior close
+        "2025-01-13",        # exact match near the NaN gap
+        "2025-01-13",        # duplicate same-day row
+        "2025-03-01",        # after series end -> last close
+    ]))
+    want = dates.apply(lambda d: build._txn_price(d, s))
+    got = build._txn_prices(dates, s)
+    pd.testing.assert_series_equal(got, want, check_names=False)
+
+
+def test_txn_prices_empty_series_all_nan():
+    dates = pd.Series(pd.to_datetime(["2025-01-06", "2025-02-01"]))
+    got = build._txn_prices(dates, pd.Series(dtype=float))
+    assert got.isna().all()
+
+
 def test_many_buys_collapse_to_one_unit():
     """10 buy rows -> 1 unit held, weight 1, but raw buy count preserved."""
     dates = _bdates(30)
