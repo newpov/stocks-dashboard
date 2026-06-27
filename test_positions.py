@@ -152,6 +152,33 @@ def test_partial_trim_does_not_reset_basis():
     assert abs(r["baseline"] - (1750.0 / 15.0)) < 1e-6
 
 
+# --- v2.9.4: hero chart uses the SAME active-cycle basis as the table ---------
+
+def test_basket_mtm_matches_table_for_rebought_name():
+    """H5: a sold-then-rebought name must rebase the basket line at the RE-BUY
+    price (active cycle), exactly like the holdings table baseline — not at the
+    all-time mean of every buy. Pre-fix the chart said ~+33% while the table said
+    flat (0%) for the same name."""
+    dates = _bdates(60)
+    px = pd.DataFrame({"CSCO": np.concatenate([
+        np.full(20, 100.0),               # original era
+        np.linspace(100.0, 200.0, 20),    # ramp
+        np.full(20, 200.0),               # re-buy era, flat
+    ])}, index=dates)
+    txns = pd.DataFrame({
+        "ticker": ["CSCO"] * 3,
+        "date": [dates[0], dates[2], dates[45]],   # buy@100, full SELL@100, rebuy@200
+        "action": ["BUY", "SELL", "BUY"],
+        "shares": [10.0, 10.0, 10.0],
+    })
+    pos = build.build_positions(txns, px).loc["CSCO"]
+    basket = build.compute_basket_mtm_series(txns, px)
+    # single open position -> basket final == its table total_pct (both rebased at
+    # the re-buy 200, flat). The all-time-mean bug gave ~+33%.
+    assert abs(basket.iloc[-1] - pos["total_pct"]) < 0.5
+    assert abs(basket.iloc[-1]) < 0.5
+
+
 # --- v2.4 value-weight mode (opt-in, needs real share quantities) ------------
 
 def test_value_mode_uses_real_shares():

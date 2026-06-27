@@ -2449,6 +2449,65 @@ def _synthesize_watchlist_transactions(watchlist: pd.DataFrame,
     return pd.DataFrame(rows, columns=["ticker", "date", "action", "shares"])
 
 
+def _active_cycle_basis(txns: pd.DataFrame) -> "dict | None":
+    """Average-cost basis for the ACTIVE trade cycle of one ticker — the current
+    open lot, or the last closed cycle — splitting history at every FULL exit
+    (running net units -> 0 after a SELL). SHARED by build_positions (table/modal)
+    and compute_basket_mtm_series (hero chart) so both agree on a re-entered name's
+    entry price + date (fixes the v2.9.4 table-vs-chart divergence). `txns` must be
+    sorted by date and carry a numeric `price` column.
+
+    Returns {avg_buy, avg_sell, first_buy_date, last_sell_date, closed}, or None
+    when there are no usable buys.
+
+    LIMITATION (forker note): cycle boundaries rely on SELL `shares` reflecting the
+    real exit size so a full exit nets to 0. The author's snapshot guarantees this
+    (full-exit SELLs carry the cycle's unit count). On a hand-rolled transactions.csv
+    that logs 1 unit per row, a full exit recorded as a single SELL after several BUY
+    rows won't net to 0, so the basis won't reset — log the exit with shares = units
+    held, or use value mode with real quantities.
+    """
+    buys_all = txns[txns.action == "BUY"]
+    if buys_all.empty:
+        return None
+    cycles: list[dict] = []
+    cur_b: list[tuple] = []
+    cur_s: list[tuple] = []
+    net = 0.0
+    for _r in txns.itertuples(index=False):
+        _sh, _px = float(_r.shares), float(_r.price)
+        if str(_r.action).upper() == "BUY":
+            cur_b.append((_r.date, _sh, _px)); net += _sh
+        else:
+            cur_s.append((_r.date, _sh, _px)); net -= _sh
+            if net <= 1e-6 and cur_b:            # position fully closed -> cycle boundary
+                cycles.append({"buys": cur_b, "sells": cur_s})
+                cur_b, cur_s, net = [], [], 0.0
+    if cur_b or cur_s:
+        cycles.append({"buys": cur_b, "sells": cur_s})
+    active = cycles[-1] if cycles else {"buys": [], "sells": []}
+
+    def _wavg(rws: list) -> float:
+        tot = sum(sh for _, sh, _p in rws)
+        return float(sum(sh * p for _, sh, p in rws) / tot) if tot > 0 else float("nan")
+
+    raw_bought = float(buys_all.shares.sum())
+    sells_all = txns[txns.action == "SELL"]
+    raw_sold = float(sells_all.shares.sum())
+    avg_buy = (_wavg(active["buys"]) if active["buys"]
+               else float((buys_all.shares * buys_all.price).sum() / raw_bought))
+    avg_sell = (_wavg(active["sells"]) if active["sells"]
+                else (float((sells_all.shares * sells_all.price).sum() / raw_sold)
+                      if raw_sold > 0 else float("nan")))
+    first_buy_date = (pd.Timestamp(active["buys"][0][0]) if active["buys"]
+                      else pd.Timestamp(buys_all.date.min()))
+    last_sell_date = (pd.Timestamp(active["sells"][-1][0]) if active["sells"] else None)
+    closed = str(txns.iloc[-1].action).upper() == "SELL"
+    return {"avg_buy": avg_buy, "avg_sell": avg_sell,
+            "first_buy_date": first_buy_date, "last_sell_date": last_sell_date,
+            "closed": closed}
+
+
 def build_positions(transactions: pd.DataFrame, prices: pd.DataFrame,
                     mode: str | None = None) -> pd.DataFrame:
     """Aggregate transactions into positions using average-cost accounting.
@@ -2489,45 +2548,15 @@ def build_positions(transactions: pd.DataFrame, prices: pd.DataFrame,
         if raw_bought <= 0:
             continue
 
-        # v2.7: split the trade history into CYCLES separated by full exits
-        # (running net units -> 0 after a sell). The cost basis is taken from the
-        # ACTIVE cycle only — the current open lot, or the last closed cycle — so
-        # a long-ago entry that was fully sold can't blend into the basis of a
-        # later re-entry (the "sold a year ago, rebought, baseline still +50%"
-        # bug). A partial trim (net stays > 0) is NOT a full exit, so both buys
-        # keep contributing. Falls back to the simple all-time average when there
-        # are no buys in the active cycle (defensive; shouldn't happen).
-        cycles: list[dict] = []
-        cur_b: list[tuple] = []          # (date, shares, price) within the cycle
-        cur_s: list[tuple] = []
-        net = 0.0
-        for _r in txns.itertuples(index=False):
-            _sh, _px = float(_r.shares), float(_r.price)
-            if str(_r.action).upper() == "BUY":
-                cur_b.append((_r.date, _sh, _px)); net += _sh
-            else:
-                cur_s.append((_r.date, _sh, _px)); net -= _sh
-                if net <= 1e-6 and cur_b:            # position fully closed
-                    cycles.append({"buys": cur_b, "sells": cur_s})
-                    cur_b, cur_s, net = [], [], 0.0
-        if cur_b or cur_s:
-            cycles.append({"buys": cur_b, "sells": cur_s})
-        active = cycles[-1] if cycles else {"buys": [], "sells": []}
-
-        def _wavg(rows: list[tuple]) -> float:
-            tot = sum(sh for _, sh, _p in rows)
-            return float(sum(sh * p for _, sh, p in rows) / tot) if tot > 0 else float("nan")
-
-        avg_buy_price = (_wavg(active["buys"]) if active["buys"]
-                         else float((buys.shares * buys.price).sum() / raw_bought))
-        avg_sell_price = (_wavg(active["sells"]) if active["sells"]
-                          else (float((sells.shares * sells.price).sum() / raw_sold)
-                                if raw_sold > 0 else float("nan")))
-
-        # Baseline/"held since" date = the active cycle's first buy (the re-buy
-        # for a re-entered name), so the modal chart starts at the current lot.
-        first_buy_date = (pd.Timestamp(active["buys"][0][0]) if active["buys"]
-                          else pd.Timestamp(buys.date.min()))
+        # Cost basis from the ACTIVE trade cycle (current open lot or last closed
+        # cycle), split at full exits — see _active_cycle_basis. Shared with the
+        # hero-chart MTM so a re-entered name's entry can't disagree between the
+        # table and the chart. Baseline/"held since" date = active cycle's first
+        # buy, so the modal chart starts at the current lot.
+        basis = _active_cycle_basis(txns)
+        avg_buy_price = basis["avg_buy"]
+        avg_sell_price = basis["avg_sell"]
+        first_buy_date = basis["first_buy_date"]
         last_action_date = pd.Timestamp(txns.date.max())
         latest = float(ticker_series.iloc[-1])
 
@@ -2717,24 +2746,24 @@ def compute_basket_mtm_series(transactions: pd.DataFrame, prices: pd.DataFrame,
         txns = txns.sort_values("date").copy()
         txns["price"] = txns["date"].apply(lambda d: _txn_price(d, ser))
         txns = txns.dropna(subset=["price"])
-        buys = txns[txns.action == "BUY"]
-        if buys.empty:
+        # v2.9.4: use the SAME active-cycle basis as build_positions so a re-entered
+        # name's entry price + date match the holdings table + modal exactly. (This
+        # previously used an all-time unweighted mean of every buy + the all-time
+        # first-buy date -> the chart and table disagreed for rebought names.)
+        basis = _active_cycle_basis(txns)
+        if basis is None or not (basis["avg_buy"] > 0):
             continue
-        avg_buy = float(buys.price.mean())
-        if avg_buy <= 0:
-            continue
-        entry = _snap_to_trading(pd.Timestamp(buys.date.min()), dates)
+        avg_buy = basis["avg_buy"]
+        entry = _snap_to_trading(basis["first_buy_date"], dates)
         if entry is None:
             continue
 
         # Mark-to-market return relative to this position's average buy price.
         r = (s / avg_buy - 1.0) * 100.0
-        sells = txns[txns.action == "SELL"]
-        closed = str(txns.iloc[-1].action).upper() == "SELL" and not sells.empty
-        if closed:
-            exit_date = _snap_to_trading(pd.Timestamp(sells.date.max()), dates)
+        if basis["closed"] and basis["last_sell_date"] is not None:
+            exit_date = _snap_to_trading(basis["last_sell_date"], dates)
             if exit_date is not None:
-                realized = (float(sells.price.mean()) / avg_buy - 1.0) * 100.0
+                realized = (basis["avg_sell"] / avg_buy - 1.0) * 100.0
                 r.loc[r.index >= exit_date] = realized   # freeze at realized return
         r.loc[r.index < entry] = np.nan                  # not in the basket before entry
         contribs.append(r)
