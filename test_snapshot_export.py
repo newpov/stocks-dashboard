@@ -44,14 +44,46 @@ def test_full_exit_after_two_buys_sell_unit_count_is_two():
     assert snap["shares"].tolist() == [1, 1, 2]
 
 
-def test_partial_trim_is_omitted():
+def test_midsequence_partial_trim_is_omitted():
+    """A partial sell that is NOT the ticker's last action is still dropped (the
+    position is added to afterwards, so it stays open)."""
     df = _txns([
         ("NVDA", "2025-01-02", "BUY", 30.0),
-        ("NVDA", "2025-04-22", "SELL", 10.0),
+        ("NVDA", "2025-04-22", "SELL", 10.0),   # mid trim -> omitted
+        ("NVDA", "2025-06-01", "BUY", 5.0),     # added to -> last action is BUY
     ])
     snap = build.export_basket_snapshot(df)
-    assert snap["action"].tolist() == ["BUY"]
-    assert snap["shares"].tolist() == [1]
+    assert snap["action"].tolist() == ["BUY", "BUY"]   # still open
+
+
+def test_last_sell_closes_even_without_clean_zero():
+    """Author rule: a SELL that is the ticker's LAST transaction closes the
+    position even if the real net never reached zero (no share sizes to know)."""
+    df = _txns([
+        ("NVDA", "2025-01-02", "BUY", 30.0),
+        ("NVDA", "2025-04-22", "SELL", 10.0),   # last action, partial in real shares
+    ])
+    snap = build.export_basket_snapshot(df)
+    assert snap["action"].tolist() == ["BUY", "SELL"]   # closed
+    assert snap["shares"].tolist() == [1, 1]
+
+
+def test_smci_pattern_four_buys_then_final_sell_closes():
+    """The SMCI case: a re-buy cycle of several buys whose closing sells left a
+    residual now closes because the last action is a SELL."""
+    df = _txns([
+        ("SMCI", "2024-10-25", "BUY", 5.0),
+        ("SMCI", "2024-11-14", "SELL", 5.0),    # cycle 1 full exit
+        ("SMCI", "2025-02-05", "BUY", 3.0),
+        ("SMCI", "2025-02-05", "BUY", 3.0),
+        ("SMCI", "2025-02-07", "BUY", 2.0),
+        ("SMCI", "2025-02-12", "BUY", 2.0),     # cycle 2: 4 buys
+        ("SMCI", "2025-03-01", "SELL", 9.5),    # sold down, fractional residual, LAST
+    ])
+    snap = build.export_basket_snapshot(df)
+    assert snap["action"].tolist() == ["BUY", "SELL", "BUY", "BUY", "BUY", "BUY", "SELL"]
+    assert snap["shares"].tolist() == [1, 1, 1, 1, 1, 1, 4]   # cycle-2 close = 4 units
+    assert snap.iloc[-1]["action"] == "SELL"   # -> build_positions sees it closed
 
 
 def test_rebuy_after_full_exit_two_cycles():
@@ -76,9 +108,9 @@ def test_orphan_sell_emits_nothing():
 def test_no_zero_share_sell_rows_ever():
     df = _txns([
         ("NVDA", "2025-01-02", "BUY", 30.0),
-        ("NVDA", "2025-04-22", "SELL", 10.0),   # partial -> omitted
+        ("NVDA", "2025-04-22", "SELL", 10.0),   # last action -> closes (SELL 1)
         ("LLY",  "2024-10-21", "BUY", 4.0),
-        ("LLY",  "2025-03-10", "SELL", 4.0),    # full exit
+        ("LLY",  "2025-03-10", "SELL", 4.0),    # full exit (SELL 1)
     ])
     snap = build.export_basket_snapshot(df)
     sells = snap[snap["action"] == "SELL"]["shares"]

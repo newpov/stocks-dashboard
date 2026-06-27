@@ -1050,7 +1050,9 @@ def export_basket_snapshot(transactions: pd.DataFrame) -> pd.DataFrame:
     for ticker, grp in transactions.sort_values("date").groupby("ticker", sort=True):
         net = 0.0          # real units — drives full-exit detection
         open_units = 0     # normalized units open in the current cycle
-        for r in grp.itertuples(index=False):
+        rows_t = list(grp.itertuples(index=False))
+        last_i = len(rows_t) - 1
+        for i, r in enumerate(rows_t):
             action = str(r.action).upper()
             sh = float(r.shares)
             if action == "BUY":
@@ -1059,11 +1061,18 @@ def export_basket_snapshot(transactions: pd.DataFrame) -> pd.DataFrame:
                 open_units += 1
             elif action == "SELL":
                 net -= sh
-                if net <= 1e-6 and open_units > 0:    # full exit -> close cycle
+                # Close the cycle on a clean full exit (real net -> 0) OR when this
+                # SELL is the ticker's LAST transaction. The equal-weight snapshot
+                # carries no share sizes, so a position whose final trade is a sell
+                # is treated as fully closed regardless of any fractional/untracked
+                # residual (the author's "last-sell = closed" rule — fixes names
+                # sold down to a residual that wrongly showed as open). A partial
+                # trim that is NOT the last action still emits nothing.
+                if open_units > 0 and (net <= 1e-6 or i == last_i):
                     out_rows.append((ticker, r.date, "SELL", open_units))
                     net = 0.0
                     open_units = 0
-                # else: partial trim or orphan sell -> emit nothing
+                # else: mid-sequence partial trim / orphan sell -> emit nothing
     out = pd.DataFrame(out_rows, columns=["ticker", "date", "action", "shares"])
     out["date"] = pd.to_datetime(out["date"]).dt.strftime("%Y-%m-%d")
     out["shares"] = out["shares"].astype(int)

@@ -9,7 +9,7 @@ def _real_txns():
     return pd.DataFrame([
         ("AAPL", "2024-10-21", "BUY", 15.0),
         ("NVDA", "2025-01-02", "BUY", 30.0),
-        ("NVDA", "2025-04-22", "SELL", 10.0),   # partial -> omitted
+        ("NVDA", "2025-04-22", "SELL", 10.0),   # last action -> closes (SELL 1)
         ("LLY",  "2024-10-21", "BUY", 4.0),
         ("LLY",  "2025-03-10", "SELL", 4.0),    # full exit
     ], columns=["ticker", "date", "action", "shares"])
