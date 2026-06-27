@@ -3170,7 +3170,31 @@ def _pct_cell(v: float, dim_mobile: bool = False) -> str:
 
 
 def _esc(s: str) -> str:
-    return (str(s) if s is not None else "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    # Escapes &, <, > AND quotes — so the result is safe in BOTH text and
+    # attribute context (title="...", href="..."). & must be replaced first.
+    return ((str(s) if s is not None else "")
+            .replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            .replace('"', "&quot;").replace("'", "&#39;"))
+
+
+def safe_url(u) -> str:
+    """HTML-attribute-safe href, but ONLY for http(s) URLs — anything else
+    (javascript:, data:, relative junk) collapses to '#'. News/cite links come
+    from untrusted RSS feeds + the Cloudflare Worker, where entity-escaping alone
+    leaves a `javascript:` scheme clickable (it has no <>&" to escape)."""
+    s = (str(u) if u is not None else "").strip()
+    low = s.lower()
+    if low.startswith("http://") or low.startswith("https://"):
+        return _esc(s)
+    return "#"
+
+
+def _json_for_script(obj, **kw) -> str:
+    """json.dumps hardened for embedding INSIDE a <script> tag: escapes '</' so a
+    string value containing the literal '</script>' can't terminate the element
+    early (standard JSON-in-HTML hardening that json.dumps does NOT do). Use for
+    every inline payload; the fetched sidecar payload.json doesn't need it."""
+    return json.dumps(obj, **kw).replace("</", "<\\/")
 
 
 def render_svg_defs() -> str:
@@ -3828,7 +3852,7 @@ def render_watchlist(watchlist_payload: dict, meta: pd.DataFrame) -> str:
             src = _esc(cite.get("publisher") or "")
             title = _esc(cite["title"])
             link = cite.get("link") or ""
-            inner = (f'<a href="{_esc(link)}" target="_blank" rel="noopener">{title}</a>'
+            inner = (f'<a href="{safe_url(link)}" target="_blank" rel="noopener">{title}</a>'
                      if link else title)
             cite_html = (f'<div class="wl-cite">{inner}'
                          + (f' <span class="wl-cite-src">&mdash; {src}</span>' if src else "")
@@ -5068,7 +5092,7 @@ def render_bigbrain(observations: list[dict], as_of_str: str, macro_html: str = 
         if c:
             pub = f' &mdash; {_esc(c["publisher"])}' if c.get("publisher") else ""
             title = _esc(c["title"][:80] + ("…" if len(c["title"]) > 80 else ""))
-            cite_html = (f'<a class="bb-cite" href="{_esc(c["link"])}" target="_blank" '
+            cite_html = (f'<a class="bb-cite" href="{safe_url(c["link"])}" target="_blank" '
                          f'rel="noopener noreferrer">&#8599; {title}{pub}</a>')
         # v2.5 #2: current price next to the ticker (base ccy for held/sold,
         # native for universe ideas). Omitted when unavailable.
@@ -5159,7 +5183,7 @@ def render_market_expectations(rows: list[dict], as_of_str: str) -> str:
             cls = "me-up" if d > 0 else "me-down"
             arrow = "&#9650;" if d > 0 else "&#9660;"
             delta_html = f'<span class="me-delta {cls}">{arrow} {abs(d):.0f}pp</span>'
-        theme_html = (f'<a class="me-q" href="{_esc(r["url"])}" target="_blank" '
+        theme_html = (f'<a class="me-q" href="{safe_url(r["url"])}" target="_blank" '
                       f'rel="noopener noreferrer">{_esc(r["theme"])}</a>'
                       if r.get("url") else
                       f'<span class="me-q">{_esc(r["theme"])}</span>')
@@ -5464,13 +5488,19 @@ def render_industry_outlook(groups: list[dict], universe_size: int) -> str:
                              f'<span class="io-up {up_cls}">{s["upside"]:+.0f}% target</span>')
             else:
                 meta_html = '<span class="io-no-cov">no analyst coverage</span>'
-            ret_cls = "pos" if s["ret_12m"] >= 0 else "neg"
+            # None/NaN guard: the data builder skips null ret_12m, but a stray
+            # None here would TypeError on `>=` / format as "nan%".
+            _r = s.get("ret_12m")
+            _r_ok = _r is not None and _r == _r
+            ret_cls = ("pos" if _r >= 0 else "neg") if _r_ok else ""
+            ret_txt = f"{_r:+.0f}%" if _r_ok else "&mdash;"
             tier = s.get("cap_tier", "")
             tier_html = f'<span class="io-tier io-tier-{tier.lower()}">{tier}</span>' if tier else ""
+            _tkr = _esc(s["ticker"])
             stock_rows.append(
-                f'<div class="io-stock" data-ticker="{s["ticker"]}">'
-                f'<div class="io-tkr">{s["ticker"]}{tier_html}</div>'
-                f'<div class="io-ret {ret_cls}">{s["ret_12m"]:+.0f}%</div>'
+                f'<div class="io-stock" data-ticker="{_tkr}">'
+                f'<div class="io-tkr">{_tkr}{tier_html}</div>'
+                f'<div class="io-ret {ret_cls}">{ret_txt}</div>'
                 f'<div class="io-meta">{meta_html}</div>'
                 f'</div>'
             )
@@ -5697,7 +5727,7 @@ def render_news(news_items: list[dict]) -> str:
         if src not in sources_seen:
             sources_seen.append(src)
         rows.append(
-            f'<a class="news-row" data-source="{_esc(src)}" href="{_esc(it["link"])}" target="_blank" rel="noopener noreferrer">'
+            f'<a class="news-row" data-source="{_esc(src)}" href="{safe_url(it["link"])}" target="_blank" rel="noopener noreferrer">'
             f'  <div class="news-title">{_esc(it["title"])}</div>'
             f'  <div class="news-meta"><span class="news-src">{_esc(src)}</span>'
             f'  <span class="news-dot">·</span><span class="news-when">{_esc(it["published_pretty"])}</span></div>'
@@ -6923,7 +6953,7 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     # v2.7: also track the value-screen membership so "since your last visit"
     # surfaces newly-qualifying value names (parallel to new Big Brain ideas).
     _value_tickers = [r["ticker"] for r in (value_rows or [])]
-    last_look_json = json.dumps({
+    last_look_json = _json_for_script({
         "build_id": build_timestamp,
         "basket_return": round(float(basket_final), 2),
         "idea_tickers": _idea_tickers,
@@ -6931,23 +6961,23 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
         "predictions": _pred_probs,
     }, separators=(",", ":"))
     if demo_mode:
-        data_json = json.dumps(data_dict, separators=(",", ":"))
+        data_json = _json_for_script(data_dict, separators=(",", ":"))
         heavy_url_js = "null"
     else:
         light, heavy = split_payload(data_dict)
         HEAVY_JSON.parent.mkdir(parents=True, exist_ok=True)
-        HEAVY_JSON.write_text(
+        HEAVY_JSON.write_text(           # fetched sidecar, not inlined -> plain dumps
             json.dumps(heavy, separators=(",", ":")), encoding="utf-8"
         )
         heavy_kb = HEAVY_JSON.stat().st_size / 1024
         print(f"Wrote {HEAVY_JSON} ({heavy_kb:.1f} KB) "
               f"-- lazy-modal sidecar, {len(heavy)} tickers")
-        data_json = json.dumps(light, separators=(",", ":"))
-        heavy_url_js = json.dumps(f"data/payload.json?v={build_timestamp}")
+        data_json = _json_for_script(light, separators=(",", ":"))
+        heavy_url_js = _json_for_script(f"data/payload.json?v={build_timestamp}")
     # JSON-encode the Worker URL so quoting is always correct in the embedded JS,
     # and an unset URL becomes the literal `""` (falsy in the JS branch).
-    news_worker_url_js = json.dumps(NEWS_WORKER_URL or "")
-    portfolio_json = json.dumps(
+    news_worker_url_js = _json_for_script(NEWS_WORKER_URL or "")
+    portfolio_json = _json_for_script(
         build_portfolio_payload(basket, bench, first_purchase, fx=fx), separators=(",", ":")
     )
     # T11/T12/T14/T15: aux payload for click-to-expand drill-down modals.
@@ -6959,12 +6989,12 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
         basket_first_date=first_purchase,
         log_tickers=log_tickers_set,
     )
-    aux_json = json.dumps(aux_payload, separators=(",", ":"))
+    aux_json = _json_for_script(aux_payload, separators=(",", ":"))
     # v1.9 Pocket Lesson: bake the curated tip pool into the page payload.
-    pocket_lessons_json = json.dumps(POCKET_LESSONS, separators=(",", ":"), ensure_ascii=False)
+    pocket_lessons_json = _json_for_script(POCKET_LESSONS, separators=(",", ":"), ensure_ascii=False)
     # v2.1 Quiz: 50-question pool, inline (~12 KB) so it's available immediately
     # on toolbar-button click without waiting for HEAVY fetch.
-    quiz_pool_json = json.dumps(QUIZ_POOL, separators=(",", ":"), ensure_ascii=False)
+    quiz_pool_json = _json_for_script(QUIZ_POOL, separators=(",", ":"), ensure_ascii=False)
 
     # ---- Customizable module stack -----------------------------------------
     # Each top-level content section is wrapped as a draggable/hideable
@@ -9784,7 +9814,7 @@ async function openModal(ticker) {{
   if (items.length) {{
     newsList.innerHTML = items.map(it => {{
       const safeTitle = escapeNewsHtml(it.title || '');
-      const safeLink = escapeNewsHtml(it.link || '#');
+      const safeLink = safeUrl(it.link);
       const safePub = escapeNewsHtml(it.publisher || '');
       const when = it.published ? relativeNewsTime(new Date(it.published)) : '';
       const safeWhen = escapeNewsHtml(when);
@@ -10151,17 +10181,17 @@ function _safeOpenTicker(ticker) {{
     const tierBadge = entry.cap_tier ? ' ' + _capTierBadge(entry.cap_tier) : '';
     const body = (
       `<table class="im-table im-uni-table"><tbody>`
-      + `<tr><td class="muted">Name</td><td>${{entry.name}}${{tierBadge}}</td></tr>`
-      + `<tr><td class="muted">Industry</td><td>${{industry}}</td></tr>`
+      + `<tr><td class="muted">Name</td><td>${{escapeNewsHtml(entry.name)}}${{tierBadge}}</td></tr>`
+      + `<tr><td class="muted">Industry</td><td>${{escapeNewsHtml(industry)}}</td></tr>`
       + `<tr><td class="muted">12-month return</td><td class="num">${{_pctSpan(entry.return_12mo)}}</td></tr>`
       + `</tbody></table>`
       + `<p class="muted im-uni-note">Limited data: this ticker is in the reference `
       + `<code>universe.csv</code> but not in your basket or watchlist. Add it to `
       + `<code>log.xlsx</code> or <code>watchlist.csv</code> for full chart, modal stats, and news.</p>`
     );
-    openInfoModal(`${{ticker}} &middot; universe only`, industry, body);
+    openInfoModal(`${{escapeNewsHtml(ticker)}} &middot; universe only`, escapeNewsHtml(industry), body);
   }} else {{
-    openInfoModal(ticker, 'no detail data',
+    openInfoModal(escapeNewsHtml(ticker), 'no detail data',
       `<p class="muted">No detail data is loaded for this ticker.</p>`);
   }}
 }}
@@ -10182,7 +10212,7 @@ document.querySelectorAll('.industry-clickable[data-industry]').forEach(card => 
     const rows = entries.map(en => (
       `<tr class="ticker-clickable" data-ticker="${{en.ticker}}">`
       + `<td class="im-tkr">${{en.ticker}}${{_capTierBadge(en.cap_tier)}}</td>`
-      + `<td class="im-name">${{en.name}}</td>`
+      + `<td class="im-name">${{escapeNewsHtml(en.name)}}</td>`
       + `<td class="num im-ret">${{_pctSpan(en.return_12mo)}}</td>`
       + `</tr>`
     )).join('');
@@ -10190,7 +10220,7 @@ document.querySelectorAll('.industry-clickable[data-industry]').forEach(card => 
     const body = entries.length
       ? `<table class="im-table"><thead><tr><th>Ticker</th><th>Name</th><th class="num">12-mo</th></tr></thead><tbody>${{rows}}</tbody></table>`
       : `<p class="muted">No tracked tickers in this industry.</p>`;
-    openInfoModal(`Industry &middot; ${{ind}}`, sub, body);
+    openInfoModal(`Industry &middot; ${{escapeNewsHtml(ind)}}`, sub, body);
   }});
 }});
 
@@ -10203,7 +10233,7 @@ document.querySelectorAll('.attribution-row-clickable[data-industry]').forEach(r
     const rows = positions.map(p => (
       `<tr class="ticker-clickable" data-ticker="${{p.ticker}}">`
       + `<td class="im-tkr">${{p.ticker}}</td>`
-      + `<td class="im-name">${{p.name}}</td>`
+      + `<td class="im-name">${{escapeNewsHtml(p.name)}}</td>`
       + `<td class="num">${{p.weight_pct.toFixed(1)}}%</td>`
       + `<td class="num">${{_pctSpan(p.total_pct)}}</td>`
       + `<td class="num">${{_pctSpan(p.contribution_pp)}}</td>`
@@ -11083,7 +11113,7 @@ function renderLiveNews(items, fetchedAt) {{
   if (!list) return;
   list.innerHTML = items.map(it => {{
     const when = relativeNewsTime(new Date(it.published));
-    return `<a class="news-row" data-source="${{escapeNewsHtml(it.source)}}" href="${{escapeNewsHtml(it.link)}}" target="_blank" rel="noopener noreferrer">`
+    return `<a class="news-row" data-source="${{escapeNewsHtml(it.source)}}" href="${{safeUrl(it.link)}}" target="_blank" rel="noopener noreferrer">`
       + `<div class="news-title">${{escapeNewsHtml(it.title)}}</div>`
       + `<div class="news-meta"><span class="news-src">${{escapeNewsHtml(it.source)}}</span>`
       + `<span class="news-dot">·</span><span class="news-when">${{escapeNewsHtml(when)}}</span></div>`
@@ -11162,6 +11192,13 @@ function escapeNewsHtml(s) {{
   const d = document.createElement('div');
   d.textContent = String(s == null ? '' : s);
   return d.innerHTML;
+}}
+
+// Only allow http(s) hrefs from untrusted feed/worker links — a javascript:/data:
+// URL has no <>&" to entity-escape, so escaping alone leaves it clickable.
+function safeUrl(u) {{
+  const s = String(u == null ? '' : u).trim();
+  return /^https?:\\/\\//i.test(s) ? escapeNewsHtml(s) : '#';
 }}
 
 refreshNewsFromWorker();
