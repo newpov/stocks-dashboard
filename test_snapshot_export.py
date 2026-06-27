@@ -44,16 +44,34 @@ def test_full_exit_after_two_buys_sell_unit_count_is_two():
     assert snap["shares"].tolist() == [1, 1, 2]
 
 
-def test_midsequence_partial_trim_is_omitted():
-    """A partial sell that is NOT the ticker's last action is still dropped (the
-    position is added to afterwards, so it stays open)."""
+def test_midsequence_sell_resets_cycle():
+    """Option B: EVERY sell closes the cycle, even a mid-sequence trim followed by
+    an add. The snapshot records the sell and the re-buy re-anchors the baseline to
+    the add (the equal-weight snapshot has no quantities to tell a trim from an exit)."""
     df = _txns([
         ("NVDA", "2025-01-02", "BUY", 30.0),
-        ("NVDA", "2025-04-22", "SELL", 10.0),   # mid trim -> omitted
-        ("NVDA", "2025-06-01", "BUY", 5.0),     # added to -> last action is BUY
+        ("NVDA", "2025-04-22", "SELL", 10.0),   # B: closes the cycle
+        ("NVDA", "2025-06-01", "BUY", 5.0),     # re-anchors to this add
     ])
     snap = build.export_basket_snapshot(df)
-    assert snap["action"].tolist() == ["BUY", "BUY"]   # still open
+    assert snap["action"].tolist() == ["BUY", "SELL", "BUY"]
+    assert snap["shares"].tolist() == [1, 1, 1]   # cycle-1 close = 1 unit
+
+
+def test_mstr_buy_trim_add_reanchors():
+    """The MSTR case: buy, trim, add, add — without ever fully exiting. Under B the
+    trim resets the cycle, so the open position re-anchors to the buys SINCE the sell
+    (4 Apr trim -> baseline = the 10/14 Apr adds), not the 2 Apr first buy."""
+    df = _txns([
+        ("MSTR", "2025-04-02", "BUY", 10.0),
+        ("MSTR", "2025-04-07", "SELL", 3.0),    # trim -> B closes cycle 1
+        ("MSTR", "2025-04-10", "BUY", 5.0),     # cycle 2
+        ("MSTR", "2025-04-14", "BUY", 5.0),     # cycle 2 (still open)
+    ])
+    snap = build.export_basket_snapshot(df)
+    assert snap["action"].tolist() == ["BUY", "SELL", "BUY", "BUY"]
+    assert snap["shares"].tolist() == [1, 1, 1, 1]
+    assert snap.iloc[-1]["action"] == "BUY"   # last action BUY -> open, re-anchored
 
 
 def test_last_sell_closes_even_without_clean_zero():

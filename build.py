@@ -1035,12 +1035,20 @@ def load_transactions_from_snapshot() -> pd.DataFrame:
 def export_basket_snapshot(transactions: pd.DataFrame) -> pd.DataFrame:
     """Normalize the real ticker'd transactions into a privacy-safe snapshot.
 
-    Strict-privacy equal-weight rules:
+    Strict-privacy equal-weight rules (Option B — reset on every sell):
       - every BUY  -> 1 unit
-      - full-exit SELL (real net -> 0) -> K units, K = normalized open units in
-        the cycle, forcing normalized net -> 0 (keeps the cost-basis cycle reset)
-      - partial trim (real net stays > 0) -> omitted (accounting-neutral in
-        equal-weight; avoids 0-share rows the loader would drop)
+      - EVERY SELL closes the current cycle: emit K units (K = normalized open units
+        in the cycle), forcing normalized net -> 0 so the cost-basis cycle resets.
+        The equal-weight snapshot carries no share sizes, so it cannot tell a trim
+        from a full exit; by author decision a sell always re-anchors the baseline to
+        the buys SINCE that sell (matches the "last entry = current position" mental
+        model). A buy-trim-add therefore re-anchors to the add (discarding the cost
+        of shares carried through the trim — unavoidable without real quantities).
+      - an orphan SELL with no open units -> emitted as nothing (no bogus SELL 0 row).
+
+    NOTE: this differs from the average-cost basis the shared `_active_cycle_basis`
+    helper applies to value mode / forkers (where real quantities keep a genuine trim
+    open). The two weight modes intentionally diverge for trimmed-then-added names.
 
     Manual-fund/untracked rows are not present (caller passes only ticker'd
     transactions), so they are excluded by construction. Output schema matches
@@ -1048,31 +1056,16 @@ def export_basket_snapshot(transactions: pd.DataFrame) -> pd.DataFrame:
     """
     out_rows = []
     for ticker, grp in transactions.sort_values("date").groupby("ticker", sort=True):
-        net = 0.0          # real units — drives full-exit detection
         open_units = 0     # normalized units open in the current cycle
-        rows_t = list(grp.itertuples(index=False))
-        last_i = len(rows_t) - 1
-        for i, r in enumerate(rows_t):
+        for r in grp.itertuples(index=False):
             action = str(r.action).upper()
-            sh = float(r.shares)
             if action == "BUY":
                 out_rows.append((ticker, r.date, "BUY", 1))
-                net += sh
                 open_units += 1
-            elif action == "SELL":
-                net -= sh
-                # Close the cycle on a clean full exit (real net -> 0) OR when this
-                # SELL is the ticker's LAST transaction. The equal-weight snapshot
-                # carries no share sizes, so a position whose final trade is a sell
-                # is treated as fully closed regardless of any fractional/untracked
-                # residual (the author's "last-sell = closed" rule — fixes names
-                # sold down to a residual that wrongly showed as open). A partial
-                # trim that is NOT the last action still emits nothing.
-                if open_units > 0 and (net <= 1e-6 or i == last_i):
-                    out_rows.append((ticker, r.date, "SELL", open_units))
-                    net = 0.0
-                    open_units = 0
-                # else: mid-sequence partial trim / orphan sell -> emit nothing
+            elif action == "SELL" and open_units > 0:
+                out_rows.append((ticker, r.date, "SELL", open_units))
+                open_units = 0
+            # else: orphan sell (no open units) -> emit nothing
     out = pd.DataFrame(out_rows, columns=["ticker", "date", "action", "shares"])
     out["date"] = pd.to_datetime(out["date"]).dt.strftime("%Y-%m-%d")
     out["shares"] = out["shares"].astype(int)
