@@ -5253,17 +5253,17 @@ def build_signal_strip_data(returns, quant_metrics, signals) -> list[dict]:
 def _bb_deepen_universe(shortlist: list[str], meta: pd.DataFrame,
                         fx: pd.DataFrame):
     """Fetch OHLCV + news and compute quant/signals for the universe shortlist.
-    Returns (quant_metrics, signals, ticker_news_cache). Best-effort: failures
+    Returns (quant_metrics, signals, ticker_news, ohlcv). Best-effort: failures
     just shrink the idea pool, never break the build."""
     if not shortlist:
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
     try:
         ohlcv, _failed, _r = download_ohlcv(shortlist)
     except Exception as e:
         print(f"WARN bb universe OHLCV failed: {e}", file=sys.stderr)
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
     if ohlcv.empty:
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
     try:
         ohlcv.to_parquet(BB_UNIVERSE_OHLCV_CACHE)
     except Exception:
@@ -5273,7 +5273,7 @@ def _bb_deepen_universe(shortlist: list[str], meta: pd.DataFrame,
     quant = compute_quant_metrics(ohlcv, fx, meta2)
     signals = compute_signals(prices_close)
     news, _ = fetch_ticker_news(list(prices_close.columns), load_ticker_news_cache())
-    return quant, signals, news
+    return quant, signals, news, ohlcv
 
 
 _BB_NONEQUITY_HINTS = ("bond", "treasury", "gilt", "gold", "silver", "commodity",
@@ -6695,7 +6695,9 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
                 unusual_vol: list[dict] | None = None,
                 bb_universe_obs: list[dict] | None = None,
                 prediction_rows: list[dict] | None = None,
-                nasdaq_series: pd.Series | None = None) -> str:
+                nasdaq_series: pd.Series | None = None,
+                value_rows: "list[dict] | None" = None,
+                auto_tickers: "list[str] | None" = None) -> str:
     weekly = prices.resample("W-FRI").last().ffill()
     defs_html = render_svg_defs()
     table_html = render_table(returns, weekly, meta, signals,
@@ -6715,8 +6717,10 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     # v2.7: revived + enriched watchlist. Base card data, then an entry-signal
     # layer (verdict + trigger chips + news cite) reusing already-computed
     # quant/analyst/news. The module is reinstated next to "Re-entry ideas".
-    watchlist_payload = (build_watchlist_payload(watchlist, prices, prices_native, meta)
-                         if watchlist is not None and not watchlist.empty else {})
+    _two_signal_set = {r["ticker"] for r in (value_rows or []) if r.get("is_bb_idea")}
+    _combined_watchlist = build_combined_watchlist(watchlist, auto_tickers or [], _two_signal_set)
+    watchlist_payload = (build_watchlist_payload(_combined_watchlist, prices, prices_native, meta)
+                         if not _combined_watchlist.empty else {})
     if watchlist_payload:
         watchlist_payload = build_watchlist_signals(
             watchlist_payload, quant_metrics, analyst, ticker_news, meta)
@@ -6793,10 +6797,11 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
 
     # v2.6 Value screen — fundamental quality+value names near a 52-week low.
     # New ideas only (excludes held); cross-tags names Big Brain also flagged.
-    _bb_idea_tkrs = {o["ticker"] for o in bigbrain_observations
-                     if o.get("ownership") == "idea"}
-    value_rows = build_value_screen(universe_outlook, log_tickers=log_tickers_set,
-                                    bb_idea_tickers=_bb_idea_tkrs)
+    if value_rows is None:
+        _bb_idea_tkrs = {o["ticker"] for o in bigbrain_observations
+                         if o.get("ownership") == "idea"}
+        value_rows = build_value_screen(universe_outlook, log_tickers=log_tickers_set,
+                                        bb_idea_tickers=_bb_idea_tkrs)
     # "as of" = the universe cache's last refresh (the monthly fetch), not today,
     # since the screen's data is only as fresh as that fetch. Use the embedded
     # cache_date (NOT mtime, which CI resets every run → would always read "today"
@@ -12042,17 +12047,59 @@ def main(demo: bool = False, watchlist_only: bool = False,
 
     # v2.2 Big Brain: universe discovery lane (shortlist + deepen)
     bb_universe_obs = []
+    auto_value_rows = None          # v3.0 #5: value_rows shared with render_html
+    auto_tickers: list[str] = []
     try:
         held_sold = set(returns.index.tolist()) if not returns.empty else set()
         bb_shortlist = _bb_universe_shortlist(universe_outlook, exclude=held_sold, n=40)
         if bb_shortlist:
-            bb_q, bb_sig, bb_news = _bb_deepen_universe(bb_shortlist, meta, fx)
+            bb_q, bb_sig, bb_news, bb_ohlcv = _bb_deepen_universe(bb_shortlist, meta, fx)
             bb_sector_avg = _bb_sector_avg_returns(returns, meta)
             bb_universe_obs = _bb_build_universe_observations(
                 bb_shortlist, bb_q, bb_sig, None, bb_news,
                 sector_avg=bb_sector_avg, outlook=universe_outlook)
             print(f"Big Brain: {len(bb_shortlist)} universe shortlisted, "
                   f"{len(bb_universe_obs)} idea candidates")
+            # v3.0 #5: auto-watchlist — names flagged by BOTH the value screen and
+            # Big Brain. Reuse the BB-deepen OHLCV/quant/news + universe analyst
+            # (already in memory) so these get full-parity cards with no extra fetch.
+            bb_idea_set = {o.get("ticker") for o in bb_universe_obs}
+            auto_value_rows = build_value_screen(universe_outlook, log_tickers=txn_tickers,
+                                                 bb_idea_tickers=bb_idea_set)
+            auto_tickers = select_auto_watchlist(auto_value_rows, watch_tickers)
+            if auto_tickers and not bb_ohlcv.empty:
+                bb_close = bb_ohlcv.xs("Close", axis=1, level=1)
+                keep = [t for t in auto_tickers if t in bb_close.columns]
+                if keep:
+                    meta, _ = fetch_meta(keep, meta)          # industry label + currency
+                    add_native = bb_close[keep].dropna(how="all")
+                    add_base = convert_to_base(add_native, meta, fx, base=BASE_CCY)
+                    new_n = [c for c in keep if c not in prices_native.columns]
+                    new_b = [c for c in keep if c not in prices.columns]
+                    if new_n:
+                        prices_native = pd.concat([prices_native, add_native[new_n]], axis=1)
+                    if new_b:
+                        prices = pd.concat([prices, add_base[new_b]], axis=1)
+                    if bb_q is not None and not bb_q.empty:
+                        q_add = bb_q.loc[bb_q.index.intersection(keep)]
+                        q_add = q_add[~q_add.index.isin(quant_metrics.index)]
+                        if not q_add.empty:
+                            quant_metrics = pd.concat([quant_metrics, q_add])
+                    if bb_news is not None and not bb_news.empty and ticker_news is not None:
+                        n_add = bb_news.loc[bb_news.index.intersection(keep)]
+                        n_add = n_add[~n_add.index.isin(ticker_news.index)]
+                        if not n_add.empty:
+                            ticker_news = pd.concat([ticker_news, n_add])
+                    acols = [c for c in ("target_mean", "current_price",
+                                         "recommendation", "num_analysts")
+                             if c in universe_outlook.columns]
+                    if acols and analyst is not None:
+                        a_add = universe_outlook.loc[
+                            universe_outlook.index.intersection(keep), acols]
+                        a_add = a_add[~a_add.index.isin(analyst.index)]
+                        if not a_add.empty:
+                            analyst = pd.concat([analyst, a_add])
+                    print(f"Auto-watchlist: {len(keep)} Value∩BB name(s): {', '.join(keep)}")
     except Exception as e:
         print(f"WARN Big Brain universe lane skipped: {e}", file=sys.stderr)
 
@@ -12074,7 +12121,9 @@ def main(demo: bool = False, watchlist_only: bool = False,
                        unusual_vol=unusual_vol,
                        bb_universe_obs=bb_universe_obs,
                        prediction_rows=prediction_rows,
-                       nasdaq_series=nasdaq_series)
+                       nasdaq_series=nasdaq_series,
+                       value_rows=auto_value_rows,
+                       auto_tickers=auto_tickers)
 
     out_path = DEMO_OUT_HTML if demo else OUT_HTML
     out_path.parent.mkdir(parents=True, exist_ok=True)
