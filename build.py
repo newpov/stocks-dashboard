@@ -6437,7 +6437,8 @@ def build_data_payload(returns: pd.DataFrame, prices: pd.DataFrame,
 
 def build_portfolio_payload(basket: pd.Series, bench: pd.Series,
                             first_purchase: pd.Timestamp,
-                            fx: pd.DataFrame | None = None) -> dict:
+                            fx: pd.DataFrame | None = None,
+                            nasdaq: pd.Series | None = None) -> dict:
     # Resample to weekly to keep JSON small (~3KB vs ~25KB daily)
     def _weekly(s):
         if s.empty:
@@ -6447,6 +6448,8 @@ def build_portfolio_payload(basket: pd.Series, bench: pd.Series,
 
     b_dates, b_values = _weekly(basket)
     s_dates, s_values = _weekly(bench)
+    n_dates, n_values = (_weekly(nasdaq)
+                         if nasdaq is not None and not nasdaq.empty else ([], []))
     # FX overlay: yfinance gives USDGBP=X (pounds per dollar, typical ~0.78).
     # Invert to GBP/USD (dollars per pound, typical ~1.28) so the bar chart
     # reads naturally: up bar = stronger GBP, down bar = weaker GBP.
@@ -6461,6 +6464,7 @@ def build_portfolio_payload(basket: pd.Series, bench: pd.Series,
         "first_purchase": first_purchase.strftime("%Y-%m-%d"),
         "basket": {"dates": b_dates, "values": b_values},
         "spy":    {"dates": s_dates, "values": s_values},
+        "nasdaq": {"dates": n_dates, "values": n_values},
         "fx":     {"dates": fx_dates, "values": fx_values, "pair": "GBP/USD"},
     }
 

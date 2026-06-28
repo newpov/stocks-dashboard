@@ -34,3 +34,24 @@ def test_download_benchmark_empty_on_failure(monkeypatch):
 def test_benchmark2_constants_present():
     assert build.BENCHMARK2 == "QQQ"
     assert build.BENCHMARK2_CCY == "USD"
+
+
+# --- Task 2: payload carries an (optional) nasdaq series ---
+
+def _wk(step):
+    idx = pd.date_range("2024-01-05", periods=6, freq="W-FRI")
+    return pd.Series([i * step for i in range(6)], index=idx)
+
+
+def test_payload_includes_nasdaq_when_passed():
+    basket, bench, nq = _wk(2.0), _wk(1.0), _wk(1.5)
+    out = build.build_portfolio_payload(basket, bench, basket.index[0], nasdaq=nq)
+    assert "nasdaq" in out
+    assert out["nasdaq"]["values"]
+    assert len(out["nasdaq"]["values"]) == len(out["nasdaq"]["dates"])
+
+
+def test_payload_nasdaq_empty_when_omitted():
+    basket, bench = _wk(2.0), _wk(1.0)
+    out = build.build_portfolio_payload(basket, bench, basket.index[0])
+    assert out["nasdaq"] == {"dates": [], "values": []}
