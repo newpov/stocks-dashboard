@@ -6648,7 +6648,8 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
                 rating_baseline_seeded: bool = False,
                 unusual_vol: list[dict] | None = None,
                 bb_universe_obs: list[dict] | None = None,
-                prediction_rows: list[dict] | None = None) -> str:
+                prediction_rows: list[dict] | None = None,
+                nasdaq_series: pd.Series | None = None) -> str:
     weekly = prices.resample("W-FRI").last().ffill()
     defs_html = render_svg_defs()
     table_html = render_table(returns, weekly, meta, signals,
@@ -7249,9 +7250,11 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     # JSON-encode the Worker URL so quoting is always correct in the embedded JS,
     # and an unset URL becomes the literal `""` (falsy in the JS branch).
     news_worker_url_js = _json_for_script(NEWS_WORKER_URL or "")
-    portfolio_json = _json_for_script(
-        build_portfolio_payload(basket, bench, first_purchase, fx=fx), separators=(",", ":")
-    )
+    _portfolio_payload = build_portfolio_payload(basket, bench, first_purchase,
+                                                 fx=fx, nasdaq=nasdaq_series)
+    has_nasdaq = bool(_portfolio_payload.get("nasdaq", {}).get("values"))
+    hero_legend_html = _hero_legend_html(has_nasdaq)
+    portfolio_json = _json_for_script(_portfolio_payload, separators=(",", ":"))
     # T11/T12/T14/T15: aux payload for click-to-expand drill-down modals.
     # Reuses diversification_data (computed below) for the pair list -- this
     # block depends on it so we compute it inline first, then pass it.
@@ -9144,9 +9147,7 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
         {unusual_vol_html}
       </div>
       <div class="hero-legend">
-        <div class="leg"><span class="leg-swatch basket"></span>Basket</div>
-        <div class="leg"><span class="leg-swatch spy"></span>SPY</div>
-        <div class="leg"><span class="leg-swatch fx"></span>GBP/USD</div>
+        {hero_legend_html}
       </div>
     </div>
     <div class="hero-chart-svg-wrap">
@@ -9372,6 +9373,7 @@ function fmtDate(iso) {{
 }}
 
 // ---- Hero chart (basket + SPY)
+let showNasdaq = (function() {{ try {{ return localStorage.getItem('heroNasdaq') === '1'; }} catch (e) {{ return false; }} }})();
 function renderHeroChart() {{
   const svg = document.getElementById('hero-chart');
   const wrap = svg.parentElement;
@@ -9385,10 +9387,12 @@ function renderHeroChart() {{
   const b = PORTFOLIO.basket;
   const s = PORTFOLIO.spy;
   const fx = PORTFOLIO.fx || {{dates:[], values:[]}};
+  const nzRaw = PORTFOLIO.nasdaq || {{dates:[], values:[]}};
+  const nz = showNasdaq ? nzRaw : {{dates:[], values:[]}};
   if (!b.values.length) {{ svg.innerHTML = '<text x="50%" y="50%" fill="#6b7185" font-family="Geist Mono" font-size="12" text-anchor="middle">No basket data</text>'; return; }}
 
   // Combined min/max across both series
-  const allVals = [...b.values, ...s.values, 0];
+  const allVals = [...b.values, ...s.values, ...nz.values, 0];
   const vmin = Math.min(...allVals);
   const vmax = Math.max(...allVals);
   const span = (vmax - vmin) || 1;
@@ -9411,6 +9415,7 @@ function renderHeroChart() {{
   }}
   const basket = buildPoints(b);
   const spy = buildPoints(s);
+  const nasdaq = buildPoints(nz);
 
   // Y ticks (5 levels)
   const yTicks = [];
@@ -9444,9 +9449,19 @@ function renderHeroChart() {{
     }});
     if (remapped.every(v => !Number.isNaN(v))) spy.xs = remapped;
   }}
+  if (nasdaq.dates && nasdaq.dates.length && nasdaq.dates.length <= basket.dates.length) {{
+    const remappedN = nasdaq.dates.map(d => {{
+      const idx = basket.dates.indexOf(d);
+      return idx >= 0 ? basket.xs[idx] : NaN;
+    }});
+    if (remappedN.every(v => !Number.isNaN(v))) nasdaq.xs = remappedN;
+  }}
 
   const basketPL = basket.xs.map((x, i) => `${{x.toFixed(1)}},${{basket.ys[i].toFixed(1)}}`).join(' ');
   const spyPL = spy.xs.map((x, i) => `${{x.toFixed(1)}},${{spy.ys[i].toFixed(1)}}`).join(' ');
+  const nasdaqPL = nasdaq.xs.map((x, i) => `${{x.toFixed(1)}},${{nasdaq.ys[i].toFixed(1)}}`).join(' ');
+  const nasdaqColor = '#a78bfa';
+  const nasdaqEnd = nasdaq.vals.length ? nasdaq.vals[nasdaq.vals.length - 1] : 0;
   const zeroY = padT + (1 - (0 - vmin)/span) * innerH;
 
   const basketEnd = basket.vals[basket.vals.length - 1];
@@ -9638,6 +9653,11 @@ function renderHeroChart() {{
   if (spy.xs.length) {{
     html += `<polyline points="${{spyPL}}" fill="none" stroke="${{spyColor}}" stroke-width="1.4" stroke-dasharray="4 3" stroke-linejoin="round"/>`;
   }}
+  // v3.0 #3: Nasdaq (QQQ) overlay — dotted, drawn under the basket line so the
+  // basket stays visually dominant. Only present when the legend toggle is on.
+  if (nasdaq.xs.length) {{
+    html += `<polyline points="${{nasdaqPL}}" fill="none" stroke="${{nasdaqColor}}" stroke-width="1.4" stroke-dasharray="1 3" stroke-linejoin="round"/>`;
+  }}
   // Basket line
   html += `<polyline points="${{basketPL}}" fill="none" stroke="${{basketColor}}" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"/>`;
   // v2.7: last-completed fiscal-year return (top-left, on top of the line).
@@ -9655,6 +9675,9 @@ function renderHeroChart() {{
     // Δ is the "delta" — implies "basket minus SPY" without spelling it out.
     // Keeps the badge within the chart's right padding (~50px).
     html += `<text x="${{(padL + innerW + 6).toFixed(1)}}" y="${{vsY.toFixed(1)}}" fill="${{vsColor}}" font-size="10.5" font-family="Geist Mono, monospace" font-weight="600">&#916; ${{vsDelta >= 0 ? '+' : ''}}${{vsDelta.toFixed(1)}}pp</text>`;
+  }}
+  if (nasdaq.ys.length) {{
+    html += `<text x="${{(padL + innerW + 6).toFixed(1)}}" y="${{(nasdaq.ys[nasdaq.ys.length-1] + 4).toFixed(1)}}" fill="${{nasdaqColor}}" font-size="11" font-family="Geist Mono, monospace">${{nasdaqEnd >= 0 ? '+' : ''}}${{nasdaqEnd.toFixed(1)}}%</text>`;
   }}
 
   // FX bar band — weekly GBP/USD rate, centered on the baseline (first value).
@@ -9785,6 +9808,18 @@ function renderHeroChart() {{
 
 renderHeroChart();
 window.addEventListener('resize', renderHeroChart);
+// v3.0 #3: Nasdaq overlay legend toggle (default off, persisted in localStorage).
+(function() {{
+  const btn = document.querySelector('.hero-legend .leg-toggle[data-series="nasdaq"]');
+  if (!btn) return;
+  btn.setAttribute('aria-pressed', showNasdaq ? 'true' : 'false');
+  btn.addEventListener('click', () => {{
+    showNasdaq = !showNasdaq;
+    try {{ localStorage.setItem('heroNasdaq', showNasdaq ? '1' : '0'); }} catch (e) {{}}
+    btn.setAttribute('aria-pressed', showNasdaq ? 'true' : 'false');
+    renderHeroChart();
+  }});
+}})();
 
 // ---- Stagger animations
 document.querySelectorAll('#ret-table tbody tr').forEach((row, i) => {{
@@ -11701,6 +11736,8 @@ def main(demo: bool = False, watchlist_only: bool = False,
 
     print(f"Pulling benchmark {BENCHMARK}...")
     bench_native = download_benchmark()
+    print(f"Pulling Nasdaq overlay {BENCHMARK2}...")
+    nasdaq_native = download_benchmark(BENCHMARK2)
 
     CACHE_PARQUET.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -11713,6 +11750,8 @@ def main(demo: bool = False, watchlist_only: bool = False,
                 print(f"WARN couldn't cache OHLCV: {e}", file=sys.stderr)
         if not bench_native.empty:
             bench_native.to_frame().to_parquet(BENCHMARK_CACHE)
+        if not nasdaq_native.empty:
+            nasdaq_native.to_frame().to_parquet(BENCHMARK2_CACHE)
         print(f"Cached native prices to {CACHE_PARQUET}")
     except ImportError:
         prices_native.to_csv(CACHE_PARQUET.with_suffix(".csv"))
@@ -11745,6 +11784,10 @@ def main(demo: bool = False, watchlist_only: bool = False,
     bench_df = convert_to_base(bench_native.to_frame(name=BENCHMARK), bench_meta, fx, base=BASE_CCY) \
                if not bench_native.empty else pd.DataFrame()
     bench = bench_df[BENCHMARK] if not bench_df.empty else pd.Series(dtype=float)
+    nasdaq_meta = pd.DataFrame({"currency": [BENCHMARK2_CCY]}, index=[BENCHMARK2])
+    nasdaq_df = convert_to_base(nasdaq_native.to_frame(name=BENCHMARK2), nasdaq_meta, fx, base=BASE_CCY) \
+                if not nasdaq_native.empty else pd.DataFrame()
+    nasdaq_b = nasdaq_df[BENCHMARK2] if not nasdaq_df.empty else pd.Series(dtype=float)
 
     if watchlist_only:
         transactions = _synthesize_watchlist_transactions(watchlist, prices)
@@ -11767,6 +11810,8 @@ def main(demo: bool = False, watchlist_only: bool = False,
     first_purchase = pd.Timestamp(transactions[transactions.action == "BUY"].date.min())
     bench_series = compute_benchmark_series(bench, first_purchase)
     print(f"Benchmark {BENCHMARK} series ({BASE_CCY}): {len(bench_series)} points")
+    nasdaq_series = compute_benchmark_series(nasdaq_b, first_purchase)
+    print(f"Nasdaq {BENCHMARK2} series ({BASE_CCY}): {len(nasdaq_series)} points")
 
     contrib = compute_contributors(returns)
     if not contrib.empty:
@@ -11973,7 +12018,8 @@ def main(demo: bool = False, watchlist_only: bool = False,
                        rating_baseline_seeded=rating_baseline_seeded,
                        unusual_vol=unusual_vol,
                        bb_universe_obs=bb_universe_obs,
-                       prediction_rows=prediction_rows)
+                       prediction_rows=prediction_rows,
+                       nasdaq_series=nasdaq_series)
 
     out_path = DEMO_OUT_HTML if demo else OUT_HTML
     out_path.parent.mkdir(parents=True, exist_ok=True)
