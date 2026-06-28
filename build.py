@@ -932,6 +932,7 @@ VALUE_MIN_PASS     = 6       # need >= this many of the 6 filters (strict all-6)
 VALUE_MAX_ROWS     = 20      # cap; rendered in pages of VALUE_PAGE
 VALUE_PAGE         = 10      # rows shown per page (arrows flip to the next set)
 VALUE_MIN_SECTOR_N = 3       # #2 sector-median P/E needs >= this many priced peers
+WATCH_PAGE         = 4       # v3.0 #4: watchlist cards per page (arrows flip sets)
 
 # How many candidates the analyst panel shows in total (the grid scrolls
 # internally past ~6 visible). Safety cap for very large closed-position lists.
@@ -4012,14 +4013,30 @@ def render_watchlist(watchlist_payload: dict, meta: pd.DataFrame) -> str:
             f'  <div class="wl-foot"><span class="wl-period">12-month</span>{note_html}</div>'
             f'</div>'
         )
-    return f"""<section class="watchlist-section">
+    # v3.0 #4: page the cards in fixed windows of WATCH_PAGE with flip arrows
+    # (mirrors the value-screen pager) so 6+ names don't spill into a 2nd row.
+    n = len(watchlist_payload)
+    nav, section_attr, grid_attr = "", "", ""
+    if n > WATCH_PAGE:
+        npages = (n + WATCH_PAGE - 1) // WATCH_PAGE
+        section_attr = f' data-wl-pages="{npages}"'
+        grid_attr = f' data-wl-page="{WATCH_PAGE}"'
+        nav = ('<div class="wl-nav">'
+               '<button type="button" class="wl-arrow wl-prev" aria-label="Previous set">&#8249;</button>'
+               f'<span class="wl-page-ind"><span class="wl-page-cur">1</span>&#8202;/&#8202;{npages}</span>'
+               '<button type="button" class="wl-arrow wl-next" aria-label="Next set">&#8250;</button>'
+               '</div>')
+    return f"""<section class="watchlist-section"{section_attr}>
   <div class="wl-head-row">
-    <h3>Watchlist <span class="muted">({len(watchlist_payload)})</span></h3>
+    <div class="wl-head-top">
+      <h3>Watchlist <span class="muted">({n})</span></h3>
+      {nav}
+    </div>
     <p class="muted">Names you're tracking but don't (yet) hold &mdash; each with an
     entry read (near-low / oversold / unusual volume / Street upside). Add or
     remove via <code>watchlist.csv</code>. Click a card for the full chart.</p>
   </div>
-  <div class="wl-grid">{''.join(cards)}</div>
+  <div class="wl-grid"{grid_attr}>{''.join(cards)}</div>
 </section>"""
 
 
@@ -8277,6 +8294,15 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     color:var(--text-dim);line-height:1.5}}
   .wl-head-row code{{font-family:var(--font-mono);font-size:11px;color:var(--text-2);
     background:var(--surface-2);padding:1px 5px;border-radius:3px}}
+  /* v3.0 #4: head row lays out title + pager arrows on one line */
+  .wl-head-top{{display:flex;align-items:center;justify-content:space-between;gap:10px}}
+  .wl-nav{{display:flex;align-items:center;gap:8px;flex:0 0 auto}}
+  .wl-arrow{{cursor:pointer;background:var(--surface-2);border:1px solid var(--border);
+    color:var(--text);border-radius:7px;width:28px;height:26px;font-size:16px;line-height:1;
+    display:flex;align-items:center;justify-content:center;font-family:var(--font-mono);
+    transition:border-color .12s,color .12s}}
+  .wl-arrow:hover{{border-color:var(--accent);color:var(--accent)}}
+  .wl-page-ind{{font-family:var(--font-mono);font-size:11px;color:var(--text-dim);min-width:34px;text-align:center}}
   .wl-grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:10px}}
   .wl-card{{
     background:var(--ink-soft);border:1px solid var(--border);border-radius:10px;
@@ -10300,6 +10326,27 @@ document.querySelectorAll('.value-screen-section[data-vs-pages]').forEach(sec =>
   paint();
   const prev = sec.querySelector('.vs-prev');
   const next = sec.querySelector('.vs-next');
+  if (prev) prev.addEventListener('click', () => {{ cur = (cur - 1 + npages) % npages; paint(); }});
+  if (next) next.addEventListener('click', () => {{ cur = (cur + 1) % npages; paint(); }});
+}});
+// v3.0 #4: watchlist cards paged in fixed windows with flip arrows (same as above).
+document.querySelectorAll('.watchlist-section[data-wl-pages]').forEach(sec => {{
+  const grid = sec.querySelector('.wl-grid');
+  const size = parseInt((grid && grid.dataset.wlPage) || '0', 10);
+  const cards = Array.from(sec.querySelectorAll('.wl-card'));
+  if (!size || cards.length <= size) return;
+  const npages = Math.ceil(cards.length / size);
+  const ind = sec.querySelector('.wl-page-cur');
+  let cur = 0;
+  const paint = () => {{
+    cards.forEach((c, i) => {{
+      c.style.display = (i >= cur * size && i < (cur + 1) * size) ? '' : 'none';
+    }});
+    if (ind) ind.textContent = (cur + 1);
+  }};
+  paint();
+  const prev = sec.querySelector('.wl-prev');
+  const next = sec.querySelector('.wl-next');
   if (prev) prev.addEventListener('click', () => {{ cur = (cur - 1 + npages) % npages; paint(); }});
   if (next) next.addEventListener('click', () => {{ cur = (cur + 1) % npages; paint(); }});
 }});

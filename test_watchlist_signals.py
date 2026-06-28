@@ -179,3 +179,31 @@ def test_render_news_cite_present_and_optional():
 
 def test_render_empty_payload_returns_blank():
     assert build.render_watchlist({}, pd.DataFrame()) == ""
+
+
+# --- v3.0 #4: arrow pager (value-screen style) ------------------------------
+
+def _many(n):
+    """n minimally-valid watchlist cards, tickers T0..T{n-1}."""
+    return {f"T{i}": {"name": f"Co{i}", "currency": "USD", "ccy_symbol": "$",
+                      "latest": 100.0, "native_latest": 100.0, "total": 1.0,
+                      "prices": [100, 101, 102], "note": ""} for i in range(n)}
+
+
+def test_render_pager_appears_above_page_size():
+    n = build.WATCH_PAGE + 2          # forces a second page
+    html = build.render_watchlist(_many(n), pd.DataFrame())
+    npages = (n + build.WATCH_PAGE - 1) // build.WATCH_PAGE
+    assert f'data-wl-pages="{npages}"' in html
+    assert f'data-wl-page="{build.WATCH_PAGE}"' in html
+    assert "wl-nav" in html and "wl-prev" in html and "wl-next" in html
+    assert "wl-page-cur" in html
+    # all cards still rendered (paging is client-side show/hide)
+    assert html.count('class="wl-card"') == n
+
+
+def test_render_no_pager_at_or_below_page_size():
+    html = build.render_watchlist(_many(build.WATCH_PAGE), pd.DataFrame())
+    assert "data-wl-pages" not in html
+    assert "wl-nav" not in html
+    assert html.count('class="wl-card"') == build.WATCH_PAGE
