@@ -954,6 +954,7 @@ VALUE_MIN_SECTOR_N = 3       # #2 sector-median P/E needs >= this many priced pe
 # JS), so a page is always gap-free. CSS forces these column counts per breakpoint.
 WATCH_COLS_DESKTOP = 6       # cards per row on desktop
 WATCH_COLS_MOBILE  = 3       # cards per row on mobile; also the "needs paging" floor
+AUTO_WATCH_MAX     = 4       # v3.0 #5: max auto (Value ∩ Big Brain) watchlist picks
 
 # How many candidates the analyst panel shows in total (the grid scrolls
 # internally past ~6 visible). Safety cap for very large closed-position lists.
@@ -3931,6 +3932,23 @@ def render_untracked(untracked: pd.DataFrame) -> str:
     </table>
   </div>
 </section>"""
+
+
+def two_signal_tickers(value_rows: "list[dict] | None") -> list[str]:
+    """Tickers flagged by BOTH the value screen and Big Brain (is_bb_idea), in
+    value_rows order (the value screen's strength sort)."""
+    if not value_rows:
+        return []
+    return [r["ticker"] for r in value_rows if r.get("is_bb_idea")]
+
+
+def select_auto_watchlist(value_rows: "list[dict] | None", manual_tickers,
+                          max_n: "int | None" = None) -> list[str]:
+    """Up to max_n 2-signal tickers NOT already in the manual watchlist. Held
+    names are already excluded by build_value_screen (discovery-only)."""
+    cap = AUTO_WATCH_MAX if max_n is None else max_n
+    manual = set(manual_tickers or ())
+    return [t for t in two_signal_tickers(value_rows) if t not in manual][:cap]
 
 
 def build_watchlist_payload(watchlist: pd.DataFrame, prices: pd.DataFrame,
