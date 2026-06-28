@@ -14,6 +14,129 @@ than a barely-working prototype.
 
 ---
 
+## v2.9 — Review hardening pass · 27 June 2026
+
+A correctness, robustness, and label-honesty pass driven by a structured
+methodology + code review of the whole pipeline. There is **no single `v2.9`
+git tag**: the fixes shipped incrementally as a series of commits that the daily
+CI publish rolled out as they landed. This entry consolidates them.
+
+### Fixed — CI / publish robustness
+- **Publish step is now strictly gated on a green build.** The GitHub Actions
+  publish step carries an explicit `if: success()` so a failed test/sanity gate
+  can never push a stale or half-built page (the last-good page stays live).
+- **Snapshot-staleness build guard.** The local build now warns when
+  `basket.snapshot.csv` is behind `log.xlsx` (`snapshot_is_behind_log` /
+  `snapshot_latest_date`), so a forgotten `--export-snapshot` after a trade is
+  caught instead of silently publishing an out-of-date basket.
+- **Universe-cache freshness keys off an embedded date, not file mtime.** A git
+  checkout resets file mtimes every CI run, so the old mtime-based freshness
+  check thought the cache was always brand-new. The cache now carries a
+  `cache_date` column and freshness is computed from that
+  (`_universe_cache_date` / `_universe_cache_is_fresh`).
+- **Sanity gate widened.** `sanity_check.py` also checks `demo.html` output
+  size, tolerates a missing/corrupt publish-meta file with a warning rather than
+  a hard fail, and `assert_snapshot_is_clean` now additionally rejects NaN and
+  non-whole-number share values in the committed snapshot.
+
+### Fixed — data robustness
+- **Fetch failures degrade cleanly.** A failed metadata fetch yields an empty
+  currency (not a crash), and a failed analyst fetch records `NaT` for its
+  fetch time — so downstream "as of" labels and currency conversion handle the
+  gap instead of propagating a bad value.
+- **Benchmark close extraction is layout-robust.** `_benchmark_close_from_df`
+  handles both yfinance MultiIndex column orderings and a single-level frame, so
+  an SPY-shape change can't silently null the benchmark.
+- **FX edge-fill (M4).** `convert_to_base` keeps interior/trailing forward-fill,
+  adds a **bounded** back-fill (≤7 days) for short start-of-series gaps, and for
+  a genuine long leading gap falls back to the earliest available rate **with a
+  warning** rather than dropping an early-bought non-base ticker. A missing pair
+  is still left in native currency (its percentage return stays correct).
+
+### Fixed — output escaping / safety
+- **JSON-in-HTML and URL hardening.** Inline JSON payloads are emitted via
+  `_json_for_script` (escapes `</` so a `</script>` in data can't break out),
+  and news/source hrefs pass through an http(s)-only allowlist
+  (`safe_url` / `safeUrl`) — anything else renders inert. `_esc` now also
+  escapes quotes, and ticker text/`data-ticker` attributes route through it
+  across the render layer (table, cards, exit, re-entry, watchlist,
+  diversification, analyst, unusual-volume).
+
+### Fixed — module correctness
+- **Rating moves sort by real magnitude (H7).** Move size is derived from the
+  recommendation-rank distance (`_rec_move_magnitude`) instead of a hardcoded
+  constant, so the biggest upgrades/downgrades actually lead.
+- **Recommendation parsing tolerates real-world strings (M9).** `_norm_rec`
+  handles spaced/hyphenated/synonym rec labels via an alias map + longest-first
+  fallback, eliminating phantom "to/from none" moves.
+- **Big Brain archetype + tone (H8 / M-BB).** The richer current-tape archetypes
+  are matched before the `post_exit` fallback (so sold names don't all collapse
+  to "Ran without you"); idea severity is computed from its flags, and a
+  thin-signal hedge softens the narrative when conviction is low.
+- **Signal map can't contradict itself (M-SIG).** Strength and direction now come
+  from one signed composite, so a name can't read "bullish" while falling;
+  conflicting drivers cancel toward neutral.
+- **Industry attribution NaN guard (M10).** NaN weights coerce to equal-unit and
+  NaN-return names drop out, removing a holdings-count vs average mismatch and
+  phantom 0.0% industries.
+- **Per-source prediction volume floors (M1).** Kalshi (contracts) and Polymarket
+  (USD) get their own liquidity thresholds instead of one incommensurable number.
+
+### Fixed — hero chart / cost basis
+- **Hero basket line uses the same active-cycle basis as the table (H5).** A
+  sold-then-rebought name now rebases the basket MTM line at the **re-buy** price
+  (active cycle), matching the holdings-table baseline. Previously the chart
+  averaged every historical buy while the table used the active cycle, so the two
+  disagreed (chart ~+33% vs table flat) for the same name. Both now read from a
+  shared `_active_cycle_basis` helper.
+
+### Added — single-stock modal: full holding path
+- **The modal chart now draws the full price journey from the first-ever buy**,
+  not just the active cycle. A name traded in and out (e.g. MSTR under the
+  every-sell-resets snapshot) previously started at its most recent re-buy, hiding
+  the earlier history; it now extends back to the earliest transaction
+  (`build_positions.first_acquired_date`) so the whole arc and every trade marker
+  are visible. The baseline / headline % stay anchored at the active-cycle cost
+  (last buy) — the divisor is unchanged, so **no displayed number moves**; only
+  the chart's left edge does. A faint amber **"cost" tick** marks the baseline
+  date on the longer path, and buy/sell markers that snap to the same week are
+  de-duplicated so rapid in-and-out trades don't stack into one blob. Rendering
+  only — `_active_cycle_basis` and forker baselines are untouched.
+
+### Changed — labels (honesty pass)
+- Hero subtitle clarified to "equal-weight basket · avg per-position TWR";
+  Sharpe label de-scoped (dropped the misleading "(1y)"); alpha relabelled
+  "30-day excess vs SPY"; analyst card shows the target **range**; market
+  expectations and rating-moves panels show their data's **as-of date**
+  (prediction fetch time / seeded-baseline note); currency, diversification, and
+  cost-basis tooltips reworded to avoid implying a monetary scale that the
+  equal-weight basket doesn't carry. The non-default hero contributor/detractor
+  cards no longer print a misleading per-unit "basis" symbol in equal mode (L5).
+
+### Notes
+- **Snapshot cost-basis rule → Option B.** For a name traded in and out without a
+  clean full exit, the snapshot now treats **every SELL as a cost-basis cycle
+  reset** (baseline = buys since the last sell), matching the author's "current
+  position = my most recent entries" intuition. Scoped to the snapshot exporter
+  only — value-mode and forker math (`_active_cycle_basis`) are unchanged. On the
+  current basket only 4 of 185 names move (MSTR, APLD, BBAI, SMCI), open/closed
+  stays 107/78, and the headline shifts ≈-1.3pp. This is a deliberate convention,
+  not an accounting "truth": without share quantities the snapshot genuinely
+  cannot distinguish a partial trim from a full exit.
+- **Performance.** The three per-ticker transaction-price loops are vectorized
+  (`_txn_prices`, one sorted `get_indexer` lookup); the real build's basket series
+  is byte-identical (perf-only).
+- **Tests:** ~224 → ~245, green throughout; demo + real builds render clean.
+- **Deferred to v3.0:** the **v2.9.7 structural refactor** (shared fetch helpers
+  `_ttl_to_fetch` / `_merge_and_persist` + table-driven prediction sources, and
+  splitting the ~11k-line `build.py` into `fetch` / `positions` / `modules` /
+  `render` modules with the embedded HTML/CSS/JS moved to `templates/`). It is a
+  day-plus, zero-functional-change maintainability investment with refactor risk,
+  so it is intentionally held for a deliberate pass behind the test suite rather
+  than rushed in here.
+
+---
+
 ## v2.8 — CI snapshot publish · 25 June 2026
 
 The dashboard now rebuilds and publishes itself daily without the author's

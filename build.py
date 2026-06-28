@@ -2665,6 +2665,10 @@ def build_positions(transactions: pd.DataFrame, prices: pd.DataFrame,
         avg_buy_price = basis["avg_buy"]
         avg_sell_price = basis["avg_sell"]
         first_buy_date = basis["first_buy_date"]
+        # Earliest buy across ALL cycles (independent of the active-cycle
+        # baseline_date). The modal chart slices from here to draw the full
+        # holding journey, while baseline/% stay anchored at the active cycle.
+        first_acquired_date = pd.Timestamp(buys.date.min())
         last_action_date = pd.Timestamp(txns.date.max())
         latest = float(ticker_series.iloc[-1])
 
@@ -2772,6 +2776,7 @@ def build_positions(transactions: pd.DataFrame, prices: pd.DataFrame,
             "post_exit_pct": post_exit_pct,
             "status": status,
             "first_buy_date": first_buy_date,
+            "first_acquired_date": first_acquired_date,
             "last_action_date": last_action_date,
             "n_transactions": len(txns),
             "transactions": txn_list,
@@ -6257,7 +6262,14 @@ def build_data_payload(returns: pd.DataFrame, prices: pd.DataFrame,
         s = daily[tkr].dropna()
         if s.empty:
             continue
-        s_from_base = s.loc[s.index >= r.baseline_date]
+        # Draw the FULL holding path from the earliest buy across all cycles, so a
+        # sold-then-rebought name (e.g. MSTR under the every-sell-resets snapshot)
+        # shows its pre-re-buy history + trade markers. The 0%/baseline divisor
+        # below stays r.baseline (active-cycle cost), so no displayed % moves.
+        _chart_start = (r.first_acquired_date
+                        if "first_acquired_date" in r.index and pd.notna(r.first_acquired_date)
+                        else r.baseline_date)
+        s_from_base = s.loc[s.index >= _chart_start]
         s_weekly = s_from_base.resample("W-FRI").last().ffill().dropna()
         if s_weekly.empty:
             s_weekly = s_from_base.tail(1)
@@ -8857,6 +8869,10 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
   .modal-chart-labels .txn-marker{{position:absolute;transform:translate(-50%,-50%);
     font-family:var(--font-mono);font-size:11px;font-weight:700;color:#0b0e17;
     line-height:1}}
+  /* cost-basis tick: marks the active-cycle baseline date on the full path */
+  .modal-chart-labels .cost-tick{{position:absolute;transform:translate(-50%,0);
+    font-family:var(--font-mono);font-size:9.5px;color:#fbbf24;
+    padding-top:3px;white-space:nowrap;line-height:1;letter-spacing:.04em}}
   /* v2.0 lazy-modal: spinner shown in the chart area while the sidecar
      payload is being fetched on first modal-open. Hidden once HEAVY merges
      into DATA[tkr]. Subsequent opens reuse the cache -- no spinner. */
@@ -10115,6 +10131,9 @@ function renderBigChart(ticker) {{
 
   // Transaction markers (buy/sell dots) — only if the per-stock transactions are available
   if (d.transactions && d.transactions.length > 0) {{
+    // De-dup: many rapid trades on a long axis snap to the same weekly bucket
+    // and would stack into one illegible blob. Keep one marker per (week, side).
+    const seenMarkers = new Set();
     for (const t of d.transactions) {{
       const txnTime = new Date(t.date).getTime();
       let bestIdx = 0, bestDiff = Infinity;
@@ -10122,6 +10141,9 @@ function renderBigChart(ticker) {{
         const diff = Math.abs(new Date(dates[i]).getTime() - txnTime);
         if (diff < bestDiff) {{ bestDiff = diff; bestIdx = i; }}
       }}
+      const seenKey = bestIdx + '|' + t.action;
+      if (seenMarkers.has(seenKey)) continue;
+      seenMarkers.add(seenKey);
       const mx = xs[bestIdx];
       const isBuy = t.action === 'BUY';
       const mColor = isBuy ? '#34d399' : '#f87171';
@@ -10135,6 +10157,25 @@ function renderBigChart(ticker) {{
       const mxPct = (mx / MODAL_VB_W * 100).toFixed(3);
       const lyPct = (ly / MODAL_VB_H * 100).toFixed(3);
       labelsHtml.push(`<span class="txn-marker" style="left:${{mxPct}}%;top:${{lyPct}}%">${{label}}</span>`);
+    }}
+  }}
+
+  // Cost-basis tick: a faint amber vertical at the active-cycle baseline date,
+  // marking where the headline % is anchored on the now-fuller path. Only drawn
+  // when there is pre-baseline history (otherwise it just sits on the left edge).
+  if (d.baseline_date && dates.length > 1) {{
+    const bTime = new Date(d.baseline_date).getTime();
+    let bIdx = 0, bDiff = Infinity;
+    for (let i = 0; i < dates.length; i++) {{
+      const diff = Math.abs(new Date(dates[i]).getTime() - bTime);
+      if (diff < bDiff) {{ bDiff = diff; bIdx = i; }}
+    }}
+    if (bIdx > 0) {{
+      const cx = xs[bIdx];
+      html += `<line x1="${{cx.toFixed(1)}}" y1="${{MODAL_VB_PAD_T}}" x2="${{cx.toFixed(1)}}" y2="${{labelY.toFixed(1)}}" stroke="#fbbf24" stroke-width="0.9" stroke-dasharray="2 3" opacity="0.55"/>`;
+      const cxPct = (cx / MODAL_VB_W * 100).toFixed(3);
+      const cyPct = ((MODAL_VB_PAD_T - 2) / MODAL_VB_H * 100).toFixed(3);
+      labelsHtml.push(`<span class="cost-tick" style="left:${{cxPct}}%;top:${{cyPct}}%">cost</span>`);
     }}
   }}
 

@@ -178,6 +178,62 @@ def test_partial_trim_does_not_reset_basis():
     assert abs(r["baseline"] - (1750.0 / 15.0)) < 1e-6
 
 
+# --- modal full-path: first_acquired_date (earliest buy, all cycles) ----------
+
+def test_first_acquired_date_predates_baseline_for_rebought_name():
+    """A sold-then-rebought name carries first_acquired_date = the EARLIEST buy
+    (first cycle) while baseline_date stays at the active cycle's re-buy. The
+    modal chart uses first_acquired_date to draw the full path; the baseline /
+    % stay anchored at the re-buy (no number moves)."""
+    dates = _bdates(60)
+    px = pd.DataFrame({"CSCO": np.concatenate([
+        np.full(20, 100.0),
+        np.linspace(100.0, 200.0, 20),
+        np.full(20, 200.0),
+    ])}, index=dates)
+    txns = pd.DataFrame({
+        "ticker": ["CSCO"] * 3,
+        "date": [dates[0], dates[2], dates[45]],     # buy, full SELL, rebuy
+        "action": ["BUY", "SELL", "BUY"],
+        "shares": [10.0, 10.0, 10.0],
+    })
+    r = build.build_positions(txns, px).loc["CSCO"]
+    assert pd.Timestamp(r["first_acquired_date"]) == dates[0]    # first-ever buy
+    assert pd.Timestamp(r["baseline_date"]) == dates[45]         # active cycle (unchanged)
+    assert abs(r["baseline"] - 200.0) < 1e-6                     # number unchanged
+    assert abs(r["total_pct"]) < 1e-6                            # number unchanged
+
+
+def test_first_acquired_date_equals_baseline_for_single_buy():
+    """A plain single-buy name: first_acquired_date == baseline_date (chart
+    start is identical, so nothing changes for the common case)."""
+    dates = _bdates(20)
+    px = pd.DataFrame({"AAA": np.full(20, 100.0)}, index=dates)
+    txns = pd.DataFrame({
+        "ticker": ["AAA"], "date": [dates[3]],
+        "action": ["BUY"], "shares": [5.0],
+    })
+    r = build.build_positions(txns, px).loc["AAA"]
+    assert pd.Timestamp(r["first_acquired_date"]) == pd.Timestamp(r["baseline_date"])
+
+
+def test_first_acquired_date_equals_baseline_for_partial_trim():
+    """A trimmed-but-never-exited name is one cycle, so first_acquired_date ==
+    baseline_date == the first buy (no spurious split)."""
+    dates = _bdates(40)
+    px = pd.DataFrame({"AAA": np.concatenate([np.full(20, 100.0),
+                                              np.full(20, 150.0)])}, index=dates)
+    txns = pd.DataFrame({
+        "ticker": ["AAA"] * 3,
+        "date": [dates[0], dates[5], dates[25]],
+        "action": ["BUY", "SELL", "BUY"],
+        "shares": [10.0, 3.0, 5.0],                  # trim, net stays > 0
+    })
+    r = build.build_positions(txns, px).loc["AAA"]
+    assert pd.Timestamp(r["first_acquired_date"]) == dates[0]
+    assert pd.Timestamp(r["first_acquired_date"]) == pd.Timestamp(r["baseline_date"])
+
+
 # --- v2.9.4: hero chart uses the SAME active-cycle basis as the table ---------
 
 def test_basket_mtm_matches_table_for_rebought_name():
