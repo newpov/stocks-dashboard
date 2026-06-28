@@ -55,3 +55,19 @@ def test_payload_nasdaq_empty_when_omitted():
     basket, bench = _wk(2.0), _wk(1.0)
     out = build.build_portfolio_payload(basket, bench, basket.index[0])
     assert out["nasdaq"] == {"dates": [], "values": []}
+
+
+# --- Task 3: legend helper renders the toggle only when nasdaq present ---
+
+def test_hero_legend_includes_nasdaq_toggle_when_present():
+    html = build._hero_legend_html(True)
+    assert 'data-series="nasdaq"' in html
+    assert 'aria-pressed="false"' in html
+    assert "leg-swatch nasdaq" in html
+    assert "Basket" in html and "SPY" in html and "GBP/USD" in html
+
+
+def test_hero_legend_omits_nasdaq_when_absent():
+    html = build._hero_legend_html(False)
+    assert "nasdaq" not in html
+    assert "Basket" in html and "SPY" in html and "GBP/USD" in html

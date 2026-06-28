@@ -6435,6 +6435,24 @@ def build_data_payload(returns: pd.DataFrame, prices: pd.DataFrame,
     return payload
 
 
+def _hero_legend_html(has_nasdaq: bool) -> str:
+    """Hero-chart legend items. Nasdaq is an optional toggle button rendered only
+    when QQQ data is present; basket + SPY are fixed reference labels (they drive
+    the vs-SPY area, delta badge and alpha sparkline, so they are not toggleable)."""
+    items = [
+        '<div class="leg"><span class="leg-swatch basket"></span>Basket</div>',
+        '<div class="leg"><span class="leg-swatch spy"></span>SPY</div>',
+    ]
+    if has_nasdaq:
+        items.append(
+            '<button type="button" class="leg leg-toggle" data-series="nasdaq" '
+            'aria-pressed="false" title="Show/hide the Nasdaq-100 (QQQ) line">'
+            '<span class="leg-swatch nasdaq"></span>Nasdaq</button>'
+        )
+    items.append('<div class="leg"><span class="leg-swatch fx"></span>GBP/USD</div>')
+    return "\n        ".join(items)
+
+
 def build_portfolio_payload(basket: pd.Series, bench: pd.Series,
                             first_purchase: pd.Timestamp,
                             fx: pd.DataFrame | None = None,
@@ -7828,6 +7846,9 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
   .leg-swatch{{width:14px;height:3px;border-radius:1px}}
   .leg-swatch.basket{{background:var(--accent)}}
   .leg-swatch.spy{{background:var(--text-dim);height:1px;border-top:1px dashed var(--text-dim)}}
+  .leg-swatch.nasdaq{{background:#a78bfa;height:0;border-top:2px dotted #a78bfa}}
+  .leg-toggle{{background:none;border:none;padding:0;margin:0;font:inherit;color:var(--text-2);cursor:pointer}}
+  .leg-toggle[aria-pressed="false"]{{opacity:0.45}}
   .leg-swatch.fx{{
     background:linear-gradient(90deg,var(--up) 0%,var(--up) 30%,var(--down) 70%,var(--down) 100%);
     height:8px;border-radius:1px;
