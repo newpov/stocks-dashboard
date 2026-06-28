@@ -14,6 +14,28 @@ than a barely-working prototype.
 
 ---
 
+## v3.0 — UX polish + relevance · 28 June 2026 *(in progress)*
+
+Rolling v3.0 work; ships incrementally (no single tag yet). The header now shows
+this version, read live from the top of this changelog.
+
+### Changed
+- **Watchlist is arrow-paged.** Instead of spilling 6+ names onto a second row,
+  the watchlist shows one full row at a time with `‹ ›` arrows and a page
+  indicator, filling the row before paging (about 6 per page on desktop, 3 on
+  mobile) and re-flowing on resize.
+- **Market expectations shows only near-term markets.** Prediction markets that
+  resolve more than ~5 months out (year-end geopolitical bets, long-horizon
+  climate markets, …) are filtered out, so the panel stays focused on the
+  near-term macro events that actually move — Fed decision, CPI, GDP, and
+  unemployment. Uses the resolution date already in the fetched data; no rotation.
+
+### Added
+- **Dashboard version in the header**, next to "last close … · rebuilt …",
+  read dynamically from this changelog's latest entry.
+
+---
+
 ## v2.9 — Review hardening pass · 27 June 2026
 
 A correctness, robustness, and label-honesty pass driven by a structured

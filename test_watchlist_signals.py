@@ -181,7 +181,7 @@ def test_render_empty_payload_returns_blank():
     assert build.render_watchlist({}, pd.DataFrame()) == ""
 
 
-# --- v3.0 #4: arrow pager (value-screen style) ------------------------------
+# --- v3.0 #4: arrow pager (measured-columns; JS sizes the page to the row) ----
 
 def _many(n):
     """n minimally-valid watchlist cards, tickers T0..T{n-1}."""
@@ -190,20 +190,22 @@ def _many(n):
                       "prices": [100, 101, 102], "note": ""} for i in range(n)}
 
 
-def test_render_pager_appears_above_page_size():
-    n = build.WATCH_PAGE + 2          # forces a second page
+def test_render_pager_appears_above_mobile_cols():
+    # > mobile column count -> paging could be needed, so nav + marker render.
+    n = build.WATCH_COLS_MOBILE + 4
     html = build.render_watchlist(_many(n), pd.DataFrame())
-    npages = (n + build.WATCH_PAGE - 1) // build.WATCH_PAGE
-    assert f'data-wl-pages="{npages}"' in html
-    assert f'data-wl-page="{build.WATCH_PAGE}"' in html
+    assert 'data-wl-pageable="1"' in html
     assert "wl-nav" in html and "wl-prev" in html and "wl-next" in html
-    assert "wl-page-cur" in html
-    # all cards still rendered (paging is client-side show/hide)
+    assert "wl-page-cur" in html and "wl-page-total" in html
+    # every card is rendered; the JS windows them client-side (page size = cols)
     assert html.count('class="wl-card"') == n
+    # the page size is NOT baked into the server markup (measured live in JS)
+    assert "data-wl-page=" not in html and "data-wl-pages=" not in html
 
 
-def test_render_no_pager_at_or_below_page_size():
-    html = build.render_watchlist(_many(build.WATCH_PAGE), pd.DataFrame())
-    assert "data-wl-pages" not in html
+def test_render_no_pager_at_or_below_mobile_cols():
+    n = build.WATCH_COLS_MOBILE          # fits one mobile row -> never needs paging
+    html = build.render_watchlist(_many(n), pd.DataFrame())
+    assert "data-wl-pageable" not in html
     assert "wl-nav" not in html
-    assert html.count('class="wl-card"') == build.WATCH_PAGE
+    assert html.count('class="wl-card"') == n

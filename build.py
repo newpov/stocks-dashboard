@@ -39,6 +39,20 @@ ROOT = Path(__file__).parent
 TRANSACTIONS_CSV = ROOT / "transactions.csv"
 LOG_XLSX = ROOT / "log.xlsx"           # Trading 212-style real transaction log
 BASKET_SNAPSHOT_CSV = ROOT / "basket.snapshot.csv"   # public, normalized basket for CI
+CHANGELOG_MD = ROOT / "CHANGELOG.md"   # v3.0: header version is read from its top entry
+
+
+def _dashboard_version(path=None) -> str:
+    """v3.0: the dashboard version, read from CHANGELOG.md's top '## vX.Y'
+    heading (single source of truth — bumping the changelog updates the header
+    automatically). Returns '' if the file is missing or has no version heading."""
+    path = path or CHANGELOG_MD
+    try:
+        text = path.read_text(encoding="utf-8")
+    except Exception:
+        return ""
+    m = re.search(r"^##\s*v(\d+\.\d+)", text, re.M)
+    return m.group(1) if m else ""
 
 # v2.4 weighting model. "equal" = each position is one unit (privacy-driven,
 # the author's default; no monetary scale). "value" = capital-weighted by real
@@ -935,7 +949,10 @@ VALUE_MIN_PASS     = 6       # need >= this many of the 6 filters (strict all-6)
 VALUE_MAX_ROWS     = 20      # cap; rendered in pages of VALUE_PAGE
 VALUE_PAGE         = 10      # rows shown per page (arrows flip to the next set)
 VALUE_MIN_SECTOR_N = 3       # #2 sector-median P/E needs >= this many priced peers
-WATCH_PAGE         = 4       # v3.0 #4: watchlist cards per page (arrows flip sets)
+# v3.0 #4/fix: watchlist pages by how many cards fill the row (measured live in
+# JS), so a page is always gap-free. CSS forces these column counts per breakpoint.
+WATCH_COLS_DESKTOP = 6       # cards per row on desktop
+WATCH_COLS_MOBILE  = 3       # cards per row on mobile; also the "needs paging" floor
 
 # How many candidates the analyst panel shows in total (the grid scrolls
 # internally past ~6 visible). Safety cap for very large closed-position lists.
@@ -4037,17 +4054,18 @@ def render_watchlist(watchlist_payload: dict, meta: pd.DataFrame) -> str:
             f'  <div class="wl-foot"><span class="wl-period">12-month</span>{note_html}</div>'
             f'</div>'
         )
-    # v3.0 #4: page the cards in fixed windows of WATCH_PAGE with flip arrows
-    # (mirrors the value-screen pager) so 6+ names don't spill into a 2nd row.
+    # v3.0 #4: arrow-paged so 6+ names don't spill into a 2nd row. Page size =
+    # however many cards fill the row (measured in JS, 6 desktop / 3 mobile), so
+    # page 1 fills before page 2. Nav rendered whenever paging could be needed
+    # (n above the mobile column count); JS hides it when one row holds all.
     n = len(watchlist_payload)
-    nav, section_attr, grid_attr = "", "", ""
-    if n > WATCH_PAGE:
-        npages = (n + WATCH_PAGE - 1) // WATCH_PAGE
-        section_attr = f' data-wl-pages="{npages}"'
-        grid_attr = f' data-wl-page="{WATCH_PAGE}"'
+    nav, section_attr = "", ""
+    if n > WATCH_COLS_MOBILE:
+        section_attr = ' data-wl-pageable="1"'
         nav = ('<div class="wl-nav">'
                '<button type="button" class="wl-arrow wl-prev" aria-label="Previous set">&#8249;</button>'
-               f'<span class="wl-page-ind"><span class="wl-page-cur">1</span>&#8202;/&#8202;{npages}</span>'
+               '<span class="wl-page-ind"><span class="wl-page-cur">1</span>'
+               '&#8202;/&#8202;<span class="wl-page-total">1</span></span>'
                '<button type="button" class="wl-arrow wl-next" aria-label="Next set">&#8250;</button>'
                '</div>')
     return f"""<section class="watchlist-section"{section_attr}>
@@ -4060,7 +4078,7 @@ def render_watchlist(watchlist_payload: dict, meta: pd.DataFrame) -> str:
     entry read (near-low / oversold / unusual volume / Street upside). Add or
     remove via <code>watchlist.csv</code>. Click a card for the full chart.</p>
   </div>
-  <div class="wl-grid"{grid_attr}>{''.join(cards)}</div>
+  <div class="wl-grid">{''.join(cards)}</div>
 </section>"""
 
 
@@ -6659,6 +6677,9 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
 
     latest_date = prices.index[-1].strftime("%d %b %Y")
     built = datetime.now(timezone.utc).strftime("%d %b %Y &middot; %H:%M UTC")
+    _dash_version = _dashboard_version()
+    version_html = (f' &middot; <span class="build-ver">v{_esc(_dash_version)}</span>'
+                    if _dash_version else "")
 
     # v2.2 rethink: per-ticker signal-stacking. Pure post-processing over
     # already-computed metrics; sits at the top of the module stack.
@@ -7882,6 +7903,7 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
   .neg{{color:var(--down)}}
   .stat-value.dim{{color:var(--text-dim);font-size:24px}}
   .build-info{{margin-top:14px;font-family:var(--font-mono);font-size:11px;color:var(--text-dim)}}
+  .build-info .build-ver{{color:var(--text-2);font-weight:600}}
   .build-health{{font-family:var(--font-mono);font-size:10px;letter-spacing:0.02em;
     color:var(--text-dim);text-align:right;padding:8px 16px;border-top:1px solid var(--border);
     margin-top:24px}}
@@ -8327,7 +8349,7 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     transition:border-color .12s,color .12s}}
   .wl-arrow:hover{{border-color:var(--accent);color:var(--accent)}}
   .wl-page-ind{{font-family:var(--font-mono);font-size:11px;color:var(--text-dim);min-width:34px;text-align:center}}
-  .wl-grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:10px}}
+  .wl-grid{{display:grid;grid-template-columns:repeat({WATCH_COLS_DESKTOP},minmax(0,1fr));gap:10px}}
   .wl-card{{
     background:var(--ink-soft);border:1px solid var(--border);border-radius:10px;
     padding:12px 14px;cursor:pointer;transition:border-color 0.15s,transform 0.15s;
@@ -8624,7 +8646,7 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     .wl-news-row{{grid-template-columns:1fr;gap:10px}}
     .outlook-news-row{{grid-template-columns:1fr;gap:10px}}
     .outlook-news-row > section{{min-height:auto}}
-    .wl-grid{{grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:8px}}
+    .wl-grid{{grid-template-columns:repeat({WATCH_COLS_MOBILE},minmax(0,1fr));gap:8px}}
   }}
 
   .untracked{{margin:32px 0 8px;padding:18px 20px;border:1px solid var(--border);
@@ -9116,7 +9138,7 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
   <div id="last-look" hidden></div>
 
   <div class="build-info">
-    <span class="live"></span>last close {latest_date} &middot; rebuilt {built}
+    <span class="live"></span>last close {latest_date} &middot; rebuilt {built}{version_html}
   </div>
 </header>
 
@@ -10353,26 +10375,39 @@ document.querySelectorAll('.value-screen-section[data-vs-pages]').forEach(sec =>
   if (prev) prev.addEventListener('click', () => {{ cur = (cur - 1 + npages) % npages; paint(); }});
   if (next) next.addEventListener('click', () => {{ cur = (cur + 1) % npages; paint(); }});
 }});
-// v3.0 #4: watchlist cards paged in fixed windows with flip arrows (same as above).
-document.querySelectorAll('.watchlist-section[data-wl-pages]').forEach(sec => {{
+// v3.0 #4: watchlist arrow pager. Page size = however many cards fill the row
+// (read live from the grid's column count), so page 1 fills before page 2 and
+// it re-flows on resize. The nav hides itself when one row already holds all.
+document.querySelectorAll('.watchlist-section[data-wl-pageable]').forEach(sec => {{
   const grid = sec.querySelector('.wl-grid');
-  const size = parseInt((grid && grid.dataset.wlPage) || '0', 10);
   const cards = Array.from(sec.querySelectorAll('.wl-card'));
-  if (!size || cards.length <= size) return;
-  const npages = Math.ceil(cards.length / size);
+  const nav = sec.querySelector('.wl-nav');
   const ind = sec.querySelector('.wl-page-cur');
+  const tot = sec.querySelector('.wl-page-total');
+  if (!grid || cards.length === 0) return;
   let cur = 0;
+  const cols = () => {{
+    const tpl = getComputedStyle(grid).gridTemplateColumns;
+    return Math.max(1, tpl.split(' ').filter(Boolean).length);
+  }};
+  const npages = () => Math.max(1, Math.ceil(cards.length / cols()));
   const paint = () => {{
+    const size = cols(), np = npages();
+    if (cur >= np) cur = np - 1;
+    if (cur < 0) cur = 0;
     cards.forEach((c, i) => {{
       c.style.display = (i >= cur * size && i < (cur + 1) * size) ? '' : 'none';
     }});
+    if (nav) nav.style.display = np > 1 ? '' : 'none';
     if (ind) ind.textContent = (cur + 1);
+    if (tot) tot.textContent = np;
   }};
   paint();
   const prev = sec.querySelector('.wl-prev');
   const next = sec.querySelector('.wl-next');
-  if (prev) prev.addEventListener('click', () => {{ cur = (cur - 1 + npages) % npages; paint(); }});
-  if (next) next.addEventListener('click', () => {{ cur = (cur + 1) % npages; paint(); }});
+  if (prev) prev.addEventListener('click', () => {{ const np = npages(); cur = (cur - 1 + np) % np; paint(); }});
+  if (next) next.addEventListener('click', () => {{ const np = npages(); cur = (cur + 1) % np; paint(); }});
+  let rt; window.addEventListener('resize', () => {{ clearTimeout(rt); rt = setTimeout(paint, 150); }});
 }});
 // T9/T10: generic ticker-clickable handler. Anything bearing the class +
 // data-ticker opens the modal. Used by the rating-moves panel ticker spans
