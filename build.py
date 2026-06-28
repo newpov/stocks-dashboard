@@ -71,6 +71,7 @@ CACHE_PARQUET = ROOT / "data" / "prices_cache.parquet"
 OHLCV_CACHE = ROOT / "data" / "ohlcv_cache.parquet"  # full OHLCV for ATR / volume metrics
 BB_UNIVERSE_OHLCV_CACHE = ROOT / "data" / "bb_universe_ohlcv_cache.parquet"  # Big Brain universe shortlist OHLCV
 BENCHMARK_CACHE = ROOT / "data" / "benchmark_cache.parquet"
+BENCHMARK2_CACHE = ROOT / "data" / "benchmark2_cache.parquet"
 META_CSV = ROOT / "data" / "meta.csv"
 WATCHLIST_CSV = ROOT / "watchlist.csv"
 ANALYST_CACHE = ROOT / "data" / "analyst_cache.parquet"
@@ -962,6 +963,8 @@ DEFAULT_BASELINE = pd.Timestamp("2024-10-21")
 START_DATE = "2024-10-14"
 BENCHMARK = "SPY"
 BENCHMARK_CCY = "USD"            # native currency of the benchmark
+BENCHMARK2 = "QQQ"               # v3.0 #3: Nasdaq-100 ETF, optional hero overlay
+BENCHMARK2_CCY = "USD"           # native currency of the overlay (FX-clean, like SPY)
 BASE_CCY = "GBP"                 # all displayed values normalize to this
 BASE_SYMBOL = "£"
 CCY_SYMBOLS = {"GBP": "£", "USD": "$", "EUR": "€", "JPY": "¥", "CHF": "CHF "}
@@ -1407,23 +1410,23 @@ def _benchmark_close_from_df(df: pd.DataFrame) -> pd.Series:
     return s.iloc[:, 0] if getattr(s, "ndim", 1) > 1 else s
 
 
-def download_benchmark() -> pd.Series:
+def download_benchmark(ticker: str = BENCHMARK) -> pd.Series:
     end = (datetime.now(timezone.utc) + timedelta(days=1)).strftime("%Y-%m-%d")
     try:
-        df = yf.download(BENCHMARK, start=START_DATE, end=end,
+        df = yf.download(ticker, start=START_DATE, end=end,
                          auto_adjust=True, progress=False, threads=False)
         s = _benchmark_close_from_df(df)
         if s.empty:
-            print(f"WARN benchmark {BENCHMARK}: no usable Close in returned frame "
-                  f"(columns={list(df.columns)[:4]}) — alpha + vs-SPY will be "
-                  f"unavailable this build", file=sys.stderr)
+            print(f"WARN benchmark {ticker}: no usable Close in returned frame "
+                  f"(columns={list(df.columns)[:4]}) — overlay/alpha unavailable "
+                  f"this build", file=sys.stderr)
             return pd.Series(dtype=float)
         if s.index.tz is not None:
             s.index = s.index.tz_localize(None)
-        s.name = BENCHMARK
+        s.name = ticker
         return s
     except Exception as e:
-        print(f"WARN benchmark download failed: {e}", file=sys.stderr)
+        print(f"WARN benchmark {ticker} download failed: {e}", file=sys.stderr)
         return pd.Series(dtype=float)
 
 
