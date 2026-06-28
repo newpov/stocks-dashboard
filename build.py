@@ -4031,6 +4031,7 @@ def build_watchlist_payload(watchlist: pd.DataFrame, prices: pd.DataFrame,
             "dates": [d.strftime("%Y-%m-%d") for d in weekly.index],
             "prices": [round(float(p), 4) for p in weekly.tolist()],
         }
+        payload[tkr]["wl_kind"] = row.get("wl_kind", "manual")
         # T1: precompute the modal chart polyline (same path as portfolio tickers).
         if baseline:
             _rebased = [(float(p) / baseline - 1) * 100 for p in weekly.tolist()]
@@ -4046,6 +4047,11 @@ def render_watchlist(watchlist_payload: dict, meta: pd.DataFrame) -> str:
         ind = _esc(_industry_label(meta, tkr))
         name = _esc(d["name"])
         note = _esc(d.get("note") or "")
+        kind = d.get("wl_kind", "manual")
+        card_cls = "wl-card wl-auto" if kind == "auto" else "wl-card"
+        auto_badge = ('<span class="wl-auto-tag" title="Flagged by both the Value '
+                      'screen and Big Brain">Value + BB</span>'
+                      if kind in ("auto", "manual_validated") else "")
         total = d["total"]
         cls = "pos" if total >= 0 else "neg"
         ccy_sym = d["ccy_symbol"]
@@ -4083,9 +4089,9 @@ def render_watchlist(watchlist_payload: dict, meta: pd.DataFrame) -> str:
                          + (f' <span class="wl-cite-src">&mdash; {src}</span>' if src else "")
                          + '</div>')
         cards.append(
-            f'<div class="wl-card" data-ticker="{_esc(tkr)}">'
+            f'<div class="{card_cls}" data-ticker="{_esc(tkr)}">'
             f'  <div class="wl-head">'
-            f'    <div class="wl-tkr">{_esc(tkr)}<div class="wl-ind">{ind}</div></div>'
+            f'    <div class="wl-tkr">{_esc(tkr)}{auto_badge}<div class="wl-ind">{ind}</div></div>'
             f'    <div class="wl-pct {cls}">{total:+.1f}%</div>'
             f'  </div>'
             f'  <div class="wl-name">{name}</div>'
@@ -4116,8 +4122,10 @@ def render_watchlist(watchlist_payload: dict, meta: pd.DataFrame) -> str:
       {nav}
     </div>
     <p class="muted">Names you're tracking but don't (yet) hold &mdash; each with an
-    entry read (near-low / oversold / unusual volume / Street upside). Add or
-    remove via <code>watchlist.csv</code>. Click a card for the full chart.</p>
+    entry read (near-low / oversold / unusual volume / Street upside). Cards badged
+    <span class="wl-auto-tag">Value + BB</span> were flagged by both the Value screen
+    and Big Brain; shaded ones were auto-surfaced (not in your <code>watchlist.csv</code>).
+    Click a card for the full chart.</p>
   </div>
   <div class="wl-grid">{''.join(cards)}</div>
 </section>"""
@@ -8419,6 +8427,8 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
   .wl-arrow:hover{{border-color:var(--accent);color:var(--accent)}}
   .wl-page-ind{{font-family:var(--font-mono);font-size:11px;color:var(--text-dim);min-width:34px;text-align:center}}
   .wl-grid{{display:grid;grid-template-columns:repeat({WATCH_COLS_DESKTOP},minmax(0,1fr));gap:10px}}
+  .wl-card.wl-auto{{background:color-mix(in srgb,var(--accent) 9%,transparent);border-left:2px solid var(--accent)}}
+  .wl-auto-tag{{display:inline-block;margin-left:6px;padding:1px 5px;font-size:9px;font-weight:600;border-radius:4px;background:color-mix(in srgb,var(--accent) 22%,transparent);color:var(--accent);vertical-align:middle;letter-spacing:0.02em}}
   .wl-card{{
     background:var(--ink-soft);border:1px solid var(--border);border-radius:10px;
     padding:12px 14px;cursor:pointer;transition:border-color 0.15s,transform 0.15s;

@@ -70,3 +70,63 @@ def test_combined_empty_when_no_auto_and_no_manual():
     df = build.build_combined_watchlist(None, [], two_signal_set=set())
     assert df.empty
     assert list(df.columns) == ["ticker", "note", "wl_kind"]
+
+
+# --- Task 3: payload passthrough + render ---
+
+def _combined(*triples):
+    return pd.DataFrame([{"ticker": t, "note": n, "wl_kind": k} for (t, n, k) in triples])
+
+
+def _prices(tickers):
+    end = pd.Timestamp.now().normalize() - pd.Timedelta(days=1)
+    start = end - pd.Timedelta(days=59)
+    idx = pd.date_range(start, end, freq="D")
+    return pd.DataFrame({t: [100 + i for i in range(len(idx))] for t in tickers}, index=idx)
+
+
+def _meta(tickers):
+    return pd.DataFrame({"name": {t: f"{t} Inc" for t in tickers},
+                         "sector": {t: "Tech" for t in tickers},
+                         "industry": {t: "Software" for t in tickers},
+                         "currency": {t: "USD" for t in tickers}})
+
+
+def test_payload_carries_wl_kind():
+    df = _combined(("AAA", "", "auto"), ("MMM", "n", "manual"))
+    px = _prices(["AAA", "MMM"])
+    pay = build.build_watchlist_payload(df, px, px, _meta(["AAA", "MMM"]))
+    assert pay["AAA"]["wl_kind"] == "auto"
+    assert pay["MMM"]["wl_kind"] == "manual"
+
+
+def test_payload_wl_kind_defaults_manual_when_column_absent():
+    # Back-compat: a plain [ticker, note] frame (no wl_kind) -> "manual".
+    df = pd.DataFrame([{"ticker": "AAA", "note": ""}])
+    px = _prices(["AAA"])
+    pay = build.build_watchlist_payload(df, px, px, _meta(["AAA"]))
+    assert pay["AAA"]["wl_kind"] == "manual"
+
+
+def _render_payload(kind):
+    return {"AAA": {"name": "Aco", "currency": "USD", "ccy_symbol": "$",
+                    "latest": 100.0, "native_latest": 100.0, "total": -3.0,
+                    "prices": [100, 99, 98], "note": "", "wl_kind": kind}}
+
+
+def test_render_auto_card_shaded_and_badged():
+    html = build.render_watchlist(_render_payload("auto"), pd.DataFrame())
+    assert "wl-auto" in html and "wl-auto-tag" in html and "Value + BB" in html
+
+
+def test_render_manual_validated_badge_no_shading():
+    html = build.render_watchlist(_render_payload("manual_validated"), pd.DataFrame())
+    assert "wl-auto-tag" in html and "Value + BB" in html
+    assert "wl-card wl-auto" not in html         # no shading class
+
+
+def test_render_plain_manual_no_badge_no_shading():
+    html = build.render_watchlist(_render_payload("manual"), pd.DataFrame())
+    # The intro paragraph always contains the example badge; check card-level HTML only.
+    cards_html = html.split('class="wl-grid"', 1)[-1]
+    assert "wl-auto-tag" not in cards_html and "wl-card wl-auto" not in cards_html
