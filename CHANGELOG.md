@@ -31,6 +31,13 @@ this version, read live from the top of this changelog.
   unemployment. Uses the resolution date already in the fetched data; no rotation.
 
 ### Added
+- **Nasdaq overlay on the hero chart.** An optional Nasdaq-100 (`QQQ`) line can be
+  toggled on from the chart legend — the basket is tech-heavy, so the Nasdaq is
+  often a more relevant comparator than the S&P 500. It's off by default (one tap
+  to show, tap again to hide; the choice is remembered and works on mobile). SPY
+  stays *the* benchmark for every number — the Δ badge, the green/red vs-SPY shading
+  and the alpha sparkline are unchanged; QQQ is a display-only reference line,
+  fetched and rebased exactly like SPY so the comparison is fair.
 - **Dashboard version in the header**, next to "last close … · rebuilt …",
   read dynamically from this changelog's latest entry.
 
