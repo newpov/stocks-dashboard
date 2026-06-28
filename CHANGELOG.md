@@ -30,6 +30,11 @@ this version, read live from the top of this changelog.
   near-term macro events that actually move — Fed decision, CPI, GDP, and
   unemployment. Uses the resolution date already in the fetched data; no rotation.
 
+### Fixed
+- **Hero chart x-axis dates no longer crowd on mobile.** Axis ticks now read
+  `Oct '24` (month + year, no day-of-month, which was noise on a multi-month
+  axis) and drop from 5 to 4 labels on narrow screens, so they stop overlapping.
+
 ### Added
 - **Nasdaq overlay on the hero chart.** An optional Nasdaq-100 (`QQQ`) line can be
   toggled on from the chart legend — the basket is tech-heavy, so the Nasdaq is

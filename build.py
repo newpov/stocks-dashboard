@@ -9371,6 +9371,13 @@ function fmtDate(iso) {{
   const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
   return parseInt(d) + ' ' + months[parseInt(m)-1] + ' ' + y.slice(2);
 }}
+// Compact form for the x-axis ticks (no day-of-month): "Oct '24". The axis spans
+// months, so the day is noise and crowds/overlaps on narrow (mobile) charts.
+function fmtAxisDate(iso) {{
+  const [y, m] = iso.split('-');
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  return months[parseInt(m)-1] + " '" + y.slice(2);
+}}
 
 // ---- Hero chart (basket + SPY)
 let showNasdaq = (function() {{ try {{ return localStorage.getItem('heroNasdaq') === '1'; }} catch (e) {{ return false; }} }})();
@@ -9424,9 +9431,9 @@ function renderHeroChart() {{
     const y = padT + (1 - (v - vmin)/span) * innerH;
     yTicks.push({{v, y}});
   }}
-  // X ticks (~5)
+  // X ticks (~5; fewer on narrow/mobile charts so the date labels don't collide)
   const n = basket.xs.length;
-  const xTickCount = Math.min(5, n);
+  const xTickCount = Math.min(W < 460 ? 4 : 5, n);
   const xTicks = [];
   for (let i = 0; i < xTickCount; i++) {{
     const idx = Math.round((i/(xTickCount-1)) * (n-1));
@@ -9645,7 +9652,7 @@ function renderHeroChart() {{
   // X labels — positioned below the FX band (or below the line chart when no FX)
   const xLabelY = padT + innerH + FX_GAP + FX_H + 16;
   html += xTicks.map(t =>
-    `<text x="${{t.x.toFixed(1)}}" y="${{xLabelY.toFixed(1)}}" fill="#6b7185" font-size="10" font-family="Geist Mono, monospace" text-anchor="middle">${{fmtDate(t.date)}}</text>`
+    `<text x="${{t.x.toFixed(1)}}" y="${{xLabelY.toFixed(1)}}" fill="#6b7185" font-size="10" font-family="Geist Mono, monospace" text-anchor="middle">${{fmtAxisDate(t.date)}}</text>`
   ).join('');
   // v2.7 #2: UK FY-start vertical markers (drawn under the data lines).
   html += fyHtml;
