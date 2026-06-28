@@ -3951,6 +3951,26 @@ def select_auto_watchlist(value_rows: "list[dict] | None", manual_tickers,
     return [t for t in two_signal_tickers(value_rows) if t not in manual][:cap]
 
 
+def build_combined_watchlist(manual_df: "pd.DataFrame | None",
+                             auto_tickers: "list[str]",
+                             two_signal_set: "set[str]") -> pd.DataFrame:
+    """One watchlist frame: auto picks first (wl_kind='auto'), then manual rows
+    (wl_kind='manual_validated' if also 2-signal, else 'manual'). Auto and manual
+    are kept disjoint (a manual ticker that is also auto appears once, as auto).
+    Columns: ticker, note, wl_kind."""
+    auto_set = set(auto_tickers or [])
+    two = set(two_signal_set or ())
+    rows = [{"ticker": t, "note": "", "wl_kind": "auto"} for t in (auto_tickers or [])]
+    if manual_df is not None and not manual_df.empty:
+        for _, r in manual_df.iterrows():
+            tkr = r["ticker"]
+            if tkr in auto_set:
+                continue                              # already an auto card
+            rows.append({"ticker": tkr, "note": r.get("note", ""),
+                         "wl_kind": "manual_validated" if tkr in two else "manual"})
+    return pd.DataFrame(rows, columns=["ticker", "note", "wl_kind"])
+
+
 def build_watchlist_payload(watchlist: pd.DataFrame, prices: pd.DataFrame,
                             prices_native: pd.DataFrame, meta: pd.DataFrame) -> dict:
     """For each watchlist ticker, produce a payload mirroring build_data_payload

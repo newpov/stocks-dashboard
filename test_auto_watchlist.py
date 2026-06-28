@@ -36,3 +36,37 @@ def test_select_auto_watchlist_default_cap_is_constant():
 def test_select_auto_watchlist_no_bb_returns_empty():
     rows = [_vrow("AAA", False), _vrow("BBB", False)]
     assert build.select_auto_watchlist(rows, manual_tickers=set()) == []
+
+
+# --- Task 2: combined frame ---
+
+def _manual(*pairs):
+    return pd.DataFrame([{"ticker": t, "note": n} for (t, n) in pairs])
+
+
+def test_combined_auto_first_then_manual():
+    manual = _manual(("MAN", "my note"))
+    df = build.build_combined_watchlist(manual, ["AAA"], two_signal_set={"AAA"})
+    assert list(df["ticker"]) == ["AAA", "MAN"]            # auto first
+    assert list(df["wl_kind"]) == ["auto", "manual"]
+    assert df.iloc[1]["note"] == "my note"                 # manual note preserved
+
+
+def test_combined_manual_validated_when_two_signal():
+    manual = _manual(("MAN", ""))
+    df = build.build_combined_watchlist(manual, [], two_signal_set={"MAN"})
+    assert list(df["wl_kind"]) == ["manual_validated"]
+
+
+def test_combined_auto_excluded_from_manual_no_dupes():
+    # A name that is both auto AND in the manual frame appears once, as auto.
+    manual = _manual(("AAA", "note"))
+    df = build.build_combined_watchlist(manual, ["AAA"], two_signal_set={"AAA"})
+    assert list(df["ticker"]) == ["AAA"]
+    assert list(df["wl_kind"]) == ["auto"]
+
+
+def test_combined_empty_when_no_auto_and_no_manual():
+    df = build.build_combined_watchlist(None, [], two_signal_set=set())
+    assert df.empty
+    assert list(df.columns) == ["ticker", "note", "wl_kind"]
