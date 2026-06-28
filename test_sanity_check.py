@@ -41,6 +41,22 @@ def test_output_files_raise_on_bad_payload(tmp_path):
         sc.check_output_files(html, payload, min_kb=500)
 
 
+def test_output_files_raise_on_missing_html(tmp_path):
+    # v3.0 L-TESTS: the missing-file branch (html absent entirely).
+    payload = tmp_path / "payload.json"
+    payload.write_text("{}")
+    with pytest.raises(SystemExit):
+        sc.check_output_files(tmp_path / "nope.html", payload, min_kb=500)
+
+
+def test_output_files_raise_on_missing_payload(tmp_path):
+    # html is fine but the sidecar payload is absent.
+    html = tmp_path / "index.html"
+    html.write_bytes(b"x" * (600 * 1024))
+    with pytest.raises(SystemExit):
+        sc.check_output_files(html, tmp_path / "nope.json", min_kb=500)
+
+
 def test_band_passes_when_close_to_last():
     df = pd.DataFrame({"ticker": [f"T{i}" for i in range(180)]})
     sc.check_position_count(df, last_count=185)   # no raise

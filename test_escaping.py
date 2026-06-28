@@ -81,3 +81,34 @@ def test_industry_outlook_none_ret_guard():
     html = build.render_industry_outlook(groups, universe_size=1)
     assert "nan" not in html.lower()
     assert "&mdash;" in html   # the placeholder for the missing return
+
+
+# --- v3.0 L-TESTS: adversarial input into watchlist + value-screen renders ----
+
+_XSS = "<script>alert('pwn')</script>"
+
+
+def test_render_watchlist_escapes_hostile_name_note_ticker():
+    payload = {_XSS: {  # ticker key is itself hostile
+        "name": _XSS, "currency": "USD", "ccy_symbol": "$",
+        "latest": 100.0, "native_latest": 100.0, "total": -3.0,
+        "prices": [100, 99, 98], "note": _XSS, "wl_kind": "manual",
+    }}
+    html = build.render_watchlist(payload, build.pd.DataFrame())
+    assert "<script>alert('pwn')</script>" not in html
+    assert "&lt;script&gt;" in html
+
+
+def test_render_value_screen_escapes_hostile_ticker_and_sector():
+    row = {
+        "ticker": _XSS, "name": _XSS, "sector": _XSS,
+        "price": 100.0, "pe": 8.0, "sector_median_pe": 12.0, "pe_discount": 0.33,
+        "pb": 1.2, "roe": 0.21, "rev_growth": 0.10, "fcf_positive": True,
+        "debt_to_equity": 0.5, "range52w_pct": 4.0, "pass_count": 6,
+        "passed": {"near_low": True, "cheap": True, "fcf": True,
+                   "roe": True, "rev": True, "de": True},
+        "is_bb_idea": False,
+    }
+    html = build.render_value_screen([row], "26 Jun 2026")
+    assert "<script>alert('pwn')</script>" not in html
+    assert "&lt;script&gt;" in html
