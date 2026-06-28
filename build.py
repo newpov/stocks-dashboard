@@ -12099,7 +12099,7 @@ def main(demo: bool = False, watchlist_only: bool = False,
                         a_add = a_add[~a_add.index.isin(analyst.index)]
                         if not a_add.empty:
                             analyst = pd.concat([analyst, a_add])
-                    print(f"Auto-watchlist: {len(keep)} Value∩BB name(s): {', '.join(keep)}")
+                    print(f"Auto-watchlist: {len(keep)} Value/BB name(s): {', '.join(keep)}")
     except Exception as e:
         print(f"WARN Big Brain universe lane skipped: {e}", file=sys.stderr)
 
