@@ -36,6 +36,12 @@ this version, read live from the top of this changelog.
   axis) and drop from 5 to 4 labels on narrow screens, so they stop overlapping.
 
 ### Added
+- **Auto-watchlist for 2-signal names.** Stocks flagged by *both* the Value screen
+  and Big Brain are now surfaced automatically in the Watchlist (up to 4), shaded
+  and badged **Value + BB**, ahead of your manually-added names — no `watchlist.csv`
+  edit needed. A name you already track that also qualifies keeps its place but
+  gains the validation badge. Reuses data the build already fetched (no extra
+  network calls); nothing is written to `watchlist.csv`.
 - **Nasdaq overlay on the hero chart.** An optional Nasdaq-100 (`QQQ`) line can be
   toggled on from the chart legend — the basket is tech-heavy, so the Nasdaq is
   often a more relevant comparator than the S&P 500. It's off by default (one tap
