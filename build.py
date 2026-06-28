@@ -920,6 +920,9 @@ PRED_VOLUME_FLOORS = {
 }
 PRED_MAX_ROWS = 20           # v2.5 #3: deepen the pool; render shows a window
 PRED_WINDOW = 5              # v2.5 #3: themes shown at once; "Reshuffle" cycles
+PRED_HORIZON_DAYS = 150      # v3.0 #6: only show markets resolving within ~5 months
+                             # (sits in the 123d/186d gap: keeps near-term macro,
+                             #  drops the year-end geopolitical + long-horizon cluster)
 BB_MACRO_DELTA_PP = 8.0      # min |delta| (pp) for the Big Brain macro callout
 
 # v2.6 Value screen — quality+value names trading near their 52-week low.
@@ -1650,6 +1653,27 @@ def compute_prediction_moves(prior: list[dict], current: list[dict]) -> list[dic
         delta = (r["probability"] - p) if (p is not None and p == p) else None
         rows.append({**r, "delta_pp": delta})
     return rows
+
+
+def _within_horizon(end_date, now, max_days: int) -> bool:
+    """v3.0 #6: keep a prediction market only if it resolves soon. A missing or
+    unparseable `end_date` is kept (can't judge -> don't silently drop). A real
+    date is kept iff it resolves no more than `max_days` ahead of `now`, so a
+    far-dated market (e.g. a December election in June) is filtered out."""
+    if not end_date:
+        return True
+    ts = pd.to_datetime(end_date, utc=True, errors="coerce")
+    if ts is None or ts != ts:        # NaT / unparseable
+        return True
+    return (ts - now).days <= max_days
+
+
+def filter_predictions_horizon(rows: list[dict], max_days: int = PRED_HORIZON_DAYS,
+                               now=None) -> list[dict]:
+    """Drop markets resolving further than `max_days` out (evaluated at render
+    time, so the window stays current). Keeps undated rows + all other fields."""
+    now = now if now is not None else pd.Timestamp.now(tz="UTC")
+    return [r for r in rows if _within_horizon(r.get("end_date"), now, max_days)]
 
 
 def _universe_cache_date(path: "Path | None" = None):
@@ -11846,6 +11870,9 @@ def main(demo: bool = False, watchlist_only: bool = False,
         pred_current = load_predictions_cache()
     pred_prior = load_predictions_cache(PRIOR_PREDICTIONS_CACHE)
     prediction_rows = compute_prediction_moves(pred_prior, pred_current)
+    # v3.0 #6: drop far-dated markets (resolve > ~3 months out) so the panel
+    # stays relevant; evaluated at render time so the window stays current.
+    prediction_rows = filter_predictions_horizon(prediction_rows)
     if prediction_rows:
         print(f"Market expectations: {len(prediction_rows)} markets "
               f"({'live' if not demo else 'cached'})")

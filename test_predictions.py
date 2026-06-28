@@ -199,3 +199,42 @@ def test_render_bigbrain_passes_macro_html():
     html = build.render_bigbrain([], "05 Jun 2026",
                                  macro_html='<div class="bb-macro">X</div>')
     assert "bb-macro" in html
+
+
+# --- v3.0 #6: horizon filter (drop far-dated markets) ------------------------
+import pandas as pd
+
+_NOW = pd.Timestamp("2026-06-28", tz="UTC")
+
+
+def _iso(days):
+    return (_NOW + pd.Timedelta(days=days)).isoformat()
+
+
+def test_within_horizon_keeps_missing_or_unparseable_date():
+    assert build._within_horizon("", _NOW, 90) is True
+    assert build._within_horizon(None, _NOW, 90) is True
+    assert build._within_horizon("not-a-date", _NOW, 90) is True
+
+
+def test_within_horizon_keeps_near_drops_far():
+    assert build._within_horizon(_iso(30), _NOW, 90) is True
+    assert build._within_horizon(_iso(90), _NOW, 90) is True     # boundary inclusive
+    assert build._within_horizon(_iso(200), _NOW, 90) is False   # far -> drop
+
+
+def test_filter_predictions_horizon_drops_far_keeps_near_and_missing():
+    rows = [
+        {"theme": "CPI", "probability": 40, "end_date": _iso(20), "delta_pp": 1.0},
+        {"theme": "Ukraine elections", "probability": 5, "end_date": _iso(180)},
+        {"theme": "OpenEnded", "probability": 12, "end_date": ""},
+    ]
+    out = build.filter_predictions_horizon(rows, max_days=90, now=_NOW)
+    assert {r["theme"] for r in out} == {"CPI", "OpenEnded"}      # far one dropped
+    cpi = next(r for r in out if r["theme"] == "CPI")
+    assert cpi["delta_pp"] == 1.0 and cpi["probability"] == 40    # fields untouched
+
+
+def test_filter_predictions_horizon_default_cutoff():
+    # ~5 months: keeps near-term macro, drops the 186d+ year-end/geopolitical cluster
+    assert build.PRED_HORIZON_DAYS == 150
