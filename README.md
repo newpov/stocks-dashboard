@@ -144,8 +144,9 @@ then context, then details, then actions:
 ┌─ Header ──────────────────────────────────────────────────────────────┐
 │ Edit-layout · Palette toggle · Pocket lesson · Quiz · Desktop-view   │
 │ Hero subtitle: total + annualized return · TWR methodology           │
+│ Build line: last close · rebuilt · live version (read from CHANGELOG)│
 │ Unusual-volume chips (when any open name >2× vol with >1% move)      │
-│ Hero chart (basket vs SPY with vs-SPY area shading + GBP/USD bars)   │
+│ Hero chart: basket vs SPY + optional Nasdaq · vs-SPY shade · FX bars │
 │ 30-day rolling alpha sparkline + drawdown inset                      │
 │ 4 default stat cards: Sharpe / win rate / win-loss / avg upside      │
 │ (pick from 10 via edit-mode) · since-last-visit pill sits below      │
@@ -158,6 +159,12 @@ then context, then details, then actions:
 │ Colour-coded: red bleeding / amber hot / green / blue idea.         │
 └──────────────────────────────────────────────────────────────────────┘
 
+┌─ Value screen ────────────────────────────────────────────────────────┐
+│ S&P 500 names near a 52-week low that clear all 6 quality/value       │
+│ filters (cheap-vs-sector · FCF>0 · ROE>10% · rev growth · low D/E).   │
+│ Scorecard table, heat-shaded cells, BB cross-tag. Discovery-only.     │
+└───────────────────────────────────────────────────────────────────────┘
+
 ┌─ Industry outlook ─────────┬─ Market news ──────────────────────────┐
 │ 6 industries from universe │ Live finance headlines (Worker) or    │
 │ minus log.xlsx, top 3      │ build-time RSS (fallback). Source     │
@@ -166,6 +173,12 @@ then context, then details, then actions:
 │ card → info modal with     │                                       │
 │ every ticker in industry.  │                                       │
 └────────────────────────────┴───────────────────────────────────────┘
+
+┌─ Market expectations ─────────────────────────────────────────────────┐
+│ Prediction-market odds (Kalshi + Polymarket) for near-term macro      │
+│ events, with since-last-build deltas. Horizon-filtered (≤ ~5 months)  │
+│ so it stays focused on what actually moves. Reshuffle button.         │
+└───────────────────────────────────────────────────────────────────────┘
 
 ┌─ Main returns table ─────────────────────────────────────────────────┐
 │ All 185 positions. Columns: Ticker · Target · Upside · Analyst ·    │
@@ -179,6 +192,12 @@ then context, then details, then actions:
 │ Each card: ticker · BUY/HOLD/SELL · current price · upside % ·      │
 │ technical signal pill. Highlights analyst/technical divergence.     │
 └──────────────────────────────────────────────────────────────────────┘
+
+┌─ Watchlist ───────────────────────────────────────────────────────────┐
+│ Names you track but don't hold (watchlist.csv), each with an entry    │
+│ read: verdict + trigger chips + news cite. Auto-adds up to 4 names    │
+│ flagged by BOTH Value screen + Big Brain (shaded, "Value + BB").      │
+└───────────────────────────────────────────────────────────────────────┘
 
 ┌─ Rating moves ───────────────────────────────────────────────────────┐
 │ Target-price changes ≥ 5% and recommendation shifts since the last  │
@@ -196,6 +215,12 @@ then context, then details, then actions:
 │ Pairwise correlations across open positions: avg ρ (concentration   │
 │ score), most-correlated pairs, best diversifiers, and a histogram.  │
 └──────────────────────────────────────────────────────────────────────┘
+
+┌─ Signal map ──────────────────────────────────────────────────────────┐
+│ Beeswarm of open holdings along the bearish↔bullish signal axis,      │
+│ coloured by return — a fast read of what the tape says about the book.│
+│ Paired under diversification as the portfolio-lens pair.              │
+└───────────────────────────────────────────────────────────────────────┘
 
 ┌─ Industry attribution ───────────────────────────────────────────────┐
 │ Cost-weighted basket return decomposed by industry. Sits directly   │
@@ -240,6 +265,13 @@ A composed visualisation with several layers sharing one x-axis:
   (renormalised as positions enter, so opening a new position doesn't reset
   the line).
 - **Grey dashed line:** SPY benchmark, rebased to the same starting date.
+- **Dotted violet line (optional, v3.0):** the Nasdaq-100 (`QQQ`), **off by
+  default** — tap **Nasdaq** in the chart legend to show it, tap again to hide
+  (the choice is remembered, and it works on mobile). The basket is tech-heavy,
+  so the Nasdaq is often a more relevant visual comparator. **SPY stays *the*
+  benchmark**: the Δ badge, vs-SPY shading and alpha sparkline are unchanged —
+  QQQ is fetched dividend-adjusted + FX-clean and rebased exactly like SPY, so the
+  comparison is fair, and it is a display-only line.
 - **Vs-SPY area shading:** the area between the basket and SPY lines, painted
   green when basket is outperforming and red when underperforming. Crossover
   points split the shading at the exact moment the lead changes hands.
@@ -265,6 +297,9 @@ Beneath the main chart sit two inline sparklines:
   drawdown at each date over the full basket history. The header pill
   shows the current drawdown alongside the worst seen (e.g. `worst -15.6%`)
   so the eye can answer "how close are we to the prior trough?" at a glance.
+
+On narrow (mobile) screens the x-axis uses compact `Oct '24`-style labels and drops
+from 5 ticks to 4 so the dates never overlap.
 
 ### Pre-hero context: unusual volume chips
 
@@ -328,6 +363,8 @@ the real build appends, the demo skips. A pinned **macro callout** also appears
 above the board when a tracked prediction market moves ≥ 8pp build-over-build
 (see Market expectations).
 
+![Big Brain discovery board: idea and owned cards with one-line verdicts, evidence pills and a linked news headline, flipped 2:2 with arrows](docs/assets/demo-bigbrain.jpeg)
+
 ### Value screen — quality + value near a 52-week low (v2.6)
 
 A fundamentals lens (Big Brain reads technicals, Industry outlook reads returns;
@@ -355,6 +392,8 @@ positions, so it's not the panel for sizing up something you already own.
 **Refreshed monthly** (it rides the universe cache), so the subtitle reads
 "as of {date}" — the data is only as fresh as that monthly fetch.
 
+![Value screen scorecard: S&P 500 names near a 52-week low scored on cheap-vs-sector P/E, FCF, ROE, revenue growth and debt, with heat-shaded cells and BB cross-tags](docs/assets/demo-value-screen.jpeg)
+
 ### Watchlist — names you track, with an entry read (v2.7)
 
 Tickers you're following but **don't (yet) hold**, listed in **`watchlist.csv`**
@@ -378,6 +417,18 @@ Because watch names carry no position, no share counts or amounts are involved �
 it slots into the shapes-not-amounts model cleanly. (Want to *track performance*
 of a watchlist instead, with each name equal-weighted from its start? That's the
 separate `--watchlist-only` build mode below.)
+
+**Auto-surfaced 2-signal names (v3.0).** Beyond the names in your `watchlist.csv`,
+the module automatically adds up to **4** stocks flagged by **both** the Value
+screen **and** Big Brain — high-conviction discoveries you may not be tracking yet.
+They appear **first**, shaded, with a **`Value + BB`** badge, ahead of your manual
+names; a name you already track that *also* qualifies keeps its place but gains the
+validation badge. The picks are computed each build (reusing data already fetched
+for Big Brain — no extra network calls) and **nothing is written to
+`watchlist.csv`**. They get the full entry read (verdict + chips + cite) like any
+watch name.
+
+![Watchlist with auto-surfaced Value + BB cards (shaded, badged) ahead of manually tracked names, each with an entry verdict, trigger chips and a news cite](docs/assets/demo-watchlist-auto.jpeg)
 
 ### Market expectations — prediction-market sentiment (v2.3)
 
@@ -737,7 +788,7 @@ pattern for the same reason.
 stocks-dashboard/
 ├── README.md                          ← this file
 ├── LICENSE                            ← MIT
-├── CHANGELOG.md                       ← version history (v1.0 → v2.8)
+├── CHANGELOG.md                       ← version history (v1.0 → v3.0)
 ├── demo.html                          ← standalone self-contained demo (CI-rebuilt daily)
 ├── build.py                           ← the build pipeline
 ├── test_bigbrain.py                   ← pytest suite for Big Brain + signal map
