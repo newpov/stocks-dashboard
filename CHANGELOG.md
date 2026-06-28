@@ -14,10 +14,11 @@ than a barely-working prototype.
 
 ---
 
-## v3.0 — UX polish + relevance · 28 June 2026 *(in progress)*
+## v3.0 — UX polish + relevance · 28 June 2026
 
-Rolling v3.0 work; ships incrementally (no single tag yet). The header now shows
-this version, read live from the top of this changelog.
+A UX-polish + relevance release. The header now shows this version, read live from
+the top of this changelog. (The deferred v2.9.7 structural `build.py` refactor is
+*not* part of this tag — it ships separately, with no user-visible change.)
 
 ### Changed
 - **Watchlist is arrow-paged.** Instead of spilling 6+ names onto a second row,
