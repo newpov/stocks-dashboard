@@ -54,3 +54,8 @@ temp/
 # author can recover the setup on a new machine via `git clone`.
 daily_rebuild.log
 
+# Local-only build byproduct: records the cold-start rating seed date. CI never
+# commits it (the rolling data/analyst_history.parquet is the source of truth),
+# so the local copy from a full `python build.py` is just status-bar clutter.
+data/rating_seed.json
+
