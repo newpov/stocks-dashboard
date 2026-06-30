@@ -108,6 +108,34 @@ def test_value_screen_empty_universe():
     assert build.build_value_screen(pd.DataFrame(), log_tickers=set()) == []
 
 
+# --- v3.1 #2: FCF shown as a yield (FCF / market cap), not a bare "+" --------
+
+def test_value_screen_fcf_yield_computed_and_rendered():
+    uni = _uni([
+        {"ticker": "FCFY", "sector": "Tech", "name": "Yieldco", "current_price": 50.0,
+         "range52w_pct": 5, "pe": 10, "pb": 1.2, "roe": 0.20, "rev_growth": 0.05,
+         "fcf": 4.2e9, "market_cap": 1e11, "debt_to_equity": 50},
+    ])
+    rows = build.build_value_screen(uni, log_tickers=set(), min_pass=4)
+    r = _by_ticker(rows)["FCFY"]
+    assert abs(r["fcf_yield"] - 4.2) < 1e-6          # 4.2e9 / 1e11 * 100
+    assert r["fcf_positive"] is True                  # gate flag still present
+    html = build.render_value_screen(rows, "01 Jul 2026")
+    assert "4.2%" in html                             # detailed value, not bare "+"
+
+
+def test_value_screen_fcf_yield_nan_when_no_market_cap():
+    # market_cap missing -> yield NaN; the row still builds (no crash).
+    uni = _uni([
+        {"ticker": "NOMC", "sector": "Tech", "name": "NoCapco", "current_price": 50.0,
+         "range52w_pct": 5, "pe": 10, "pb": 1.2, "roe": 0.20, "rev_growth": 0.05,
+         "fcf": 1e9, "debt_to_equity": 50},
+    ])
+    rows = build.build_value_screen(uni, log_tickers=set(), min_pass=4)
+    r = _by_ticker(rows)["NOMC"]
+    assert r["fcf_yield"] != r["fcf_yield"]           # NaN
+
+
 # --- render -----------------------------------------------------------------
 
 def _vrow(t, pc=6, bb=False):

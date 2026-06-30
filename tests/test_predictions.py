@@ -2,6 +2,7 @@ import build
 
 
 def test_load_prediction_themes(tmp_path, monkeypatch):
+    # No `horizon` column -> every theme defaults to not-exempt.
     csv = tmp_path / "predictions.csv"
     csv.write_text("theme_label,source,series_or_tag\n"
                    "Fed decision,kalshi,KXFED\n"
@@ -9,9 +10,23 @@ def test_load_prediction_themes(tmp_path, monkeypatch):
     monkeypatch.setattr(build, "PREDICTIONS_CSV", csv)
     themes = build.load_prediction_themes()
     assert themes == [
-        {"theme": "Fed decision", "source": "kalshi", "key": "KXFED"},
-        {"theme": "Crash", "source": "polymarket", "key": "will-it-crash"},
+        {"theme": "Fed decision", "source": "kalshi", "key": "KXFED",
+         "horizon_exempt": False},
+        {"theme": "Crash", "source": "polymarket", "key": "will-it-crash",
+         "horizon_exempt": False},
     ]
+
+
+def test_load_prediction_themes_horizon_keep_flag(tmp_path, monkeypatch):
+    # `horizon=keep` marks a tail-risk market exempt from the resolve-date filter.
+    csv = tmp_path / "predictions.csv"
+    csv.write_text("theme_label,source,series_or_tag,horizon\n"
+                   "Fed decision,kalshi,KXFED,\n"
+                   "China-Taiwan clash,polymarket,china-taiwan,keep\n", encoding="utf-8")
+    monkeypatch.setattr(build, "PREDICTIONS_CSV", csv)
+    themes = build.load_prediction_themes()
+    assert themes[0]["horizon_exempt"] is False           # blank -> filtered
+    assert themes[1]["horizon_exempt"] is True            # keep  -> exempt
 
 
 def test_pred_num():
@@ -238,3 +253,33 @@ def test_filter_predictions_horizon_drops_far_keeps_near_and_missing():
 def test_filter_predictions_horizon_default_cutoff():
     # ~5 months: keeps near-term macro, drops the 186d+ year-end/geopolitical cluster
     assert build.PRED_HORIZON_DAYS == 150
+
+
+# --- tail-risk exemption: geopolitical markets bypass the horizon filter --------
+
+def test_filter_horizon_exempt_by_theme_set_keeps_far_dated():
+    # A far-dated geopolitical market is kept when its theme is in exempt_themes
+    # (this path covers cached records that predate the horizon_exempt field).
+    rows = [
+        {"theme": "CPI", "probability": 40, "end_date": _iso(20)},
+        {"theme": "China invades Taiwan", "probability": 6, "end_date": _iso(184)},
+    ]
+    out = build.filter_predictions_horizon(
+        rows, max_days=90, now=_NOW, exempt_themes={"China invades Taiwan"})
+    assert {r["theme"] for r in out} == {"CPI", "China invades Taiwan"}
+
+
+def test_filter_horizon_exempt_by_record_flag_keeps_far_dated():
+    # A record carrying horizon_exempt=True is kept regardless of resolve date.
+    rows = [{"theme": "Iran nuke", "probability": 6, "end_date": _iso(184),
+             "horizon_exempt": True}]
+    out = build.filter_predictions_horizon(rows, max_days=90, now=_NOW)
+    assert len(out) == 1
+
+
+def test_filter_horizon_non_exempt_far_still_dropped():
+    # Without an exemption, the far-dated market is still dropped (regression pin).
+    rows = [{"theme": "Random far market", "probability": 5, "end_date": _iso(184)}]
+    out = build.filter_predictions_horizon(rows, max_days=90, now=_NOW,
+                                           exempt_themes={"Something else"})
+    assert out == []

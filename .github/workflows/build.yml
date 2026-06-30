@@ -4,8 +4,11 @@ name: Scheduled rebuild
 #   - push to main (only when source files change; the bot's own demo.html /
 #     data commits use the default GITHUB_TOKEN and do NOT re-trigger workflows,
 #     so there's no infinite-loop risk here)
-#   - daily 08:00 UTC cron (~09:00 London BST) picks up the previous day's
-#     yfinance closes for the demo build.
+#   - daily 22:00 UTC cron runs AFTER the US close (20:00 UTC summer /
+#     21:00 UTC winter) so the latest yfinance bar is a fully SETTLED session
+#     for both London and US. An earlier (e.g. 08:00 UTC) run would stamp a
+#     same-day row the moment London opens while the US session is still
+#     pending, mislabelling an intraday bar as the "last close".
 #   - manual button via the Actions tab
 #
 # IMPORTANT: this workflow rebuilds BOTH the standalone `demo.html` (from
@@ -25,9 +28,10 @@ on:
       - 'basket.snapshot.csv'
       - 'watchlist.csv'
       - 'universe.csv'
+      - 'predictions.csv'
       - '.github/workflows/**'
   schedule:
-    - cron: '0 8 * * *'
+    - cron: '0 22 * * *'
   workflow_dispatch: {}
 
 permissions:

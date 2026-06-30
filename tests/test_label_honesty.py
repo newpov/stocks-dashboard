@@ -2,6 +2,7 @@
 misleading should now read honestly. Covers the deferred trio (analyst dispersion,
 rating cold-start, predictions as-of) plus regression pins for the pure-copy relabels."""
 import json
+from datetime import datetime, timezone
 
 import pandas as pd
 
@@ -103,3 +104,33 @@ def test_diversification_flags_small_sample():
                          "currency": ["USD"] * 3}, index=["A", "B", "C"])
     html = build.render_basket_diversification(data, meta)
     assert "only 3 names" in html
+
+
+# --- M-CLOSE: "last close" must not label an unsettled same-day intraday bar ---
+# A mixed London+US basket gets a row stamped for *today* as soon as London opens
+# (07:00 UTC) while the US session for that day is still pending (closes ~20:00 UTC).
+# Labelling that provisional row "last close" is dishonest, so a same-(UTC)-day row
+# is only accepted once US markets have settled.
+
+def test_last_settled_skips_unsettled_today():
+    # Fri settled + today's (Mon) provisional row; build runs midday pre-US-close.
+    idx = pd.to_datetime(["2026-06-26", "2026-06-29"])
+    now = datetime(2026, 6, 29, 12, 32, tzinfo=timezone.utc)
+    assert build.last_settled_close_date(idx, now=now) == pd.Timestamp("2026-06-26")
+
+
+def test_last_settled_accepts_today_after_close():
+    idx = pd.to_datetime(["2026-06-26", "2026-06-29"])
+    now = datetime(2026, 6, 29, 22, 0, tzinfo=timezone.utc)   # after US close
+    assert build.last_settled_close_date(idx, now=now) == pd.Timestamp("2026-06-29")
+
+
+def test_last_settled_prior_day_row_always_settled():
+    # Last row is strictly before today -> settled regardless of the hour.
+    idx = pd.to_datetime(["2026-06-25", "2026-06-26"])
+    now = datetime(2026, 6, 29, 8, 0, tzinfo=timezone.utc)
+    assert build.last_settled_close_date(idx, now=now) == pd.Timestamp("2026-06-26")
+
+
+def test_last_settled_empty_index_is_none():
+    assert build.last_settled_close_date(pd.to_datetime([])) is None

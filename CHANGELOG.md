@@ -14,6 +14,20 @@ than a barely-working prototype.
 
 ---
 
+## v3.1 — Freshness honesty + relevance fixes · 30 June 2026
+
+A small, user-flagged correctness + clarity pass.
+
+- **"Last close" label honesty + cron** — the footer now reads the last *settled* session via `last_settled_close_date()`, not whatever row yfinance has stamped for today. A mixed London+US basket gets a same-day row the moment London opens (07:00 UTC) while the US session is still pending, so an early build would mislabel an intraday/provisional bar a "close". The daily CI cron also moves `0 8` → `0 22` UTC (after the US close) so the latest bar is always a fully settled session.
+- **Market expectations: tail-risk markets restored** — every Polymarket geopolitical market (China–Taiwan, Iran, Ukraine, …) was being silently dropped by the v3.0 150-day horizon filter because they all resolve 31 Dec 2026. A new `horizon` column in `predictions.csv` (`keep`) exempts tail-risk/geopolitical themes — live, market-moving risks now even when they resolve at year-end — while macro stays horizon-filtered for relevance. `filter_predictions_horizon(exempt_themes=…)` also rescues cached records by theme label. Panel: 6 → 15 markets.
+- **Per-module "as of" dates** — industry outlook (universe-cache fetch date) plus re-entry, detractors and the signal map (settled-close date) now carry an honest "as of &lt;date&gt;", so each panel states its own data freshness instead of leaving the reader to guess.
+- **Value screen: FCF yield** — the FCF column now shows a real **yield** (FCF / market cap, e.g. 4.2%) with strength shading, instead of a bare "+" for every row. Header → "FCF yld".
+- **Signal map: magnitude via opacity** — dot opacity now scales with |return| (a −1% and a −50% red dot no longer read identically); fixed radius is kept so the beeswarm packing and readability are untouched. Subtitle: "depth = size of move".
+- **Repo tidy** — the 25 `test_*.py` files moved into `tests/` (with a minimal `pytest.ini`: `testpaths = tests`, `pythonpath = .`) so the repo root — and the README — sit near the top when browsing. `python -m pytest -q` still runs from the root unchanged (313 tests).
+- Quiz "This month" performance tracking confirmed already resetting on calendar-month flip — no change needed.
+
+---
+
 ## v3.0 — UX polish + relevance · 28 June 2026
 
 A UX-polish + relevance release. The header now shows this version, read live from

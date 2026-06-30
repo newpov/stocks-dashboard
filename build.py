@@ -1479,7 +1479,14 @@ def _pred_num(x) -> float:
 
 
 def load_prediction_themes() -> list[dict]:
-    """Read predictions.csv -> [{theme, source, key}]. Empty/missing -> []."""
+    """Read predictions.csv -> [{theme, source, key, horizon_exempt}]. Empty/missing -> [].
+
+    The optional `horizon` column flags tail-risk/geopolitical markets (value
+    "keep") that should bypass the resolve-date horizon filter: these stay
+    relevant as live risks even when they only resolve at year-end. A missing
+    column or a blank cell -> not exempt, so macro markets keep their relevance
+    window.
+    """
     if not PREDICTIONS_CSV.exists():
         return []
     df = pd.read_csv(PREDICTIONS_CSV, dtype=str).fillna("")
@@ -1491,8 +1498,10 @@ def load_prediction_themes() -> list[dict]:
         theme = str(r["theme_label"]).strip()
         source = str(r["source"]).strip().lower()
         key = str(r["series_or_tag"]).strip()
+        exempt = str(r.get("horizon", "")).strip().lower() == "keep"
         if theme and source and key:
-            out.append({"theme": theme, "source": source, "key": key})
+            out.append({"theme": theme, "source": source, "key": key,
+                        "horizon_exempt": exempt})
     return out
 
 
@@ -1563,6 +1572,7 @@ def fetch_kalshi(themes: list[dict]) -> list[dict]:
             continue
         rec = _kalshi_pick_active(markets, t["theme"], t["key"])
         if rec:
+            rec["horizon_exempt"] = bool(t.get("horizon_exempt"))
             out.append(rec)
     return out
 
@@ -1603,6 +1613,7 @@ def fetch_polymarket(themes: list[dict]) -> list[dict]:
             continue
         rec = _parse_polymarket_market(markets[0], t["theme"])
         if rec:
+            rec["horizon_exempt"] = bool(t.get("horizon_exempt"))
             out.append(rec)
     return out
 
@@ -1690,11 +1701,22 @@ def _within_horizon(end_date, now, max_days: int) -> bool:
 
 
 def filter_predictions_horizon(rows: list[dict], max_days: int = PRED_HORIZON_DAYS,
-                               now=None) -> list[dict]:
+                               now=None, exempt_themes=None) -> list[dict]:
     """Drop markets resolving further than `max_days` out (evaluated at render
-    time, so the window stays current). Keeps undated rows + all other fields."""
+    time, so the window stays current). Keeps undated rows + all other fields.
+
+    Tail-risk/geopolitical markets are exempt from the horizon: a row is kept
+    regardless of resolve date if it carries a truthy `horizon_exempt` flag OR
+    its theme is in `exempt_themes`. The theme-set path lets the exemption apply
+    to cached records that predate the flag (matched by theme label), so the fix
+    works against the committed predictions cache without regenerating it."""
     now = now if now is not None else pd.Timestamp.now(tz="UTC")
-    return [r for r in rows if _within_horizon(r.get("end_date"), now, max_days)]
+    exempt = exempt_themes or set()
+    return [
+        r for r in rows
+        if r.get("horizon_exempt") or r.get("theme") in exempt
+        or _within_horizon(r.get("end_date"), now, max_days)
+    ]
 
 
 def _universe_cache_date(path: "Path | None" = None):
@@ -3684,7 +3706,8 @@ def render_detractors_strategy(contrib: pd.DataFrame, returns: pd.DataFrame,
                                meta: pd.DataFrame, n: int = 8,
                                quant_metrics: pd.DataFrame | None = None,
                                prices: pd.DataFrame | None = None,
-                               prices_native: pd.DataFrame | None = None) -> str:
+                               prices_native: pd.DataFrame | None = None,
+                               as_of: str = "") -> str:
     """Full-width 'Top detractors' panel with technical signal + analyst rec +
     suggested action. Only open positions — you can't exit a closed one.
 
@@ -3807,12 +3830,13 @@ def render_detractors_strategy(contrib: pd.DataFrame, returns: pd.DataFrame,
             f'</div>'
         )
     mobile_html = "".join(mobile_cards)
+    as_of_note = f" &middot; as of {as_of}" if as_of else ""
     return f"""<section class="detractors-section">
   <div class="dt-head-row">
     <h3>Top detractors &mdash; exit strategy <span class="muted">({len(bot)})</span></h3>
     <p class="muted">Heaviest drags on your basket return. Suggested action joins
     the technical signal with Wall Street consensus &mdash; agreement = high conviction,
-    divergence = review thesis. <strong>Not financial advice</strong>; build-time analytics only.</p>
+    divergence = review thesis. <strong>Not financial advice</strong>; build-time analytics only.{as_of_note}</p>
   </div>
   <div class="dt-scroll">
     <table class="dt-table">
@@ -4306,7 +4330,7 @@ _REC_LABELS = {
 }
 
 
-def render_analyst_signals(rows: list[dict], candidate_pool_size: int) -> str:
+def render_analyst_signals(rows: list[dict], candidate_pool_size: int, as_of: str = "") -> str:
     if not rows and candidate_pool_size == 0:
         return ""
     cards = []
@@ -4373,12 +4397,13 @@ def render_analyst_signals(rows: list[dict], candidate_pool_size: int) -> str:
         '<div class="an-empty">No closed positions have analyst targets — '
         'panel will populate once yfinance returns target prices for at least one.</div>'
     )
+    as_of_note = f" &middot; as of {as_of}" if as_of else ""
     return f"""<section class="analyst-section">
   <div class="an-head-row">
     <h3>Re-entry ideas <span class="muted">({shown})</span></h3>
     <p class="muted">{counter} &middot; Wall Street mean target vs latest close, for closed
     positions only (stocks you previously held). Cached {ANALYST_TTL_DAYS}d via yfinance.
-    Click a card for the full chart.</p>
+    Click a card for the full chart.{as_of_note}</p>
   </div>
   {body}
 </section>"""
@@ -5480,11 +5505,15 @@ def render_market_expectations(rows: list[dict], as_of_str: str) -> str:
             f'data-me-total="{len(items)}">' + "".join(items) + '</div></section>')
 
 
-def render_signal_strip(data: list[dict]) -> str:
+SIGNAL_MAG_FULL_PCT = 40.0   # |return| (%) at which a Signal-map dot reaches full opacity
+
+
+def render_signal_strip(data: list[dict], as_of: str = "") -> str:
     """Beeswarm: every open position placed along a bearish<->bullish technical
     signal axis, jittered vertically so none overlap, coloured by return (green
-    up / red down). Dots are clickable + carry a hover tooltip. The extremes get
-    text labels. Renders nothing for <2 positions."""
+    up / red down) with opacity scaling to the SIZE of the move (so a -1% and a
+    -50% dot no longer read identically). Dots are clickable + carry a hover
+    tooltip. The extremes get text labels. Renders nothing for <2 positions."""
     if not data or len(data) < 2:
         return ""
     W, H = 920, 300
@@ -5523,9 +5552,14 @@ def render_signal_strip(data: list[dict]) -> str:
         tk = _esc(d["ticker"])
         tone = "bullish" if d["signal"] >= 0 else "bearish"
         tip = f'{d["ticker"]} · {tone} signal · {d["ret"]:+.1f}%'
+        # Opacity encodes |return|: a flat name stays faint, a big mover saturates,
+        # so the *magnitude* (not just direction) is legible. Fixed radius is kept
+        # so the beeswarm packing — which assumes a constant r — is untouched.
+        op = 0.40 + min(1.0, abs(float(d["ret"])) / SIGNAL_MAG_FULL_PCT) * 0.60
         dots.append(
             f'<circle class="q-dot {cls} ticker-clickable" data-ticker="{tk}" '
-            f'cx="{x:.1f}" cy="{y:.1f}" r="{R:.0f}"><title>{_esc(tip)}</title></circle>'
+            f'cx="{x:.1f}" cy="{y:.1f}" r="{R:.0f}" style="opacity:{op:.2f}">'
+            f'<title>{_esc(tip)}</title></circle>'
         )
         if d["ticker"] in label_tkrs:
             anchor = "start" if d["signal"] >= 0 else "end"
@@ -5542,11 +5576,13 @@ def render_signal_strip(data: list[dict]) -> str:
         f'<text class="q-q" x="{PX1}" y="{H - 12}" text-anchor="end">bullish tape &#9654;</text>'
         + "".join(dots) + '</svg>'
     )
+    as_of_html = f' &middot; as of {as_of}' if as_of else ''
     return (
         '<section class="quadrant-section">'
         '<div class="q-head"><h3>Signal map</h3>'
         '<span class="q-sub">each open position by technical signal &middot; '
-        'colour = return (green up / red down) &middot; hover or tap a dot</span></div>'
+        'colour = return (green up / red down), depth = size of move &middot; '
+        f'hover or tap a dot{as_of_html}</span></div>'
         + svg + '</section>'
     )
 
@@ -5750,7 +5786,7 @@ def build_industry_outlook(universe_outlook: pd.DataFrame | None,
     return groups[:top_industries]
 
 
-def render_industry_outlook(groups: list[dict], universe_size: int) -> str:
+def render_industry_outlook(groups: list[dict], universe_size: int, as_of: str = "") -> str:
     if not groups:
         return ""
     cards = []
@@ -5796,10 +5832,11 @@ def render_industry_outlook(groups: list[dict], universe_size: int) -> str:
             f'<div class="io-stocks">{"".join(stock_rows)}</div>'
             f'</div>'
         )
+    as_of_note = f" &middot; as of {as_of}" if as_of else ""
     return f"""<section class="industry-section">
   <div class="io-head-row">
     <h3>Industry outlook <span class="muted">({len(groups)})</span></h3>
-    <p class="muted">12-mo return leaders from <code>universe.csv</code> ({universe_size} stocks), excluding everything in <code>log.xlsx</code>. Refreshed monthly.</p>
+    <p class="muted">12-mo return leaders from <code>universe.csv</code> ({universe_size} stocks), excluding everything in <code>log.xlsx</code>. Refreshed monthly{as_of_note}.</p>
   </div>
   <div class="io-grid">{''.join(cards)}</div>
 </section>"""
@@ -5856,6 +5893,8 @@ def build_value_screen(universe_outlook: "pd.DataFrame | None",
         f_cheap = bool(pe == pe and pe > 0 and med is not None and pe < med)
         pe_disc = ((med - pe) / med) if (med and pe == pe and pe > 0) else float("nan")
         fcf = _n(r.get("fcf"));         f_fcf = bool(fcf == fcf and fcf > 0)
+        mc = _n(r.get("market_cap"))
+        fcf_yield = (fcf / mc * 100.0) if (fcf == fcf and mc == mc and mc > 0) else float("nan")
         roe = _n(r.get("roe"));         f_roe = bool(roe == roe and roe > VALUE_MIN_ROE)
         rev = _n(r.get("rev_growth"));  f_rev = bool(rev == rev and rev > 0)
         de_raw = _n(r.get("debt_to_equity"))
@@ -5871,7 +5910,8 @@ def build_value_screen(universe_outlook: "pd.DataFrame | None",
             "price": _n(r.get("current_price")),
             "pe": pe, "sector_median_pe": med, "pe_discount": pe_disc,
             "pb": _n(r.get("pb")), "roe": roe, "rev_growth": rev,
-            "fcf_positive": f_fcf, "debt_to_equity": de, "range52w_pct": r52,
+            "fcf_positive": f_fcf, "fcf_yield": fcf_yield,
+            "debt_to_equity": de, "range52w_pct": r52,
             "pass_count": pass_count, "passed": passed, "is_bb_idea": tkr in bb,
         })
     rows.sort(key=lambda x: (
@@ -5933,7 +5973,7 @@ def render_value_screen(rows: list[dict], as_of_str: str) -> str:
 
     pe_lo, pe_hi = _rng("pe");  pb_lo, pb_hi = _rng("pb");  roe_lo, roe_hi = _rng("roe")
     rev_lo, rev_hi = _rng("rev_growth");  de_lo, de_hi = _rng("debt_to_equity")
-    w_lo, w_hi = _rng("range52w_pct")
+    w_lo, w_hi = _rng("range52w_pct");  fy_lo, fy_hi = _rng("fcf_yield")
 
     body = []
     for r in shown:
@@ -5941,8 +5981,12 @@ def render_value_screen(rows: list[dict], as_of_str: str) -> str:
         row_cls = 'vs-row vs-bb' if r.get("is_bb_idea") else 'vs-row'
         price = r.get("price")
         price_html = f'<span class="vs-price">${price:,.2f}</span>' if (price is not None and price == price) else ''
-        fcf_html = ('<span class="vs-pass">+</span>' if r.get("fcf_positive")
-                    else '<span class="vs-fail">&minus;</span>')
+        fcf_y = r.get("fcf_yield")
+        if fcf_y is not None and fcf_y == fcf_y:
+            fy_cls = "vs-pass" if fcf_y > 0 else "vs-fail"
+            fcf_html = f'<span class="{fy_cls}">{fcf_y:.1f}%</span>'
+        else:
+            fcf_html = '<span class="vs-fail">&mdash;</span>'
         pe, pb, roe = r.get("pe"), r.get("pb"), r.get("roe")
         rev, de, w = r.get("rev_growth"), r.get("debt_to_equity"), r.get("range52w_pct")
         pass_cls = "vs-pass" if r["pass_count"] >= 6 else "vs-mid"
@@ -5954,7 +5998,7 @@ def render_value_screen(rows: list[dict], as_of_str: str) -> str:
             f'<td class="num vs-cell vs-c-pb" style="{_heat(pb, pb_lo, pb_hi, invert=True)}">{_num(pb)}</td>'
             f'<td class="num vs-cell vs-c-roe" style="{_heat(roe, roe_lo, roe_hi)}">{_pct(roe)}</td>'
             f'<td class="num vs-cell vs-c-rev" style="{_heat(rev, rev_lo, rev_hi)}">{_pct(rev)}</td>'
-            f'<td class="num vs-cell vs-c-fcf">{fcf_html}</td>'
+            f'<td class="num vs-cell vs-c-fcf" style="{_heat(r.get("fcf_yield"), fy_lo, fy_hi)}">{fcf_html}</td>'
             f'<td class="num vs-cell vs-c-de" style="{_heat(de, de_lo, de_hi, invert=True)}">{_num(de, 2)}</td>'
             f'<td class="num vs-cell vs-c-52w" style="{_heat(w, w_lo, w_hi, invert=True, rgb="245,158,11")}">{_num(w, 0)}%</td>'
             f'<td class="num {pass_cls} vs-passcount vs-c-pass">{r["pass_count"]}/6</td>'
@@ -5979,7 +6023,7 @@ def render_value_screen(rows: list[dict], as_of_str: str) -> str:
               '<th class="num" title="Price/book ratio. Lower is cheaper relative to book value.">P/B</th>'
               '<th class="num" title="Return on equity — profitability. Passes above 10%.">ROE</th>'
               '<th class="num" title="Year-over-year revenue growth. Passes when positive.">Rev</th>'
-              '<th class="num" title="Free cash flow. Passes when positive (the + sign).">FCF</th>'
+              '<th class="num" title="Free-cash-flow yield = FCF / market cap. Higher = more cash generated per dollar of market value. The 6-filter gate still requires positive FCF.">FCF yld</th>'
               '<th class="num" title="Debt / equity. Passes below 1.5.">D/E</th>'
               '<th class="num" title="Where the price sits in its 52-week range: 0% = at the low. Required gate: within 10% of the low.">52w</th>'
               '<th class="num" title="How many of the six filters this name passed.">Pass</th>'
@@ -6671,6 +6715,31 @@ def build_aux_payload(returns: pd.DataFrame, prices: pd.DataFrame,
     return out
 
 
+def last_settled_close_date(index, now=None, settled_hour_utc=21):
+    """Date of the last SETTLED trading session in ``index``.
+
+    A mixed London+US basket gets a row stamped for *today* (UTC) as soon as
+    London opens (07:00 UTC), while the US session for that day has not closed
+    yet (US close ~20:00 UTC summer / 21:00 UTC winter). Treating that row's
+    date as a "close" is misleading — the bulk of the basket still carries the
+    prior settled close. So a row dated today is only accepted once US markets
+    have settled (``now`` hour >= ``settled_hour_utc``); otherwise we step back
+    to the last strictly-earlier date. Returns ``None`` for an empty index, and
+    falls back to the final row if every row is today's unsettled bar.
+    """
+    if len(index) == 0:
+        return None
+    if now is None:
+        now = datetime.now(timezone.utc)
+    today = now.date()
+    today_settled = now.hour >= settled_hour_utc
+    for ts in reversed(index):
+        d = ts.date() if hasattr(ts, "date") else ts
+        if d < today or (d == today and today_settled):
+            return ts
+    return index[-1]
+
+
 def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
                 basket: pd.Series, bench: pd.Series, contrib: pd.DataFrame,
                 transactions: pd.DataFrame, signals: pd.DataFrame,
@@ -6700,6 +6769,14 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
                 auto_tickers: "list[str] | None" = None) -> str:
     weekly = prices.resample("W-FRI").last().ffill()
     defs_html = render_svg_defs()
+    # v3.1 #1: per-module "as of" dates. Price/return-derived modules (detractors,
+    # re-entry, signal map) are as fresh as the last SETTLED close; universe-derived
+    # modules (industry outlook, value screen) are only as fresh as the monthly
+    # universe-cache fetch. Computed once here and reused (incl. the footer).
+    _settled = last_settled_close_date(prices.index)
+    close_as_of = (_settled if _settled is not None else prices.index[-1]).strftime("%d %b %Y")
+    _uni_date = _universe_cache_date()
+    uni_as_of = (_uni_date.strftime("%d %b %Y") if _uni_date is not None else close_as_of)
     table_html = render_table(returns, weekly, meta, signals,
                               analyst=analyst if analyst is not None else None)
     detractors_html = render_detractors_strategy(
@@ -6709,6 +6786,7 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
         quant_metrics=quant_metrics,
         prices=prices,
         prices_native=prices_native,
+        as_of=close_as_of,
     )
     attribution_rows, basket_avg = build_industry_attribution(returns, meta)
     attribution_html = render_industry_attribution(attribution_rows, basket_avg)
@@ -6729,7 +6807,7 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     analyst_rows = (build_analyst_payload(candidates, analyst, prices_native, meta,
                                           signals=signals, quant_metrics=quant_metrics)
                     if analyst is not None and not analyst.empty else [])
-    analyst_html = render_analyst_signals(analyst_rows, len(candidates)) if (analyst_rows or candidates) else ""
+    analyst_html = render_analyst_signals(analyst_rows, len(candidates), as_of=close_as_of) if (analyst_rows or candidates) else ""
     # Industry outlook — universe-only, excluding everything in log.xlsx
     log_tickers_set = set(transactions.ticker.unique().tolist()) if not transactions.empty else set()
     industry_groups = build_industry_outlook(
@@ -6737,7 +6815,7 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
         log_tickers=log_tickers_set,
     )
     universe_count = (len(universe_outlook) if universe_outlook is not None else 0)
-    industry_html = render_industry_outlook(industry_groups, universe_count)
+    industry_html = render_industry_outlook(industry_groups, universe_count, as_of=uni_as_of)
     news_html = render_news(news_items or [])
 
     # Basket diversification — 6-month pairwise correlation summary across
@@ -6751,7 +6829,9 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     ccy_exposure_rows = compute_currency_exposure(returns, meta)
     ccy_exposure_html = render_currency_exposure(ccy_exposure_rows)
 
-    latest_date = prices.index[-1].strftime("%d %b %Y")
+    # "last close" = the last SETTLED session (computed once up top as close_as_of),
+    # not whatever row yfinance has stamped for today.
+    latest_date = close_as_of
     built = datetime.now(timezone.utc).strftime("%d %b %Y &middot; %H:%M UTC")
     _dash_version = _dashboard_version()
     version_html = (f' &middot; <span class="build-ver">v{_esc(_dash_version)}</span>'
@@ -6793,7 +6873,7 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     _pred_asof = next((r.get("fetched_at") for r in (prediction_rows or [])
                        if r.get("fetched_at")), latest_date)
     market_expectations_html = render_market_expectations(prediction_rows or [], _pred_asof)
-    quadrant_html = render_signal_strip(build_signal_strip_data(returns, quant_metrics, signals))
+    quadrant_html = render_signal_strip(build_signal_strip_data(returns, quant_metrics, signals), as_of=close_as_of)
 
     # v2.6 Value screen — fundamental quality+value names near a 52-week low.
     # New ideas only (excludes held); cross-tags names Big Brain also flagged.
@@ -6803,12 +6883,9 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
         value_rows = build_value_screen(universe_outlook, log_tickers=log_tickers_set,
                                         bb_idea_tickers=_bb_idea_tkrs)
     # "as of" = the universe cache's last refresh (the monthly fetch), not today,
-    # since the screen's data is only as fresh as that fetch. Use the embedded
-    # cache_date (NOT mtime, which CI resets every run → would always read "today"
-    # on month-old data, the exact M-VAL/M-IND staleness mislabel).
-    _uni_date = _universe_cache_date()
-    value_as_of = (_uni_date.strftime("%d %b %Y") if _uni_date is not None else latest_date)
-    value_html = render_value_screen(value_rows, value_as_of)
+    # since the screen's data is only as fresh as that fetch (computed once up top
+    # as uni_as_of from the embedded cache_date, NOT mtime which CI resets).
+    value_html = render_value_screen(value_rows, uni_as_of)
 
     n_total = len(returns)
     n_open = int((returns.status == "open").sum()) if not returns.empty else 0
@@ -12040,7 +12117,13 @@ def main(demo: bool = False, watchlist_only: bool = False,
     prediction_rows = compute_prediction_moves(pred_prior, pred_current)
     # v3.0 #6: drop far-dated markets (resolve > ~3 months out) so the panel
     # stays relevant; evaluated at render time so the window stays current.
-    prediction_rows = filter_predictions_horizon(prediction_rows)
+    # Tail-risk/geopolitical themes (predictions.csv horizon=keep) are exempt —
+    # they're live, market-moving risks now even when they resolve at year-end.
+    # Derive the exempt set from the theme config so it also rescues cached
+    # records that predate the horizon_exempt field (matched by theme label).
+    _pred_exempt = {t["theme"] for t in pred_themes if t.get("horizon_exempt")}
+    prediction_rows = filter_predictions_horizon(prediction_rows,
+                                                 exempt_themes=_pred_exempt)
     if prediction_rows:
         print(f"Market expectations: {len(prediction_rows)} markets "
               f"({'live' if not demo else 'cached'})")
