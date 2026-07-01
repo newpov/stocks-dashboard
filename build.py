@@ -7117,6 +7117,64 @@ def compute_doctor_report(*, returns, meta, basket, bench, contrib, signals,
             "metrics": metrics, "actions": actions, "as_of": as_of}
 
 
+def render_doctor(report: dict) -> str:
+    """Toggled inline panel: header + state badge + driver chips + diagnosis +
+    three action cards (Defend / Tune / Grow). All dynamic text is _esc-escaped."""
+    state = _esc(str(report.get("state", "")))
+    state_cls = {"Healthy": "ok", "Watch": "warn",
+                 "Needs attention": "bad"}.get(report.get("state", ""), "warn")
+    as_of = _esc(str(report.get("as_of", "")))
+    chips = "".join(
+        f'<span class="doc-chip doc-{_esc(d.get("tone","neutral"))}">{_esc(d.get("label",""))}</span>'
+        for d in (report.get("drivers") or [])
+    )
+    diagnosis = _esc(str(report.get("diagnosis", "")))
+
+    verb_tone = {"trim": "bad", "exit": "bad", "take profit": "warn",
+                 "add": "ok", "review": "neutral"}
+    lens_order = [("defend", "Defend"), ("tune", "Tune"), ("grow", "Grow")]
+    cards = []
+    for key, label in lens_order:
+        a = (report.get("actions") or {}).get(key) or {}
+        if a.get("none_reason"):
+            cards.append(
+                f'<div class="doc-card doc-card-none">'
+                f'<div class="doc-lens">{_esc(label)}</div>'
+                f'<div class="doc-none">{_esc(a["none_reason"])}</div></div>')
+            continue
+        verb = str(a.get("verb", ""))
+        tickers = " ".join(_esc(str(t)) for t in (a.get("tickers") or []))
+        head = f'<span class="doc-verb doc-{verb_tone.get(verb,"neutral")}">{_esc(verb)}</span>'
+        if tickers:
+            head += f' <span class="doc-tk">{tickers}</span>'
+        link = ""
+        if a.get("module_label"):
+            link = (f'<div class="doc-link">&rarr; see '
+                    f'{_esc(str(a["module_label"]))}</div>')
+        cards.append(
+            f'<div class="doc-card">'
+            f'<div class="doc-lens">{_esc(label)}</div>'
+            f'<div class="doc-head">{head}</div>'
+            f'<div class="doc-why">{_esc(str(a.get("why","")))}</div>'
+            f'{link}</div>')
+    cards_html = "\n".join(cards)
+
+    return f'''<section class="doctor-wrap" id="doctor-wrap" aria-hidden="true" aria-label="Basket check-up">
+  <div class="doctor-card">
+    <div class="doctor-head">
+      <span class="doctor-eyebrow">Basket check-up</span>
+      <span class="doctor-state doc-{state_cls}">{state}</span>
+      <span class="doctor-asof">as of {as_of}</span>
+    </div>
+    <div class="doctor-chips">{chips}</div>
+    <p class="doctor-diagnosis">{diagnosis}</p>
+    <div class="doctor-actions">
+{cards_html}
+    </div>
+  </div>
+</section>'''
+
+
 def last_settled_close_date(index, now=None, settled_hour_utc=21):
     """Date of the last SETTLED trading session in ``index``.
 

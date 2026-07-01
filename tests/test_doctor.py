@@ -320,3 +320,43 @@ def test_compute_doctor_report_never_raises_on_degenerate():
         industry_groups=[], value_rows=[], auto_tickers=[], bb_universe_obs=[],
         watchlist_payload={}, analyst_rows=[], as_of="x")
     assert "none_reason" in rep["actions"]["grow"]
+
+
+def _sample_report(**over):
+    base = {
+        "state": "Watch",
+        "drivers": [{"label": "Tech concentration (75%)", "tone": "warning"}],
+        "diagnosis": "The main thing to watch is Tech concentration (75%).",
+        "metrics": {"beta": 1.3},
+        "as_of": "30 Jun 2026",
+        "actions": {
+            "defend": {"lens": "defend", "tickers": ["AAA", "BBB"], "verb": "trim",
+                       "why": "Tech is 75% of your open names.",
+                       "module_key": "industry", "module_label": "Industry outlook"},
+            "tune": {"lens": "tune", "tickers": ["CCC"], "verb": "take profit",
+                     "why": "CCC overbought.", "module_key": "signal",
+                     "module_label": "Signal map"},
+            "grow": {"lens": "grow", "none_reason": "Nothing compelling to add."},
+        },
+    }
+    base.update(over)
+    return base
+
+
+def test_render_doctor_has_panel_state_and_three_cards():
+    html = build.render_doctor(_sample_report())
+    assert 'id="doctor-wrap"' in html
+    assert "Basket check-up" in html
+    assert "Watch" in html
+    assert "Defend" in html and "Tune" in html and "Grow" in html
+    assert "as of 30 Jun 2026" in html
+    assert "Nothing compelling to add." in html   # honest no-pick rendered
+
+
+def test_render_doctor_escapes_adversarial_text():
+    rep = _sample_report()
+    rep["actions"]["defend"]["why"] = '<img src=x onerror=alert(1)>'
+    rep["actions"]["defend"]["tickers"] = ['<script>']
+    html = build.render_doctor(rep)
+    assert "<img src=x" not in html and "<script>" not in html
+    assert "&lt;" in html
