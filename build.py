@@ -6770,6 +6770,33 @@ def pct_open_underwater(returns: pd.DataFrame) -> float:
     return under / n * 100.0
 
 
+def sector_effective_n(returns: pd.DataFrame, meta: pd.DataFrame) -> dict:
+    """Herfindahl concentration over OPEN-position sector NAME-COUNTS (the
+    basket is equal-weight, so each open name contributes 1 unit). Reports the
+    effective number of sectors (1/HHI) plus the dominant sector + its share."""
+    empty = {"hhi": float("nan"), "effective_n": float("nan"),
+             "top_sector": "", "top_share": float("nan"), "n_sectors": 0}
+    if returns is None or returns.empty or "status" not in returns.columns:
+        return empty
+    open_tickers = returns[returns["status"] == "open"].index.tolist()
+    if not open_tickers:
+        return empty
+    counts: dict[str, int] = {}
+    for t in open_tickers:
+        sec = ""
+        if meta is not None and t in meta.index:
+            sec = str(meta.loc[t, "sector"] or "").strip()
+        sec = sec or "Other"
+        counts[sec] = counts.get(sec, 0) + 1
+    total = sum(counts.values())
+    weights = {s: c / total for s, c in counts.items()}
+    hhi = sum(w * w for w in weights.values())
+    top_sector, top_share = max(weights.items(), key=lambda kv: kv[1])
+    return {"hhi": hhi, "effective_n": (1.0 / hhi if hhi > 0 else float("nan")),
+            "top_sector": top_sector, "top_share": top_share,
+            "n_sectors": len(counts)}
+
+
 def last_settled_close_date(index, now=None, settled_hour_utc=21):
     """Date of the last SETTLED trading session in ``index``.
 
