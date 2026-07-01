@@ -75,3 +75,28 @@ def test_compute_stress_factors_excludes_closed_and_missing():
     meta = _meta_df([("AAA", "Tech", "USD")])
     returns = pd.DataFrame([{"status": "closed", "total_pct": 5.0, "weight": 0.0}], index=["AAA"])
     assert build.compute_stress_factors(prices, spy, qqq, meta, returns) == []
+
+
+def test_estimate_move_two_factors_plus_fx():
+    f_usd = {"b_mkt": 1.5, "b_tech": 0.5, "ccy": "USD"}
+    sc = {"spy": -20, "tech": -10, "usd": 5}
+    # 1.5*-20 + 0.5*-10 + 5(USD) = -30 -5 +5 = -30
+    assert build.estimate_move(f_usd, sc, "GBP") == pytest.approx(-30.0)
+    f_gbp = {"b_mkt": 1.5, "b_tech": 0.5, "ccy": "GBP"}     # base ccy -> no FX term
+    assert build.estimate_move(f_gbp, sc, "GBP") == pytest.approx(-35.0)
+    f_eur = {"b_mkt": 1.0, "b_tech": 0.0, "ccy": "EUR"}     # non-USD foreign -> no USD term
+    assert build.estimate_move(f_eur, sc, "GBP") == pytest.approx(-20.0)
+
+
+def test_estimate_move_nan_beta_contributes_zero():
+    f = {"b_mkt": float("nan"), "b_tech": float("nan"), "ccy": "GBP"}
+    assert build.estimate_move(f, {"spy": -20, "tech": -10, "usd": 0}, "GBP") == 0.0
+
+
+def test_basket_weighted_move_uniform_vs_weighted():
+    fs = [{"b_mkt": 2.0, "b_tech": 0.0, "ccy": "GBP", "weight": 1.0},
+          {"b_mkt": 0.0, "b_tech": 0.0, "ccy": "GBP", "weight": 1.0}]
+    sc = {"spy": -10, "tech": 0, "usd": 0}
+    assert build.basket_weighted_move(fs, sc, "GBP") == pytest.approx(-10.0)   # mean(-20,0)
+    fs[0]["weight"] = 3.0                                                       # weight the mover
+    assert build.basket_weighted_move(fs, sc, "GBP") == pytest.approx(-15.0)   # (3*-20+1*0)/4

@@ -6789,6 +6789,37 @@ def compute_stress_factors(prices_native, spy, qqq, meta, returns) -> list[dict]
     return out
 
 
+def estimate_move(factors: dict, scenario: dict, base_ccy: str = "GBP") -> float:
+    """First-order per-name move: b_mkt*spy + b_tech*tech + FX overlay. nan-safe."""
+    def _n(v):
+        try:
+            f = float(v)
+            return f if f == f else 0.0
+        except (TypeError, ValueError):
+            return 0.0
+    bm, bt = _n(factors.get("b_mkt")), _n(factors.get("b_tech"))
+    move = bm * _n(scenario.get("spy")) + bt * _n(scenario.get("tech"))
+    if str(factors.get("ccy") or base_ccy) == SHOCKWAVE_FX_CCY and SHOCKWAVE_FX_CCY != base_ccy:
+        move += _n(scenario.get("usd"))
+    return move
+
+
+def basket_weighted_move(factors_list, scenario, base_ccy: str = "GBP") -> float:
+    """Weight-weighted mean of per-name moves (uniform weights -> simple mean)."""
+    tot_w = 0.0
+    acc = 0.0
+    for f in (factors_list or []):
+        try:
+            w = float(f.get("weight"))
+        except (TypeError, ValueError):
+            w = 1.0
+        if w != w or w <= 0:
+            w = 1.0
+        acc += w * estimate_move(f, scenario, base_ccy)
+        tot_w += w
+    return acc / tot_w if tot_w > 0 else float("nan")
+
+
 # ============================ v3.2 Doctor ============================
 # A deterministic, build-time whole-basket check-up. Pure functions over data
 # already computed in render_html (zero extra network fetch). See
