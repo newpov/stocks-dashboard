@@ -6863,6 +6863,23 @@ def evaluate_health(metrics: dict) -> tuple[str, list[dict]]:
     return state, drivers
 
 
+def _doctor_diagnosis(metrics: dict, drivers: list[dict]) -> str:
+    """1-2 blunt-but-fair plain-text sentences. No HTML (the renderer escapes)."""
+    beta = metrics.get("beta")
+    beta_txt = f"{beta:.1f}" if isinstance(beta, (int, float)) and beta == beta else "n/a"
+    if not drivers:
+        return ("No red flags this build: drawdown shallow, breadth positive, "
+                f"and the basket runs at about a {beta_txt} beta to SPY. Healthy.")
+    lead = drivers[0]["label"]
+    parts = [f"The main thing to watch is {lead}."]
+    if len(drivers) > 1:
+        rest = ", ".join(d["label"] for d in drivers[1:])
+        parts.append(f"Also flagged: {rest}.")
+    if any("leverage" in d["label"].lower() for d in drivers):
+        parts.append(f"Much of the recent edge rides a ~{beta_txt} beta rather than stock-picking.")
+    return " ".join(parts)
+
+
 def last_settled_close_date(index, now=None, settled_hour_utc=21):
     """Date of the last SETTLED trading session in ``index``.
 

@@ -154,3 +154,24 @@ def test_evaluate_health_beta_only_flags_with_thin_alpha():
     state2, drivers2 = build.evaluate_health(m)
     assert state2 == "Watch"
     assert any("leverage" in d["label"].lower() for d in drivers2)
+
+
+def test_doctor_diagnosis_healthy_is_calm_and_plain():
+    txt = build._doctor_diagnosis(_healthy_metrics(), [])
+    assert isinstance(txt, str) and len(txt) > 0
+    assert "<" not in txt  # plain text, no HTML
+    assert "healthy" in txt.lower() or "no red flags" in txt.lower()
+
+
+def test_doctor_diagnosis_names_the_top_driver():
+    m = _healthy_metrics(); m["top_share"] = 0.5; m["top_sector"] = "Energy"
+    _, drivers = build.evaluate_health(m)
+    txt = build._doctor_diagnosis(m, drivers)
+    assert "Energy" in txt
+
+
+def test_doctor_diagnosis_mentions_beta_when_leverage_flag():
+    m = _healthy_metrics(); m["beta"] = 1.4; m["alpha_30d_pp"] = 1.0
+    _, drivers = build.evaluate_health(m)
+    txt = build._doctor_diagnosis(m, drivers)
+    assert "1.4" in txt or "beta" in txt.lower()
