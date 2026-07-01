@@ -6838,6 +6838,33 @@ def recovery_estimate(basket_move: float) -> "str | None":
     return "~5-6 years"
 
 
+def build_shockwave_payload(factors, presets, as_of, base_ccy,
+                            mcap_by_ticker: "dict | None" = None) -> dict:
+    """Assemble the inline payload block. Enriches each factor with mcap (or
+    None). Privacy-safe: weight is unitless, mcap is public company data; no
+    shares or money amounts. size_default follows WEIGHT_MODE."""
+    mc = mcap_by_ticker or {}
+    keep = ("ticker", "name", "sector", "b_mkt", "b_tech", "r2", "ccy", "ret",
+            "weight", "low_conf")
+    out_factors = []
+    for f in (factors or []):
+        d = {k: f.get(k) for k in keep}
+        raw = mc.get(f.get("ticker"))
+        try:
+            d["mcap"] = float(raw) if raw is not None and raw == raw else None
+        except (TypeError, ValueError):
+            d["mcap"] = None
+        out_factors.append(d)
+    return {
+        "factors": out_factors,
+        "presets": [dict(p) for p in (presets or [])],
+        "base_ccy": base_ccy,
+        "as_of": as_of,
+        "fx_ccy": SHOCKWAVE_FX_CCY,
+        "size_default": "eq" if WEIGHT_MODE == "equal" else "w",
+    }
+
+
 # ============================ v3.2 Doctor ============================
 # A deterministic, build-time whole-basket check-up. Pure functions over data
 # already computed in render_html (zero extra network fetch). See

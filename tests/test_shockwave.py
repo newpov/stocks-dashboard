@@ -109,3 +109,24 @@ def test_recovery_estimate_bands():
     assert build.recovery_estimate(-35) == "~4 years"
     assert build.recovery_estimate(-55) == "~5-6 years"
     assert build.recovery_estimate(12) is None
+
+
+def _factor(t, ccy="USD", w=1.0):
+    return {"ticker": t, "name": t, "sector": "Tech", "b_mkt": 1.0, "b_tech": 0.2,
+            "r2": 0.6, "ccy": ccy, "ret": 5.0, "weight": w, "low_conf": False}
+
+
+def test_build_shockwave_payload_shape_and_privacy():
+    factors = [_factor("AAA"), _factor("BBB", ccy="GBP")]
+    pl = build.build_shockwave_payload(
+        factors, build.SHOCKWAVE_PRESETS, "30 Jun 2026", "GBP",
+        mcap_by_ticker={"AAA": 2.5e12})
+    assert pl["base_ccy"] == "GBP" and pl["as_of"] == "30 Jun 2026"
+    assert pl["size_default"] in {"eq", "w"}
+    assert pl["fx_ccy"] == "USD"
+    assert len(pl["factors"]) == 2
+    assert pl["factors"][0]["mcap"] == 2.5e12
+    assert pl["factors"][1]["mcap"] is None            # missing -> graceful None
+    blob = str(pl)
+    assert "shares" not in blob and "£" not in blob   # no shares, no GBP symbol
+    assert pl["presets"][0]["label"] == build.SHOCKWAVE_PRESETS[0]["label"]
