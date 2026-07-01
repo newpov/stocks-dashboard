@@ -20,3 +20,58 @@ def test_shockwave_presets_wellformed():
             assert isinstance(p["recovery"], str) and p["recovery"]   # drawdowns carry recovery
         else:
             assert p["recovery"] is None                              # upside: no recovery
+
+
+def _price_series(daily_rets, start="2024-01-01"):
+    # build a price series whose pct_change equals daily_rets (prepend a base 100)
+    lvl = [100.0]
+    for r in daily_rets:
+        lvl.append(lvl[-1] * (1 + r))
+    idx = pd.date_range(start, periods=len(lvl), freq="D")
+    return pd.Series(lvl, index=idx)
+
+
+def _meta_df(rows):  # rows: (ticker, sector, ccy)
+    return pd.DataFrame([{"sector": s, "name": t, "industry": "", "currency": c}
+                         for (t, s, c) in rows], index=[t for (t, _, _) in rows])
+
+
+def test_compute_stress_factors_recovers_known_loadings():
+    rng = np.random.default_rng(0)
+    n = 200
+    spy_r = rng.normal(0, 0.01, n)
+    tech_r = rng.normal(0, 0.01, n)          # this is the (QQQ - SPY) factor content
+    qqq_r = spy_r + tech_r                    # so QQQ = SPY + techfactor
+    # name = 1.3*SPY + 0.7*(QQQ-SPY), no noise -> exact fit
+    name_r = 1.3 * spy_r + 0.7 * tech_r
+    prices = pd.DataFrame({"AAA": _price_series(name_r)})
+    spy = _price_series(spy_r)
+    qqq = _price_series(qqq_r)
+    meta = _meta_df([("AAA", "Tech", "USD")])
+    returns = pd.DataFrame([{"status": "open", "total_pct": 12.0, "weight": 1.0}], index=["AAA"])
+    out = build.compute_stress_factors(prices, spy, qqq, meta, returns)
+    assert len(out) == 1
+    f = out[0]
+    assert f["ticker"] == "AAA"
+    assert f["b_mkt"] == pytest.approx(1.3, abs=1e-3)
+    assert f["b_tech"] == pytest.approx(0.7, abs=1e-3)
+    assert f["r2"] == pytest.approx(1.0, abs=1e-3)
+    assert f["ccy"] == "USD" and f["ret"] == 12.0 and f["weight"] == 1.0
+    assert f["low_conf"] is False
+
+
+def test_compute_stress_factors_short_history_low_conf():
+    prices = pd.DataFrame({"AAA": _price_series([0.01, -0.01, 0.02])})
+    spy = _price_series([0.01, -0.01, 0.02]); qqq = _price_series([0.01, -0.01, 0.02])
+    meta = _meta_df([("AAA", "Tech", "USD")])
+    returns = pd.DataFrame([{"status": "open", "total_pct": 1.0, "weight": 1.0}], index=["AAA"])
+    out = build.compute_stress_factors(prices, spy, qqq, meta, returns)
+    assert out[0]["low_conf"] is True
+
+
+def test_compute_stress_factors_excludes_closed_and_missing():
+    prices = pd.DataFrame({"AAA": _price_series([0.01] * 100)})
+    spy = _price_series([0.01] * 100); qqq = _price_series([0.01] * 100)
+    meta = _meta_df([("AAA", "Tech", "USD")])
+    returns = pd.DataFrame([{"status": "closed", "total_pct": 5.0, "weight": 0.0}], index=["AAA"])
+    assert build.compute_stress_factors(prices, spy, qqq, meta, returns) == []

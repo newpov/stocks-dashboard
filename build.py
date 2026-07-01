@@ -6740,6 +6740,55 @@ SHOCKWAVE_PRESETS = [
 ]
 
 
+def compute_stress_factors(prices_native, spy, qqq, meta, returns) -> list[dict]:
+    """Per open position, a 2-factor sensitivity from native daily returns
+    regressed on [SPY, QQQ-SPY]. Returns b_mkt, b_tech, r2 + ccy/ret/weight/name/
+    sector/low_conf. Never raises; degrades to low_conf on thin/missing data."""
+    if returns is None or returns.empty or "status" not in returns.columns:
+        return []
+    spy_r = spy.astype(float).pct_change() if (spy is not None and len(spy)) else pd.Series(dtype=float)
+    have_qqq = qqq is not None and len(qqq) > 0
+    qqq_r = qqq.astype(float).pct_change() if have_qqq else None
+    out: list[dict] = []
+    open_idx = returns[returns["status"] == "open"].index.tolist()
+    for t in open_idx:
+        name = str(meta.loc[t, "name"]) if (meta is not None and t in meta.index) else t
+        sector = str(meta.loc[t, "sector"]) if (meta is not None and t in meta.index) else ""
+        ccy = str(meta.loc[t, "currency"]) if (meta is not None and t in meta.index) else "USD"
+        ret = float(pd.to_numeric(returns.loc[t].get("total_pct"), errors="coerce"))
+        weight = float(pd.to_numeric(returns.loc[t].get("weight"), errors="coerce"))
+        if weight != weight:
+            weight = 1.0
+        rec = {"ticker": t, "name": name, "sector": sector, "ccy": ccy,
+               "ret": ret, "weight": weight,
+               "b_mkt": float("nan"), "b_tech": float("nan"), "r2": float("nan"),
+               "low_conf": True}
+        if prices_native is None or t not in prices_native.columns:
+            out.append(rec); continue
+        name_r = prices_native[t].astype(float).pct_change()
+        cols = {"y": name_r, "spy": spy_r}
+        if qqq_r is not None:
+            cols["qqq"] = qqq_r
+        j = pd.concat(cols, axis=1).dropna()
+        if len(j) < SHOCKWAVE_MIN_OBS:
+            out.append(rec); continue
+        y = j["y"].to_numpy()
+        s = j["spy"].to_numpy()
+        tech = (j["qqq"].to_numpy() - s) if "qqq" in j else np.zeros_like(s)
+        X = np.column_stack([np.ones_like(s), s, tech])
+        coef, *_ = np.linalg.lstsq(X, y, rcond=None)
+        pred = X @ coef
+        ss_res = float(np.sum((y - pred) ** 2))
+        ss_tot = float(np.sum((y - y.mean()) ** 2))
+        r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
+        rec["b_mkt"] = float(coef[1])
+        rec["b_tech"] = float(coef[2]) if "qqq" in j else 0.0
+        rec["r2"] = r2
+        rec["low_conf"] = bool(("qqq" not in j) or r2 < SHOCKWAVE_R2_FLOOR)
+        out.append(rec)
+    return out
+
+
 # ============================ v3.2 Doctor ============================
 # A deterministic, build-time whole-basket check-up. Pure functions over data
 # already computed in render_html (zero extra network fetch). See
