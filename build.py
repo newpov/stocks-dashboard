@@ -6982,6 +6982,65 @@ def pick_tune(returns, quant_metrics, meta, metrics) -> dict | None:
     return candidates[0][1]
 
 
+def pick_grow(value_rows, auto_tickers, bb_universe_obs, watchlist_payload,
+              analyst_rows, returns, meta, metrics) -> dict | None:
+    """Gap-aware expansion: score a unified discovery pool by conviction plus a
+    basket-fit bonus for filling a sector gap. Honest no-pick on an empty pool."""
+    open_sectors = set()
+    if returns is not None and not returns.empty and meta is not None:
+        for t in returns[returns["status"] == "open"].index.tolist():
+            if t in meta.index:
+                open_sectors.add(str(meta.loc[t, "sector"] or "").strip() or "Other")
+
+    pool: dict[str, dict] = {}   # ticker -> {name, sector, base, src}
+
+    def _add(tkr, name, sector, base, src):
+        if not tkr:
+            return
+        prev = pool.get(tkr)
+        if prev is None or base > prev["base"]:
+            pool[tkr] = {"name": name or tkr, "sector": sector or "", "base": base, "src": src}
+
+    auto_set = set(auto_tickers or [])
+    for r in (value_rows or []):
+        t = r.get("ticker")
+        base = (r.get("pass_count", 0) or 0) / 6.0
+        if t in auto_set or r.get("is_bb_idea"):
+            base = max(base, 1.0)
+        _add(t, r.get("name"), r.get("sector"), base, "value")
+    for o in (bb_universe_obs or []):
+        t = o.get("ticker") if isinstance(o, dict) else None
+        sec = str((meta.loc[t, "sector"] if (meta is not None and t in meta.index) else "") or "")
+        _add(t, (o.get("name") if isinstance(o, dict) else t), sec, 0.6, "bb")
+    for row in (watchlist_payload or {}).get("rows", []) if isinstance(watchlist_payload, dict) else []:
+        t = row.get("ticker")
+        _add(t, row.get("name"), row.get("sector"), 0.4, "watchlist")
+    for r in (analyst_rows or []):
+        t = r.get("ticker")
+        _add(t, r.get("name"), r.get("sector"), 0.4, "reentry")
+
+    if not pool:
+        return {"lens": "grow",
+                "none_reason": "Nothing compelling to add - the discovery pool is thin "
+                               "right now."}
+
+    best_t, best_score, best_gap = None, -1.0, False
+    for t, d in pool.items():
+        gap = bool(d["sector"]) and d["sector"] not in open_sectors
+        score = d["base"] + (DOCTOR_FIT_BONUS if gap else 0.0)
+        if score > best_score:
+            best_t, best_score, best_gap = t, score, gap
+    d = pool[best_t]
+    module = "value" if d["src"] == "value" else "watchlist"
+    why = f"{best_t} screens well on the {d['src']} surface"
+    if best_gap:
+        why += f" AND adds {d['sector']}, a sector you don't currently hold"
+    why += "."
+    return {"lens": "grow", "tickers": [best_t], "verb": "add", "why": why,
+            "module_key": module,
+            "module_label": "Value screen" if module == "value" else "Watchlist"}
+
+
 def last_settled_close_date(index, now=None, settled_hour_utc=21):
     """Date of the last SETTLED trading session in ``index``.
 

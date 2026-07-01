@@ -250,3 +250,35 @@ def test_pick_tune_none_when_nothing_to_adjust():
     quant = _quant_df([("AAA", 55.0)])
     act = build.pick_tune(returns, quant, _meta_df([("AAA", "Tech")]), {})
     assert act is not None and "none_reason" in act and act["lens"] == "tune"
+
+
+def test_pick_grow_prefers_higher_conviction():
+    value_rows = [
+        {"ticker": "VVV", "name": "Value Co", "sector": "Tech", "pass_count": 5, "is_bb_idea": False},
+        {"ticker": "WWW", "name": "Weak Co", "sector": "Tech", "pass_count": 3, "is_bb_idea": False},
+    ]
+    returns = _returns_df([("AAA", "open", 5.0)])
+    meta = _meta_df([("AAA", "Tech")])
+    act = build.pick_grow(value_rows, [], [], {}, [], returns, meta, {})
+    assert act["lens"] == "grow" and act["verb"] == "add"
+    assert act["tickers"] == ["VVV"] and act["module_key"] == "value"
+
+
+def test_pick_grow_fit_bonus_flips_pick_to_fill_gap():
+    # Equal base conviction; GAP candidate is in a sector the basket lacks.
+    value_rows = [
+        {"ticker": "TTT", "name": "Tech Co", "sector": "Tech", "pass_count": 4, "is_bb_idea": False},
+        {"ticker": "HHH", "name": "Health Co", "sector": "Health", "pass_count": 4, "is_bb_idea": False},
+    ]
+    returns = _returns_df([("AAA", "open", 5.0), ("BBB", "open", 6.0)])
+    meta = _meta_df([("AAA", "Tech"), ("BBB", "Tech")])   # basket is all Tech
+    act = build.pick_grow(value_rows, [], [], {}, [], returns, meta, {})
+    assert act["tickers"] == ["HHH"]
+    assert "health" in act["why"].lower() or "only" in act["why"].lower()
+
+
+def test_pick_grow_empty_pool_is_honest_nopick():
+    returns = _returns_df([("AAA", "open", 5.0)])
+    meta = _meta_df([("AAA", "Tech")])
+    act = build.pick_grow([], [], [], {}, [], returns, meta, {})
+    assert act is not None and "none_reason" in act and act["lens"] == "grow"
