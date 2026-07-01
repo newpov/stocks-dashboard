@@ -7041,6 +7041,82 @@ def pick_grow(value_rows, auto_tickers, bb_universe_obs, watchlist_payload,
             "module_label": "Value screen" if module == "value" else "Watchlist"}
 
 
+def _pct_change_window(series: pd.Series, days: int) -> float:
+    if series is None or series.empty:
+        return float("nan")
+    end = series.index[-1]
+    cutoff = end - pd.Timedelta(days=days)
+    sub = series.loc[:cutoff]
+    if sub.empty:
+        return float("nan")
+    base = float(sub.iloc[-1])
+    if base == 0:
+        return float("nan")
+    return (float(series.iloc[-1]) / base - 1) * 100.0
+
+
+def _detractor_cluster_sector(contrib, meta) -> str:
+    if contrib is None or contrib.empty or "contribution" not in contrib.columns:
+        return ""
+    worst = contrib.sort_values("contribution").head(3)
+    secs = set()
+    for t in worst.index.tolist():
+        if meta is not None and t in meta.index:
+            secs.add(str(meta.loc[t, "sector"] or "").strip() or "Other")
+    return next(iter(secs)) if len(secs) == 1 and worst.shape[0] >= 3 else ""
+
+
+def _breadth_down_frac(returns, signals) -> float:
+    if returns is None or returns.empty or "status" not in returns.columns:
+        return float("nan")
+    open_idx = returns[returns["status"] == "open"].index.tolist()
+    if not open_idx:
+        return float("nan")
+    down = 0
+    for t in open_idx:
+        if "down" in _signal_label(signals, t).lower():
+            down += 1
+    return down / len(open_idx)
+
+
+def compute_doctor_report(*, returns, meta, basket, bench, contrib, signals,
+                          analyst, quant_metrics, diversification_data,
+                          ccy_exposure_rows, industry_groups, value_rows,
+                          auto_tickers, bb_universe_obs, watchlist_payload,
+                          analyst_rows, as_of: str) -> dict:
+    """Pure whole-basket check-up. Never raises; degrades to honest no-picks."""
+    sec = sector_effective_n(returns, meta)
+    vol = basket_vol_trend(basket)
+    dd = float("nan")
+    if basket is not None and not basket.empty:
+        peak = float(basket.cummax().iloc[-1])
+        if peak != 0:
+            dd = (float(basket.iloc[-1]) / peak - 1) * 100.0
+    a30 = _pct_change_window(basket, 30) - _pct_change_window(bench, 30) \
+        if (basket is not None and bench is not None) else float("nan")
+    metrics = {
+        "beta": basket_beta(basket, bench),
+        "pct_underwater": pct_open_underwater(returns),
+        "effective_n": sec["effective_n"], "top_sector": sec["top_sector"],
+        "top_share": sec["top_share"], "hhi": sec["hhi"], "n_sectors": sec["n_sectors"],
+        "vol": vol["vol"], "recent_vol": vol["recent_vol"], "vol_rising": vol["rising"],
+        "drawdown_pct": dd, "alpha_30d_pp": a30,
+        "detractor_cluster_sector": _detractor_cluster_sector(contrib, meta),
+        "breadth_down_frac": _breadth_down_frac(returns, signals),
+    }
+    state, drivers = evaluate_health(metrics)
+    diagnosis = _doctor_diagnosis(metrics, drivers)
+    actions = {
+        "defend": pick_defend(returns, meta, signals, analyst, diversification_data,
+                              ccy_exposure_rows, industry_groups, metrics),
+        "tune": pick_tune(returns, quant_metrics, meta, metrics),
+        "grow": pick_grow(value_rows, auto_tickers, bb_universe_obs, watchlist_payload,
+                          analyst_rows, returns, meta, metrics),
+    }
+    return {"state": state, "drivers": drivers, "diagnosis": diagnosis,
+            "metrics": metrics, "actions": actions, "as_of": as_of}
+
+
 def last_settled_close_date(index, now=None, settled_hour_utc=21):
     """Date of the last SETTLED trading session in ``index``.
 

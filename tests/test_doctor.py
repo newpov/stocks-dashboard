@@ -282,3 +282,41 @@ def test_pick_grow_empty_pool_is_honest_nopick():
     meta = _meta_df([("AAA", "Tech")])
     act = build.pick_grow([], [], [], {}, [], returns, meta, {})
     assert act is not None and "none_reason" in act and act["lens"] == "grow"
+
+
+def test_compute_doctor_report_shape_and_three_actions():
+    basket = _series([100, 102, 101, 105, 108, 110] + [110] * 40)
+    bench = _series([100, 101, 101, 103, 104, 105] + [105] * 40)
+    returns = _returns_df_full([
+        {"ticker": "AAA", "status": "open", "total_pct": 60.0, "1m_pct": 4.0, "3m_pct": 20.0},
+        {"ticker": "BBB", "status": "open", "total_pct": -8.0, "1m_pct": -2.0, "3m_pct": -3.0},
+        {"ticker": "CCC", "status": "open", "total_pct": 12.0, "1m_pct": 1.0, "3m_pct": 5.0},
+    ])
+    meta = _meta_df([("AAA", "Tech"), ("BBB", "Tech"), ("CCC", "Tech")])
+    quant = _quant_df([("AAA", 82.0), ("BBB", 40.0), ("CCC", 55.0)])
+    value_rows = [{"ticker": "ZZZ", "name": "Z", "sector": "Health",
+                   "pass_count": 5, "is_bb_idea": False}]
+    rep = build.compute_doctor_report(
+        returns=returns, meta=meta, basket=basket, bench=bench,
+        contrib=pd.DataFrame(), signals=_signals_df([]), analyst=pd.DataFrame(),
+        quant_metrics=quant, diversification_data=None, ccy_exposure_rows=[],
+        industry_groups=[], value_rows=value_rows, auto_tickers=[],
+        bb_universe_obs=[], watchlist_payload={}, analyst_rows=[], as_of="30 Jun 2026")
+    assert rep["state"] in {"Healthy", "Watch", "Needs attention"}
+    assert set(rep["actions"]) == {"defend", "tune", "grow"}
+    for lens in ("defend", "tune", "grow"):
+        a = rep["actions"][lens]
+        assert ("verb" in a) or ("none_reason" in a)
+    assert rep["as_of"] == "30 Jun 2026"
+    assert isinstance(rep["metrics"]["beta"], float)
+
+
+def test_compute_doctor_report_never_raises_on_degenerate():
+    basket = _series([100, 101])
+    rep = build.compute_doctor_report(
+        returns=pd.DataFrame(), meta=pd.DataFrame(), basket=basket, bench=basket,
+        contrib=pd.DataFrame(), signals=pd.DataFrame(), analyst=pd.DataFrame(),
+        quant_metrics=pd.DataFrame(), diversification_data=None, ccy_exposure_rows=[],
+        industry_groups=[], value_rows=[], auto_tickers=[], bb_universe_obs=[],
+        watchlist_payload={}, analyst_rows=[], as_of="x")
+    assert "none_reason" in rep["actions"]["grow"]
