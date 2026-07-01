@@ -6715,6 +6715,31 @@ def build_aux_payload(returns: pd.DataFrame, prices: pd.DataFrame,
     return out
 
 
+# ============================ v3.3 Shockwave ============================
+# Interactive market stress-test. A per-name two-factor sensitivity (market +
+# tech tilt) is computed at build time and baked inline; the client applies
+# shock scenarios over it. Deterministic, zero extra fetch, equal-weight,
+# returns-only. See temp/shockwave-spec.md.
+
+SHOCKWAVE_MIN_OBS   = 60
+SHOCKWAVE_R2_FLOOR  = 0.20
+SHOCKWAVE_PULSE_PCT = -25.0
+SHOCKWAVE_LABEL_TOP = 7
+SHOCKWAVE_FX_CCY    = "USD"
+
+# Narrative scenarios mapped onto the 3 factors (an approximation, not literal
+# instrument betas). Negative + positive; likelihood + historical recovery.
+SHOCKWAVE_PRESETS = [
+    {"label": "Tech correction",   "spy": -8,  "tech": -18, "usd": 0,  "likelihood": "occasional", "recovery": "~1 yr"},
+    {"label": "Risk-off bear",     "spy": -22, "tech": -8,  "usd": 6,  "likelihood": "occasional", "recovery": "~2 yrs"},
+    {"label": "2008-style crash",  "spy": -45, "tech": -15, "usd": 10, "likelihood": "rare",       "recovery": "~4 yrs"},
+    {"label": "Rate shock",        "spy": -12, "tech": -22, "usd": 8,  "likelihood": "occasional", "recovery": "~1.5 yrs"},
+    {"label": "Soft-landing rally","spy": 10,  "tech": 8,   "usd": 0,  "likelihood": "common",     "recovery": None},
+    {"label": "AI breakthrough",   "spy": 8,   "tech": 30,  "usd": 0,  "likelihood": "rare",       "recovery": None},
+    {"label": "Crypto mainstream", "spy": 6,   "tech": 18,  "usd": -5, "likelihood": "rare",       "recovery": None},
+]
+
+
 # ============================ v3.2 Doctor ============================
 # A deterministic, build-time whole-basket check-up. Pure functions over data
 # already computed in render_html (zero extra network fetch). See
