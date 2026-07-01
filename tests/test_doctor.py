@@ -220,6 +220,21 @@ def test_pick_defend_none_when_nothing_material():
     assert act is not None and "none_reason" in act and act["lens"] == "defend"
 
 
+def test_pick_defend_fx_uses_real_ccy_key():
+    # compute_currency_exposure emits dicts keyed "ccy" (not "currency").
+    # The FX defend candidate must surface the actual currency name, not "None".
+    returns = _returns_df([("AAA", "open", 5.0), ("BBB", "open", 6.0),
+                           ("CCC", "open", 7.0), ("DDD", "open", 8.0)])
+    meta = _meta_df([("AAA", "Tech"), ("BBB", "Energy"),
+                     ("CCC", "Health"), ("DDD", "Fin")])  # no sector tilt
+    metrics = {"top_sector": "Tech", "top_share": 0.25}
+    ccy_rows = [{"ccy": "USD", "share": 0.7, "n": 3}]
+    act = build.pick_defend(returns, meta, _signals_df([]), pd.DataFrame(),
+                            None, ccy_rows, [], metrics)
+    assert act["verb"] == "review" and act["module_key"] == "currency"
+    assert "USD" in act["why"] and "None" not in act["why"]
+
+
 def _quant_df(rows):
     # rows: list of (ticker, rsi)
     return pd.DataFrame([{"rsi": r} for (_, r) in rows],

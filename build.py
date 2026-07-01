@@ -6930,7 +6930,7 @@ def pick_defend(returns, meta, signals, analyst, diversification_data,
         share = row.get("share") if isinstance(row, dict) else None
         share = float(share) if isinstance(share, (int, float)) and share == share else 0.0
         if share > 0.5:
-            ccy = row.get("currency") if isinstance(row, dict) else ""
+            ccy = (row.get("ccy") or row.get("currency")) if isinstance(row, dict) else ""
             candidates.append((share, {
                 "lens": "defend", "tickers": [], "verb": "review",
                 "why": f"{ccy} is {share*100:.0f}% of the basket - concentrated FX risk.",
