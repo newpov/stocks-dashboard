@@ -6715,6 +6715,45 @@ def build_aux_payload(returns: pd.DataFrame, prices: pd.DataFrame,
     return out
 
 
+# ============================ v3.2 Doctor ============================
+# A deterministic, build-time whole-basket check-up. Pure functions over data
+# already computed in render_html (zero extra network fetch). See
+# temp/doctor-checkup-spec.md.
+
+# --- v3.2 Doctor thresholds (start sensible; tuned live) ---
+DOCTOR_DD_FLAG_PCT        = -10.0
+DOCTOR_ALPHA_FADE_PP      = 0.0
+DOCTOR_BETA_HIGH          = 1.20
+DOCTOR_THIN_ALPHA_PP      = 2.0
+DOCTOR_UNDERWATER_FLAG    = 50.0
+DOCTOR_EFFECTIVE_N_FLAG   = 3.0
+DOCTOR_TOP_SECTOR_FLAG    = 0.35
+DOCTOR_VOL_RISING_RATIO   = 1.20
+DOCTOR_BREADTH_DOWN_FLAG  = 0.40
+DOCTOR_DEFEND_SECTOR_MIN  = 0.30
+DOCTOR_FIT_BONUS          = 0.25
+
+
+def basket_beta(basket: pd.Series, bench: pd.Series) -> float:
+    """Slope of basket daily returns regressed on benchmark daily returns
+    (cov / var) over their shared dates. NaN when there are <2 overlapping
+    return observations or the benchmark has zero variance."""
+    if basket is None or bench is None or len(basket) < 2 or len(bench) < 2:
+        return float("nan")
+    a = basket.astype(float).pct_change()
+    b = bench.astype(float).pct_change()
+    joined = pd.concat([a, b], axis=1, join="inner").dropna()
+    if len(joined) < 2:
+        return float("nan")
+    x = joined.iloc[:, 1].to_numpy()   # benchmark
+    y = joined.iloc[:, 0].to_numpy()   # basket
+    var = float(np.var(x))
+    if var == 0.0 or not np.isfinite(var):
+        return float("nan")
+    cov = float(np.cov(y, x, ddof=0)[0, 1])
+    return cov / var
+
+
 def last_settled_close_date(index, now=None, settled_hour_utc=21):
     """Date of the last SETTLED trading session in ``index``.
 
