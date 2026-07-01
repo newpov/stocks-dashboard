@@ -6818,6 +6818,51 @@ def basket_vol_trend(basket: pd.Series, recent_days: int = 30, ann: int = 252) -
     return out
 
 
+def evaluate_health(metrics: dict) -> tuple[str, list[dict]]:
+    """Transparent red-flag rubric. Each fired flag becomes a driver chip.
+    0 flags -> Healthy, 1 -> Watch, 2+ -> Needs attention."""
+    def _f(key):
+        v = metrics.get(key)
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return float("nan")
+
+    drivers: list[dict] = []
+    dd = _f("drawdown_pct")
+    if dd == dd and dd < DOCTOR_DD_FLAG_PCT:
+        drivers.append({"label": f"drawdown {dd:.0f}%", "tone": "danger"})
+    a30 = _f("alpha_30d_pp")
+    if a30 == a30 and a30 < DOCTOR_ALPHA_FADE_PP:
+        drivers.append({"label": "30d alpha fading", "tone": "warning"})
+    beta = _f("beta")
+    if beta == beta and beta > DOCTOR_BETA_HIGH and a30 == a30 and a30 < DOCTOR_THIN_ALPHA_PP:
+        drivers.append({"label": f"edge is leverage (beta {beta:.1f})", "tone": "warning"})
+    uw = _f("pct_underwater")
+    if uw == uw and uw > DOCTOR_UNDERWATER_FLAG:
+        drivers.append({"label": f"{uw:.0f}% of names underwater", "tone": "warning"})
+    eff = _f("effective_n")
+    top_share = _f("top_share")
+    top_sector = str(metrics.get("top_sector") or "")
+    if (eff == eff and eff < DOCTOR_EFFECTIVE_N_FLAG) or \
+       (top_share == top_share and top_share > DOCTOR_TOP_SECTOR_FLAG):
+        share_txt = f" ({top_share*100:.0f}%)" if top_share == top_share else ""
+        drivers.append({"label": f"{top_sector or 'one sector'} concentration{share_txt}",
+                        "tone": "warning"})
+    cluster = str(metrics.get("detractor_cluster_sector") or "")
+    if cluster:
+        drivers.append({"label": f"detractors cluster in {cluster}", "tone": "warning"})
+    if bool(metrics.get("vol_rising")):
+        drivers.append({"label": "volatility rising", "tone": "warning"})
+    bd = _f("breadth_down_frac")
+    if bd == bd and bd > DOCTOR_BREADTH_DOWN_FLAG:
+        drivers.append({"label": f"{bd*100:.0f}% of names in a downtrend", "tone": "warning"})
+
+    n = len(drivers)
+    state = "Healthy" if n == 0 else ("Watch" if n == 1 else "Needs attention")
+    return state, drivers
+
+
 def last_settled_close_date(index, now=None, settled_hour_utc=21):
     """Date of the last SETTLED trading session in ``index``.
 

@@ -116,3 +116,41 @@ def test_basket_vol_trend_rising_when_recent_choppier():
 def test_basket_vol_trend_short_series_safe():
     out = build.basket_vol_trend(_series([100, 101]), recent_days=20)
     assert np.isnan(out["vol"]) and out["rising"] is False
+
+
+def _healthy_metrics():
+    return {"drawdown_pct": -2.0, "alpha_30d_pp": 3.0, "beta": 1.0,
+            "pct_underwater": 20.0, "effective_n": 6.0, "top_sector": "Tech",
+            "top_share": 0.2, "vol_rising": False,
+            "detractor_cluster_sector": "", "breadth_down_frac": 0.1}
+
+
+def test_evaluate_health_zero_flags_healthy():
+    state, drivers = build.evaluate_health(_healthy_metrics())
+    assert state == "Healthy" and drivers == []
+
+
+def test_evaluate_health_one_flag_watch():
+    m = _healthy_metrics(); m["drawdown_pct"] = -15.0
+    state, drivers = build.evaluate_health(m)
+    assert state == "Watch" and len(drivers) == 1
+    assert drivers[0]["tone"] in {"danger", "warning", "neutral"}
+
+
+def test_evaluate_health_two_plus_flags_needs_attention():
+    m = _healthy_metrics()
+    m["drawdown_pct"] = -15.0          # flag 1
+    m["pct_underwater"] = 70.0         # flag 2
+    m["top_share"] = 0.50              # flag 3
+    state, drivers = build.evaluate_health(m)
+    assert state == "Needs attention" and len(drivers) >= 2
+
+
+def test_evaluate_health_beta_only_flags_with_thin_alpha():
+    m = _healthy_metrics(); m["beta"] = 1.5; m["alpha_30d_pp"] = 5.0
+    state, _ = build.evaluate_health(m)            # high beta but fat alpha -> ok
+    assert state == "Healthy"
+    m["alpha_30d_pp"] = 1.0                          # high beta + thin alpha -> flag
+    state2, drivers2 = build.evaluate_health(m)
+    assert state2 == "Watch"
+    assert any("leverage" in d["label"].lower() for d in drivers2)
