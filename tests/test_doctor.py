@@ -218,3 +218,35 @@ def test_pick_defend_none_when_nothing_material():
     act = build.pick_defend(returns, meta, _signals_df([]), pd.DataFrame(),
                             None, [], [], metrics)
     assert act is not None and "none_reason" in act and act["lens"] == "defend"
+
+
+def _quant_df(rows):
+    # rows: list of (ticker, rsi)
+    return pd.DataFrame([{"rsi": r} for (_, r) in rows],
+                        index=[t for (t, _) in rows])
+
+
+def _returns_df_full(rows):
+    # rows: list of dicts with at least ticker(index),status,total_pct,1m_pct,3m_pct
+    idx = [r.pop("ticker") for r in rows]
+    return pd.DataFrame(rows, index=idx)
+
+
+def test_pick_tune_take_profit_on_overbought_winner():
+    returns = _returns_df_full([
+        {"ticker": "AAA", "status": "open", "total_pct": 60.0, "1m_pct": 5.0, "3m_pct": 20.0},
+        {"ticker": "BBB", "status": "open", "total_pct": 3.0, "1m_pct": 1.0, "3m_pct": 2.0},
+    ])
+    quant = _quant_df([("AAA", 82.0), ("BBB", 50.0)])
+    act = build.pick_tune(returns, quant, _meta_df([("AAA", "Tech"), ("BBB", "Tech")]), {})
+    assert act["verb"] == "take profit" and act["tickers"] == ["AAA"]
+    assert act["module_key"] == "signal"
+
+
+def test_pick_tune_none_when_nothing_to_adjust():
+    returns = _returns_df_full([
+        {"ticker": "AAA", "status": "open", "total_pct": 8.0, "1m_pct": 2.0, "3m_pct": 4.0},
+    ])
+    quant = _quant_df([("AAA", 55.0)])
+    act = build.pick_tune(returns, quant, _meta_df([("AAA", "Tech")]), {})
+    assert act is not None and "none_reason" in act and act["lens"] == "tune"

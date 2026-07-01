@@ -6944,6 +6944,44 @@ def pick_defend(returns, meta, signals, analyst, diversification_data,
     return candidates[0][1]
 
 
+def _q(df, ticker, col):
+    if df is not None and ticker in df.index and col in df.columns:
+        return pd.to_numeric(pd.Series([df.loc[ticker, col]]), errors="coerce").iloc[0]
+    return float("nan")
+
+
+def pick_tune(returns, quant_metrics, meta, metrics) -> dict | None:
+    """Best 'adjust what you hold' move: take profit on an overbought winner,
+    or review a round-tripped name. Honest no-pick when neither applies."""
+    candidates: list[tuple[float, dict]] = []
+    if returns is not None and not returns.empty:
+        open_idx = returns[returns["status"] == "open"].index.tolist()
+        for t in open_idx:
+            tp = pd.to_numeric(returns.loc[t, "total_pct"], errors="coerce")
+            rsi = _q(quant_metrics, t, "rsi")
+            if rsi == rsi and rsi >= 70 and tp == tp and tp > 0:
+                candidates.append((float(rsi) / 100.0, {
+                    "lens": "tune", "tickers": [t], "verb": "take profit",
+                    "why": f"{t} is overbought (RSI {rsi:.0f}) and up {tp:.0f}% - "
+                           f"consider banking some gains.",
+                    "module_key": "signal", "module_label": "Signal map"}))
+            m1 = pd.to_numeric(returns.loc[t].get("1m_pct"), errors="coerce")
+            m3 = pd.to_numeric(returns.loc[t].get("3m_pct"), errors="coerce")
+            if (tp == tp and -2.0 <= tp <= 2.0 and m3 == m3 and m3 > 0
+                    and m1 == m1 and m1 < 0):
+                candidates.append((0.4, {
+                    "lens": "tune", "tickers": [t], "verb": "review",
+                    "why": f"{t} round-tripped its gains (3m +{m3:.0f}%, last month "
+                           f"{m1:.0f}%) - review the thesis.",
+                    "module_key": "holdings", "module_label": "Holdings"}))
+    if not candidates:
+        return {"lens": "tune",
+                "none_reason": "Nothing to tune - no positions are stretched or "
+                               "stalling enough to act on."}
+    candidates.sort(key=lambda kv: kv[0], reverse=True)
+    return candidates[0][1]
+
+
 def last_settled_close_date(index, now=None, settled_hour_utc=21):
     """Date of the last SETTLED trading session in ``index``.
 
