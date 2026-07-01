@@ -14,6 +14,24 @@ than a barely-working prototype.
 
 ---
 
+## v3.2 — Doctor: basket check-up · 1 July 2026
+
+A new top-level **Doctor** panel that synthesises the whole basket into an
+honest verdict plus three concrete next actions — the one thing the dashboard
+was missing, since every other module is a per-name slice, a discovery feed, or
+a single diagnostic. Deterministic Python, computed at build time, zero extra
+network fetch (it reuses signals the other modules already compute), so it works
+identically in the demo build and carries an "as of &lt;settled-close date&gt;" stamp.
+
+- **Toggled panel, pinned far-left** — a stethoscope button at the left end of the topbar opens/closes the check-up inline (same pattern as Pocket lesson; state persists in `localStorage` as `doctorOn`, default off). To make room, **Edit layout + Reset move to the far right** — a design control alongside the palette.
+- **Honest health verdict** — a one-word state (**Healthy / Watch / Needs attention**) from a transparent red-flag rubric, shown with the **driver chips** that set it (e.g. "Tech concentration (75%)", "edge is leverage (beta 1.3)") and a 1–2 sentence serif diagnosis. Never a black box.
+- **Three action cards — Defend / Tune / Grow** — each names the specific ticker(s), a directional verb (`trim` · `exit` · `take profit` · `add` · `review`), a one-line data-backed *why*, and a "→ see &lt;module&gt;" link into the deeper panel. Defend surfaces the single most material structural risk (sector over-tilt / a downtrend exit / FX concentration); Tune the best adjust-what-you-hold move (take profit on an overbought winner, or review a round-tripped name); **Grow is gap-aware** — it scores a unified discovery pool (value screen ∪ auto-watchlist ∪ Big-Brain ideas ∪ watchlist ∪ re-entry) by conviction **plus a basket-fit bonus** for filling a sector you don't hold.
+- **Honesty guarantee** — when a lens has no genuine candidate, its card says so plainly ("Nothing compelling to add — the discovery pool is thin right now") rather than manufacturing a weak pick. Explicitly tested.
+- **Four new basket-level metrics** (all reuse in-memory data, no new fetch): **beta vs SPY** (separates skill from market leverage), **% of open names underwater**, **sector concentration** (HHI / effective-N), and **basket realized vol + rising-trend** — feeding both the rubric and the diagnosis.
+- `compute_doctor_report` (pure, never raises — degrades to honest no-picks) + `render_doctor` (escaped) + `tests/test_doctor.py` (33 tests: metric helpers, rubric states, each lens, gap-aware bonus, degenerate/no-pick, XSS). The report dict is deliberately structured as a future LLM-enrichment substrate (v4), with the deterministic engine as the no-key fallback.
+
+---
+
 ## v3.1 — Freshness honesty + relevance fixes · 30 June 2026
 
 A small, user-flagged correctness + clarity pass.

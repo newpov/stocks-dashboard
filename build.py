@@ -6715,6 +6715,473 @@ def build_aux_payload(returns: pd.DataFrame, prices: pd.DataFrame,
     return out
 
 
+# ============================ v3.2 Doctor ============================
+# A deterministic, build-time whole-basket check-up. Pure functions over data
+# already computed in render_html (zero extra network fetch). See
+# temp/doctor-checkup-spec.md.
+
+# --- v3.2 Doctor thresholds (start sensible; tuned live) ---
+DOCTOR_DD_FLAG_PCT        = -10.0
+DOCTOR_ALPHA_FADE_PP      = 0.0
+DOCTOR_BETA_HIGH          = 1.20
+DOCTOR_THIN_ALPHA_PP      = 2.0
+DOCTOR_UNDERWATER_FLAG    = 50.0
+DOCTOR_EFFECTIVE_N_FLAG   = 3.0
+DOCTOR_TOP_SECTOR_FLAG    = 0.35
+DOCTOR_VOL_RISING_RATIO   = 1.20
+DOCTOR_BREADTH_DOWN_FLAG  = 0.40
+DOCTOR_DEFEND_SECTOR_MIN  = 0.30
+DOCTOR_FIT_BONUS          = 0.25
+
+
+def basket_beta(basket: pd.Series, bench: pd.Series) -> float:
+    """Slope of basket daily returns regressed on benchmark daily returns
+    (cov / var) over their shared dates. NaN when there are <2 overlapping
+    return observations or the benchmark has zero variance."""
+    if basket is None or bench is None or len(basket) < 2 or len(bench) < 2:
+        return float("nan")
+    a = basket.astype(float).pct_change()
+    b = bench.astype(float).pct_change()
+    joined = pd.concat([a, b], axis=1, join="inner").dropna()
+    if len(joined) < 2:
+        return float("nan")
+    x = joined.iloc[:, 1].to_numpy()   # benchmark
+    y = joined.iloc[:, 0].to_numpy()   # basket
+    var = float(np.var(x))
+    if var == 0.0 or not np.isfinite(var):
+        return float("nan")
+    cov = float(np.cov(y, x, ddof=0)[0, 1])
+    return cov / var
+
+
+def pct_open_underwater(returns: pd.DataFrame) -> float:
+    """Share (0-100) of OPEN positions whose total return is below cost.
+    NaN when there are no open positions."""
+    if returns is None or returns.empty or "status" not in returns.columns:
+        return float("nan")
+    open_df = returns[returns["status"] == "open"]
+    if open_df.empty:
+        return float("nan")
+    pct = pd.to_numeric(open_df["total_pct"], errors="coerce")
+    n = int(pct.notna().sum())
+    if n == 0:
+        return float("nan")
+    under = int((pct < 0).sum())
+    return under / n * 100.0
+
+
+def sector_effective_n(returns: pd.DataFrame, meta: pd.DataFrame) -> dict:
+    """Herfindahl concentration over OPEN-position sector NAME-COUNTS (the
+    basket is equal-weight, so each open name contributes 1 unit). Reports the
+    effective number of sectors (1/HHI) plus the dominant sector + its share."""
+    empty = {"hhi": float("nan"), "effective_n": float("nan"),
+             "top_sector": "", "top_share": float("nan"), "n_sectors": 0}
+    if returns is None or returns.empty or "status" not in returns.columns:
+        return empty
+    open_tickers = returns[returns["status"] == "open"].index.tolist()
+    if not open_tickers:
+        return empty
+    counts: dict[str, int] = {}
+    for t in open_tickers:
+        sec = ""
+        if meta is not None and t in meta.index:
+            sec = str(meta.loc[t, "sector"] or "").strip()
+        sec = sec or "Other"
+        counts[sec] = counts.get(sec, 0) + 1
+    total = sum(counts.values())
+    weights = {s: c / total for s, c in counts.items()}
+    hhi = sum(w * w for w in weights.values())
+    top_sector, top_share = max(weights.items(), key=lambda kv: kv[1])
+    return {"hhi": hhi, "effective_n": (1.0 / hhi if hhi > 0 else float("nan")),
+            "top_sector": top_sector, "top_share": top_share,
+            "n_sectors": len(counts)}
+
+
+def basket_vol_trend(basket: pd.Series, recent_days: int = 30, ann: int = 252) -> dict:
+    """Annualized realized volatility (%) of basket daily returns, plus whether
+    the most recent `recent_days` window is choppier than the earlier baseline."""
+    out = {"vol": float("nan"), "recent_vol": float("nan"),
+           "baseline_vol": float("nan"), "rising": False}
+    if basket is None or len(basket) < (recent_days + 5):
+        return out
+    rets = basket.astype(float).pct_change().dropna()
+    if len(rets) < (recent_days + 2):
+        return out
+    scale = float(np.sqrt(ann)) * 100.0
+    out["vol"] = float(rets.std(ddof=0)) * scale
+    recent = rets.iloc[-recent_days:]
+    baseline = rets.iloc[:-recent_days]
+    if len(baseline) >= 2:
+        out["recent_vol"] = float(recent.std(ddof=0)) * scale
+        out["baseline_vol"] = float(baseline.std(ddof=0)) * scale
+        out["rising"] = bool(out["recent_vol"] > out["baseline_vol"] * DOCTOR_VOL_RISING_RATIO)
+    return out
+
+
+def evaluate_health(metrics: dict) -> tuple[str, list[dict]]:
+    """Transparent red-flag rubric. Each fired flag becomes a driver chip.
+    0 flags -> Healthy, 1 -> Watch, 2+ -> Needs attention."""
+    def _f(key):
+        v = metrics.get(key)
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return float("nan")
+
+    drivers: list[dict] = []
+    dd = _f("drawdown_pct")
+    if dd == dd and dd < DOCTOR_DD_FLAG_PCT:
+        drivers.append({"label": f"drawdown {dd:.0f}%", "tone": "danger"})
+    a30 = _f("alpha_30d_pp")
+    if a30 == a30 and a30 < DOCTOR_ALPHA_FADE_PP:
+        drivers.append({"label": "30d alpha fading", "tone": "warning"})
+    beta = _f("beta")
+    if beta == beta and beta > DOCTOR_BETA_HIGH and a30 == a30 and a30 < DOCTOR_THIN_ALPHA_PP:
+        drivers.append({"label": f"edge is leverage (beta {beta:.1f})", "tone": "warning"})
+    uw = _f("pct_underwater")
+    if uw == uw and uw > DOCTOR_UNDERWATER_FLAG:
+        drivers.append({"label": f"{uw:.0f}% of names underwater", "tone": "warning"})
+    eff = _f("effective_n")
+    top_share = _f("top_share")
+    top_sector = str(metrics.get("top_sector") or "")
+    if (eff == eff and eff < DOCTOR_EFFECTIVE_N_FLAG) or \
+       (top_share == top_share and top_share > DOCTOR_TOP_SECTOR_FLAG):
+        share_txt = f" ({top_share*100:.0f}%)" if top_share == top_share else ""
+        drivers.append({"label": f"{top_sector or 'one sector'} concentration{share_txt}",
+                        "tone": "warning"})
+    cluster = str(metrics.get("detractor_cluster_sector") or "")
+    if cluster:
+        drivers.append({"label": f"detractors cluster in {cluster}", "tone": "warning"})
+    if bool(metrics.get("vol_rising")):
+        drivers.append({"label": "volatility rising", "tone": "warning"})
+    bd = _f("breadth_down_frac")
+    if bd == bd and bd > DOCTOR_BREADTH_DOWN_FLAG:
+        drivers.append({"label": f"{bd*100:.0f}% of names in a downtrend", "tone": "warning"})
+
+    n = len(drivers)
+    state = "Healthy" if n == 0 else ("Watch" if n == 1 else "Needs attention")
+    return state, drivers
+
+
+def _doctor_diagnosis(metrics: dict, drivers: list[dict]) -> str:
+    """1-2 blunt-but-fair plain-text sentences. No HTML (the renderer escapes)."""
+    beta = metrics.get("beta")
+    beta_txt = f"{beta:.1f}" if isinstance(beta, (int, float)) and beta == beta else "n/a"
+    if not drivers:
+        return ("No red flags this build: drawdown shallow, breadth positive, "
+                f"and the basket runs at about a {beta_txt} beta to SPY. Healthy.")
+    lead = drivers[0]["label"]
+    parts = [f"The main thing to watch is {lead}."]
+    if len(drivers) > 1:
+        rest = ", ".join(d["label"] for d in drivers[1:])
+        parts.append(f"Also flagged: {rest}.")
+    if any("leverage" in d["label"].lower() for d in drivers):
+        parts.append(f"Much of the recent edge rides a ~{beta_txt} beta rather than stock-picking.")
+    return " ".join(parts)
+
+
+def _open_names_in_sector(returns, meta, sector, cap=3):
+    out = []
+    for t in returns[returns["status"] == "open"].index.tolist():
+        sec = str(meta.loc[t, "sector"]).strip() if (meta is not None and t in meta.index) else ""
+        if (sec or "Other") == sector:
+            out.append(t)
+        if len(out) >= cap:
+            break
+    return out
+
+
+def _signal_label(signals, ticker) -> str:
+    if signals is not None and ticker in signals.index and "signal" in signals.columns:
+        return str(signals.loc[ticker, "signal"] or "")
+    return ""
+
+
+def pick_defend(returns, meta, signals, analyst, diversification_data,
+                ccy_exposure_rows, industry_groups, metrics) -> dict | None:
+    """The single most material structural risk, or an honest no-pick."""
+    candidates: list[tuple[float, dict]] = []
+
+    top_sector = str(metrics.get("top_sector") or "")
+    top_share = metrics.get("top_share")
+    top_share = float(top_share) if isinstance(top_share, (int, float)) and top_share == top_share else 0.0
+    if top_sector and top_share >= DOCTOR_DEFEND_SECTOR_MIN:
+        tks = _open_names_in_sector(returns, meta, top_sector)
+        if tks:
+            candidates.append((top_share, {
+                "lens": "defend", "tickers": tks, "verb": "trim",
+                "why": f"{top_sector} is {top_share*100:.0f}% of your open names - "
+                       f"a single-sector shock would hit hard.",
+                "module_key": "industry", "module_label": "Industry outlook"}))
+
+    if returns is not None and not returns.empty:
+        for t in returns[returns["status"] == "open"].index.tolist():
+            lab = _signal_label(signals, t).lower()
+            tp = pd.to_numeric(returns.loc[t, "total_pct"], errors="coerce")
+            if ("downtrend" in lab or "trending down" in lab) and tp == tp and tp < 0:
+                sev = min(1.0, abs(float(tp)) / 40.0)
+                candidates.append((sev, {
+                    "lens": "defend", "tickers": [t], "verb": "exit",
+                    "why": f"{t} is in a downtrend and down {abs(float(tp)):.0f}% - "
+                           f"a clean exit candidate.",
+                    "module_key": "exit", "module_label": "Exit strategy"}))
+
+    for row in (ccy_exposure_rows or []):
+        share = row.get("share") if isinstance(row, dict) else None
+        share = float(share) if isinstance(share, (int, float)) and share == share else 0.0
+        if share > 0.5:
+            ccy = (row.get("ccy") or row.get("currency")) if isinstance(row, dict) else ""
+            candidates.append((share, {
+                "lens": "defend", "tickers": [], "verb": "review",
+                "why": f"{ccy} is {share*100:.0f}% of the basket - concentrated FX risk.",
+                "module_key": "currency", "module_label": "Currency exposure"}))
+
+    if not candidates:
+        return {"lens": "defend",
+                "none_reason": "No single structural risk stands out - concentration, "
+                               "trend and FX all look balanced."}
+    candidates.sort(key=lambda kv: kv[0], reverse=True)
+    return candidates[0][1]
+
+
+def _q(df, ticker, col):
+    if df is not None and ticker in df.index and col in df.columns:
+        return pd.to_numeric(pd.Series([df.loc[ticker, col]]), errors="coerce").iloc[0]
+    return float("nan")
+
+
+def pick_tune(returns, quant_metrics, meta, metrics) -> dict | None:
+    """Best 'adjust what you hold' move: take profit on an overbought winner,
+    or review a round-tripped name. Honest no-pick when neither applies."""
+    candidates: list[tuple[float, dict]] = []
+    if returns is not None and not returns.empty:
+        open_idx = returns[returns["status"] == "open"].index.tolist()
+        for t in open_idx:
+            tp = pd.to_numeric(returns.loc[t, "total_pct"], errors="coerce")
+            rsi = _q(quant_metrics, t, "rsi")
+            if rsi == rsi and rsi >= 70 and tp == tp and tp > 0:
+                candidates.append((float(rsi) / 100.0, {
+                    "lens": "tune", "tickers": [t], "verb": "take profit",
+                    "why": f"{t} is overbought (RSI {rsi:.0f}) and up {tp:.0f}% - "
+                           f"consider banking some gains.",
+                    "module_key": "signal", "module_label": "Signal map"}))
+            m1 = pd.to_numeric(returns.loc[t].get("1m_pct"), errors="coerce")
+            m3 = pd.to_numeric(returns.loc[t].get("3m_pct"), errors="coerce")
+            if (tp == tp and -2.0 <= tp <= 2.0 and m3 == m3 and m3 > 0
+                    and m1 == m1 and m1 < 0):
+                candidates.append((0.4, {
+                    "lens": "tune", "tickers": [t], "verb": "review",
+                    "why": f"{t} round-tripped its gains (3m +{m3:.0f}%, last month "
+                           f"{m1:.0f}%) - review the thesis.",
+                    "module_key": "holdings", "module_label": "Holdings"}))
+    if not candidates:
+        return {"lens": "tune",
+                "none_reason": "Nothing to tune - no positions are stretched or "
+                               "stalling enough to act on."}
+    candidates.sort(key=lambda kv: kv[0], reverse=True)
+    return candidates[0][1]
+
+
+def pick_grow(value_rows, auto_tickers, bb_universe_obs, watchlist_payload,
+              analyst_rows, returns, meta, metrics) -> dict | None:
+    """Gap-aware expansion: score a unified discovery pool by conviction plus a
+    basket-fit bonus for filling a sector gap. Honest no-pick on an empty pool."""
+    open_sectors = set()
+    if returns is not None and not returns.empty and meta is not None:
+        for t in returns[returns["status"] == "open"].index.tolist():
+            if t in meta.index:
+                open_sectors.add(str(meta.loc[t, "sector"] or "").strip() or "Other")
+
+    pool: dict[str, dict] = {}   # ticker -> {name, sector, base, src}
+
+    def _add(tkr, name, sector, base, src):
+        if not tkr:
+            return
+        prev = pool.get(tkr)
+        if prev is None or base > prev["base"]:
+            pool[tkr] = {"name": name or tkr, "sector": sector or "", "base": base, "src": src}
+
+    auto_set = set(auto_tickers or [])
+    for r in (value_rows or []):
+        t = r.get("ticker")
+        base = (r.get("pass_count", 0) or 0) / 6.0
+        if t in auto_set or r.get("is_bb_idea"):
+            base = max(base, 1.0)
+        _add(t, r.get("name"), r.get("sector"), base, "value")
+    for o in (bb_universe_obs or []):
+        t = o.get("ticker") if isinstance(o, dict) else None
+        sec = str((meta.loc[t, "sector"] if (meta is not None and t in meta.index) else "") or "")
+        _add(t, (o.get("name") if isinstance(o, dict) else t), sec, 0.6, "bb")
+    for row in (watchlist_payload or {}).get("rows", []) if isinstance(watchlist_payload, dict) else []:
+        t = row.get("ticker")
+        _add(t, row.get("name"), row.get("sector"), 0.4, "watchlist")
+    for r in (analyst_rows or []):
+        t = r.get("ticker")
+        _add(t, r.get("name"), r.get("sector"), 0.4, "reentry")
+
+    if not pool:
+        return {"lens": "grow",
+                "none_reason": "Nothing compelling to add - the discovery pool is thin "
+                               "right now."}
+
+    best_t, best_score, best_gap = None, -1.0, False
+    for t, d in pool.items():
+        gap = bool(d["sector"]) and d["sector"] not in open_sectors
+        score = d["base"] + (DOCTOR_FIT_BONUS if gap else 0.0)
+        if score > best_score:
+            best_t, best_score, best_gap = t, score, gap
+    d = pool[best_t]
+    module = "value" if d["src"] == "value" else "watchlist"
+    why = f"{best_t} screens well on the {d['src']} surface"
+    if best_gap:
+        why += f" AND adds {d['sector']}, a sector you don't currently hold"
+    why += "."
+    return {"lens": "grow", "tickers": [best_t], "verb": "add", "why": why,
+            "module_key": module,
+            "module_label": "Value screen" if module == "value" else "Watchlist"}
+
+
+def _pct_change_window(series: pd.Series, days: int) -> float:
+    if series is None or series.empty:
+        return float("nan")
+    end = series.index[-1]
+    cutoff = end - pd.Timedelta(days=days)
+    sub = series.loc[:cutoff]
+    if sub.empty:
+        return float("nan")
+    base = float(sub.iloc[-1])
+    if base == 0:
+        return float("nan")
+    return (float(series.iloc[-1]) / base - 1) * 100.0
+
+
+def _detractor_cluster_sector(contrib, meta) -> str:
+    if contrib is None or contrib.empty or "contribution" not in contrib.columns:
+        return ""
+    worst = contrib.sort_values("contribution").head(3)
+    secs = set()
+    for t in worst.index.tolist():
+        if meta is not None and t in meta.index:
+            secs.add(str(meta.loc[t, "sector"] or "").strip() or "Other")
+    return next(iter(secs)) if len(secs) == 1 and worst.shape[0] >= 3 else ""
+
+
+def _breadth_down_frac(returns, signals) -> float:
+    if returns is None or returns.empty or "status" not in returns.columns:
+        return float("nan")
+    open_idx = returns[returns["status"] == "open"].index.tolist()
+    if not open_idx:
+        return float("nan")
+    down = 0
+    for t in open_idx:
+        if "down" in _signal_label(signals, t).lower():
+            down += 1
+    return down / len(open_idx)
+
+
+def compute_doctor_report(*, returns, meta, basket, bench, contrib, signals,
+                          analyst, quant_metrics, diversification_data,
+                          ccy_exposure_rows, industry_groups, value_rows,
+                          auto_tickers, bb_universe_obs, watchlist_payload,
+                          analyst_rows, as_of: str) -> dict:
+    """Pure whole-basket check-up. Never raises; degrades to honest no-picks."""
+    # `basket` / `bench` arrive as CUMULATIVE-RETURN-PERCENT series (start at 0,
+    # can cross zero) -- not price levels. Beta / vol / drawdown / alpha all need
+    # a positive LEVEL series, so convert once here: level = 1 + pct/100. This
+    # keeps `.pct_change()` finite (a 0.0 pct becomes level 1.0, never 0) and
+    # lets the price-level-based helpers work correctly on real pipeline data.
+    _basket_lvl = (1.0 + basket / 100.0) if (basket is not None and not basket.empty) else basket
+    _bench_lvl = (1.0 + bench / 100.0) if (bench is not None and not bench.empty) else bench
+    sec = sector_effective_n(returns, meta)
+    vol = basket_vol_trend(_basket_lvl)
+    dd = float("nan")
+    if _basket_lvl is not None and not _basket_lvl.empty:
+        peak = float(_basket_lvl.cummax().iloc[-1])
+        if peak != 0:
+            dd = (float(_basket_lvl.iloc[-1]) / peak - 1) * 100.0
+    a30 = _pct_change_window(_basket_lvl, 30) - _pct_change_window(_bench_lvl, 30) \
+        if (_basket_lvl is not None and _bench_lvl is not None) else float("nan")
+    metrics = {
+        "beta": basket_beta(_basket_lvl, _bench_lvl),
+        "pct_underwater": pct_open_underwater(returns),
+        "effective_n": sec["effective_n"], "top_sector": sec["top_sector"],
+        "top_share": sec["top_share"], "hhi": sec["hhi"], "n_sectors": sec["n_sectors"],
+        "vol": vol["vol"], "recent_vol": vol["recent_vol"], "vol_rising": vol["rising"],
+        "drawdown_pct": dd, "alpha_30d_pp": a30,
+        "detractor_cluster_sector": _detractor_cluster_sector(contrib, meta),
+        "breadth_down_frac": _breadth_down_frac(returns, signals),
+    }
+    state, drivers = evaluate_health(metrics)
+    diagnosis = _doctor_diagnosis(metrics, drivers)
+    actions = {
+        "defend": pick_defend(returns, meta, signals, analyst, diversification_data,
+                              ccy_exposure_rows, industry_groups, metrics),
+        "tune": pick_tune(returns, quant_metrics, meta, metrics),
+        "grow": pick_grow(value_rows, auto_tickers, bb_universe_obs, watchlist_payload,
+                          analyst_rows, returns, meta, metrics),
+    }
+    return {"state": state, "drivers": drivers, "diagnosis": diagnosis,
+            "metrics": metrics, "actions": actions, "as_of": as_of}
+
+
+def render_doctor(report: dict) -> str:
+    """Toggled inline panel: header + state badge + driver chips + diagnosis +
+    three action cards (Defend / Tune / Grow). All dynamic text is _esc-escaped."""
+    state = _esc(str(report.get("state", "")))
+    state_cls = {"Healthy": "ok", "Watch": "warn",
+                 "Needs attention": "bad"}.get(report.get("state", ""), "warn")
+    as_of = _esc(str(report.get("as_of", "")))
+    chips = "".join(
+        f'<span class="doc-chip doc-{_esc(d.get("tone","neutral"))}">{_esc(d.get("label",""))}</span>'
+        for d in (report.get("drivers") or [])
+    )
+    diagnosis = _esc(str(report.get("diagnosis", "")))
+
+    verb_tone = {"trim": "bad", "exit": "bad", "take profit": "warn",
+                 "add": "ok", "review": "neutral"}
+    lens_order = [("defend", "Defend"), ("tune", "Tune"), ("grow", "Grow")]
+    cards = []
+    for key, label in lens_order:
+        a = (report.get("actions") or {}).get(key) or {}
+        if a.get("none_reason"):
+            cards.append(
+                f'<div class="doc-card doc-card-none">'
+                f'<div class="doc-lens">{_esc(label)}</div>'
+                f'<div class="doc-none">{_esc(a["none_reason"])}</div></div>')
+            continue
+        verb = str(a.get("verb", ""))
+        tickers = " ".join(_esc(str(t)) for t in (a.get("tickers") or []))
+        head = f'<span class="doc-verb doc-{verb_tone.get(verb,"neutral")}">{_esc(verb)}</span>'
+        if tickers:
+            head += f' <span class="doc-tk">{tickers}</span>'
+        link = ""
+        if a.get("module_label"):
+            link = (f'<div class="doc-link">&rarr; see '
+                    f'{_esc(str(a["module_label"]))}</div>')
+        cards.append(
+            f'<div class="doc-card">'
+            f'<div class="doc-lens">{_esc(label)}</div>'
+            f'<div class="doc-head">{head}</div>'
+            f'<div class="doc-why">{_esc(str(a.get("why","")))}</div>'
+            f'{link}</div>')
+    cards_html = "\n".join(cards)
+
+    return f'''<section class="doctor-wrap" id="doctor-wrap" aria-hidden="true" aria-label="Basket check-up">
+  <div class="doctor-card">
+    <div class="doctor-head">
+      <span class="doctor-eyebrow">Basket check-up</span>
+      <span class="doctor-state doc-{state_cls}">{state}</span>
+      <span class="doctor-asof">as of {as_of}</span>
+    </div>
+    <div class="doctor-chips">{chips}</div>
+    <p class="doctor-diagnosis">{diagnosis}</p>
+    <div class="doctor-actions">
+{cards_html}
+    </div>
+  </div>
+</section>'''
+
+
 def last_settled_close_date(index, now=None, settled_hour_utc=21):
     """Date of the last SETTLED trading session in ``index``.
 
@@ -6886,6 +7353,18 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     # since the screen's data is only as fresh as that fetch (computed once up top
     # as uni_as_of from the embedded cache_date, NOT mtime which CI resets).
     value_html = render_value_screen(value_rows, uni_as_of)
+
+    # v3.2 Doctor -- deterministic whole-basket check-up over already-computed
+    # data (zero extra fetch). Toggled panel; pinned far-left in the topbar.
+    _doctor_report = compute_doctor_report(
+        returns=returns, meta=meta, basket=basket, bench=bench, contrib=contrib,
+        signals=signals, analyst=analyst if analyst is not None else pd.DataFrame(),
+        quant_metrics=quant_metrics, diversification_data=diversification_data,
+        ccy_exposure_rows=ccy_exposure_rows, industry_groups=industry_groups,
+        value_rows=value_rows, auto_tickers=auto_tickers or [],
+        bb_universe_obs=bigbrain_observations, watchlist_payload=watchlist_payload,
+        analyst_rows=analyst_rows, as_of=close_as_of)
+    doctor_html = render_doctor(_doctor_report)
 
     n_total = len(returns)
     n_open = int((returns.status == "open").sum()) if not returns.empty else 0
@@ -7704,6 +8183,43 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
   .palette-toggle button:hover{{color:var(--text);border-color:var(--text-dim)}}
   .palette-toggle button.active{{background:var(--accent);color:var(--ink);
     border-color:var(--accent);font-weight:600}}
+
+  /* v3.2 Doctor panel -- mirrors the pocket-lesson slide-open pattern. */
+  .doctor-btn[aria-pressed="true"]{{background:var(--accent);color:var(--ink);border-color:var(--accent)}}
+  .doctor-wrap{{max-height:0;overflow:hidden;opacity:0;margin:0;
+    transition:max-height .3s ease,opacity .3s ease,margin .3s ease}}
+  .doctor-wrap.is-open{{max-height:1200px;opacity:1;margin:10px 0 4px}}
+  @media (prefers-reduced-motion:reduce){{.doctor-wrap{{transition:none}}}}
+  .doctor-card{{background:var(--card);border:1px solid var(--border);
+    border-radius:12px;padding:16px 18px}}
+  .doctor-head{{display:flex;align-items:center;gap:10px;flex-wrap:wrap}}
+  .doctor-eyebrow{{font-size:.72rem;letter-spacing:.08em;text-transform:uppercase;
+    color:var(--text-dim)}}
+  .doctor-state{{font-weight:700;font-size:.78rem;padding:2px 8px;border-radius:999px}}
+  .doctor-state.doc-ok{{background:rgba(52,211,153,.15);color:#34d399}}
+  .doctor-state.doc-warn{{background:rgba(251,191,36,.15);color:#fbbf24}}
+  .doctor-state.doc-bad{{background:rgba(248,113,113,.15);color:#f87171}}
+  .doctor-asof{{margin-left:auto;font-size:.72rem;color:var(--text-dim)}}
+  .doctor-chips{{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0 0}}
+  .doc-chip{{font-size:.72rem;padding:2px 8px;border-radius:999px;
+    border:1px solid var(--border);color:var(--text-dim)}}
+  .doc-chip.doc-danger{{border-color:#f87171;color:#f87171}}
+  .doc-chip.doc-warning{{border-color:#fbbf24;color:#fbbf24}}
+  .doctor-diagnosis{{font-family:Georgia,'Times New Roman',serif;font-size:.95rem;
+    line-height:1.5;color:var(--text);margin:10px 0 14px}}
+  .doctor-actions{{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}}
+  @media (max-width:760px){{.doctor-actions{{grid-template-columns:1fr}}}}
+  .doc-card{{background:var(--bg);border:1px solid var(--border);border-radius:10px;
+    padding:12px}}
+  .doc-lens{{font-size:.7rem;letter-spacing:.06em;text-transform:uppercase;
+    color:var(--text-dim);margin-bottom:6px}}
+  .doc-verb{{font-weight:700;font-size:.8rem;text-transform:capitalize}}
+  .doc-verb.doc-bad{{color:#f87171}} .doc-verb.doc-warn{{color:#fbbf24}}
+  .doc-verb.doc-ok{{color:#34d399}} .doc-verb.doc-neutral{{color:var(--text-dim)}}
+  .doc-tk{{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.8rem;color:var(--text)}}
+  .doc-why{{font-size:.82rem;line-height:1.45;color:var(--text);margin:6px 0 0}}
+  .doc-link{{font-size:.74rem;color:var(--accent);margin-top:8px}}
+  .doc-none{{font-size:.82rem;color:var(--text-dim);font-style:italic;margin-top:4px}}
 
   /* v1.9 Pocket Lesson: the topbar toggle uses .layout-toggle base styles
      (already defined) plus an aria-pressed=true state for the "on" visual.
@@ -9179,19 +9695,13 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
   <!-- v2.1: icon-only topbar. Each button shows a single SVG glyph + a
        data-tooltip that slides in on hover with the human-readable name.
        Saves ~70% horizontal space vs the v2.0 text labels. -->
-  <button class="layout-toggle icon-btn" id="edit-layout-btn" type="button" aria-pressed="false"
-          aria-label="Edit layout" data-tooltip="Edit layout">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-      <line x1="4" y1="6" x2="13" y2="6"/><line x1="19" y1="6" x2="20" y2="6"/><circle cx="16" cy="6" r="2"/>
-      <line x1="4" y1="12" x2="7" y2="12"/><line x1="13" y1="12" x2="20" y2="12"/><circle cx="10" cy="12" r="2"/>
-      <line x1="4" y1="18" x2="15" y2="18"/><circle cx="18" cy="18" r="2"/>
-    </svg>
-  </button>
-  <button class="layout-reset icon-btn" id="reset-layout-btn" type="button" hidden
-          aria-label="Reset layout" data-tooltip="Reset layout">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-      <path d="M3 7v6h6"/>
-      <path d="M21 17a9 9 0 0 0-15-6.7L3 13"/>
+  <!-- v3.2 Doctor: toggled whole-basket check-up. Pinned far-left (frequent use).
+       State persisted in localStorage as `doctorOn` (default OFF). -->
+  <button class="layout-toggle icon-btn doctor-btn" id="doctor-btn" type="button" aria-pressed="false"
+          aria-label="Basket check-up" data-tooltip="Doctor">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M8 2v4M8 6a4 4 0 0 0 8 0V2"/><path d="M8 6v5a6 6 0 0 0 12 0"/>
+      <circle cx="20" cy="11" r="2"/><path d="M11 16v2a4 4 0 0 0 8 0v-1"/>
     </svg>
   </button>
   <button class="layout-toggle icon-btn desktop-mode-btn" id="desktop-mode-btn" type="button" aria-pressed="false"
@@ -9231,7 +9741,26 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
       <circle cx="12" cy="12" r="8.5"/>
     </svg>
   </button>
+  <!-- v3.2: Edit layout + its Reset moved to the far right (a design control,
+       like the palette/theme), leaving the frequently-used Doctor at far left. -->
+  <button class="layout-reset icon-btn" id="reset-layout-btn" type="button" hidden
+          aria-label="Reset layout" data-tooltip="Reset layout">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M3 7v6h6"/>
+      <path d="M21 17a9 9 0 0 0-15-6.7L3 13"/>
+    </svg>
+  </button>
+  <button class="layout-toggle icon-btn" id="edit-layout-btn" type="button" aria-pressed="false"
+          aria-label="Edit layout" data-tooltip="Edit layout">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <line x1="4" y1="6" x2="13" y2="6"/><line x1="19" y1="6" x2="20" y2="6"/><circle cx="16" cy="6" r="2"/>
+      <line x1="4" y1="12" x2="7" y2="12"/><line x1="13" y1="12" x2="20" y2="12"/><circle cx="10" cy="12" r="2"/>
+      <line x1="4" y1="18" x2="15" y2="18"/><circle cx="18" cy="18" r="2"/>
+    </svg>
+  </button>
 </div>
+
+{doctor_html}
 
 <!-- v1.9 Pocket Lesson card. Sits just below the topbar. Default state is
      collapsed (no `.is-open` class). JS reads localStorage on load and adds
@@ -10962,6 +11491,28 @@ document.getElementById('hero-chart').addEventListener('click', (e) => {{
 
   btn.addEventListener('click', () => setEnabled(btn.getAttribute('aria-pressed') !== 'true'));
   nextBtn.addEventListener('click', () => renderTip(pickRandomTip()));
+}})();
+
+// v3.2 Doctor: toggled check-up panel. State `doctorOn` in localStorage
+// ('1'/'0'), default OFF. Mirrors the pocket-lesson slide-open pattern.
+(function setupDoctor() {{
+  const STORAGE_KEY = 'doctorOn';
+  const btn = document.getElementById('doctor-btn');
+  const wrap = document.getElementById('doctor-wrap');
+  if (!btn || !wrap) return;
+  function setEnabled(on, opts) {{
+    opts = opts || {{}};
+    btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+    wrap.classList.toggle('is-open', on);
+    wrap.setAttribute('aria-hidden', on ? 'false' : 'true');
+    if (!opts.silent) {{
+      try {{ localStorage.setItem(STORAGE_KEY, on ? '1' : '0'); }} catch (e) {{}}
+    }}
+  }}
+  let initial = false;
+  try {{ initial = localStorage.getItem(STORAGE_KEY) === '1'; }} catch (e) {{}}
+  setEnabled(initial, {{silent: true}});
+  btn.addEventListener('click', () => setEnabled(btn.getAttribute('aria-pressed') !== 'true'));
 }})();
 
 // v2.1: palette toggle collapsed from 4 buttons into 1 cycling button. Each

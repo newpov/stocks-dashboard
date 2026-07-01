@@ -116,6 +116,10 @@ def test_public_pipeline_surface_exists():
         "fetch_ticker_news", "compute_quant_metrics",
         "build_value_screen", "select_auto_watchlist", "build_combined_watchlist",
         "build_portfolio_payload", "export_basket_snapshot",
+        # v3.2 Doctor public surface
+        "compute_doctor_report", "render_doctor", "basket_beta",
+        "pct_open_underwater", "sector_effective_n", "basket_vol_trend",
+        "evaluate_health",
     ]
     missing = [n for n in expected if not callable(getattr(build, n, None))]
     assert missing == [], f"missing/renamed public functions: {missing}"
