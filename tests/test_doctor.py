@@ -175,3 +175,46 @@ def test_doctor_diagnosis_mentions_beta_when_leverage_flag():
     _, drivers = build.evaluate_health(m)
     txt = build._doctor_diagnosis(m, drivers)
     assert "1.4" in txt or "beta" in txt.lower()
+
+
+def _signals_df(rows):
+    # rows: list of (ticker, label)
+    return pd.DataFrame([{"signal": lab} for (_, lab) in rows],
+                        index=[t for (t, _) in rows])
+
+
+def test_pick_defend_sector_overtilt():
+    returns = _returns_df([("AAA", "open", 5.0), ("BBB", "open", 6.0),
+                           ("CCC", "open", 7.0), ("DDD", "open", 8.0)])
+    meta = _meta_df([("AAA", "Tech"), ("BBB", "Tech"),
+                     ("CCC", "Tech"), ("DDD", "Energy")])  # Tech 75%
+    metrics = {"top_sector": "Tech", "top_share": 0.75}
+    act = build.pick_defend(returns, meta, _signals_df([]), pd.DataFrame(),
+                            None, [], [], metrics)
+    assert act["lens"] == "defend" and act["verb"] == "trim"
+    assert "Tech" in act["why"] and act["module_key"] == "industry"
+    assert set(act["tickers"]).issubset({"AAA", "BBB", "CCC"})
+
+
+def test_pick_defend_downtrend_exit_beats_mild_tilt():
+    returns = _returns_df([("AAA", "open", 5.0), ("BBB", "open", -35.0),
+                           ("CCC", "open", 4.0)])
+    meta = _meta_df([("AAA", "Tech"), ("BBB", "Energy"), ("CCC", "Health")])
+    signals = _signals_df([("AAA", "Trending up"), ("BBB", "Strong downtrend"),
+                           ("CCC", "Pullback")])
+    metrics = {"top_sector": "Tech", "top_share": 0.34}  # below tilt floor-ish
+    act = build.pick_defend(returns, meta, signals, pd.DataFrame(),
+                            None, [], [], metrics)
+    assert act["verb"] == "exit" and act["tickers"] == ["BBB"]
+    assert act["module_key"] == "exit"
+
+
+def test_pick_defend_none_when_nothing_material():
+    returns = _returns_df([("AAA", "open", 5.0), ("BBB", "open", 6.0),
+                           ("CCC", "open", 7.0), ("DDD", "open", 8.0)])
+    meta = _meta_df([("AAA", "Tech"), ("BBB", "Energy"),
+                     ("CCC", "Health"), ("DDD", "Fin")])
+    metrics = {"top_sector": "Tech", "top_share": 0.25}
+    act = build.pick_defend(returns, meta, _signals_df([]), pd.DataFrame(),
+                            None, [], [], metrics)
+    assert act is not None and "none_reason" in act and act["lens"] == "defend"

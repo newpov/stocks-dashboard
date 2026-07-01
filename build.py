@@ -6880,6 +6880,70 @@ def _doctor_diagnosis(metrics: dict, drivers: list[dict]) -> str:
     return " ".join(parts)
 
 
+def _open_names_in_sector(returns, meta, sector, cap=3):
+    out = []
+    for t in returns[returns["status"] == "open"].index.tolist():
+        sec = str(meta.loc[t, "sector"]).strip() if (meta is not None and t in meta.index) else ""
+        if (sec or "Other") == sector:
+            out.append(t)
+        if len(out) >= cap:
+            break
+    return out
+
+
+def _signal_label(signals, ticker) -> str:
+    if signals is not None and ticker in signals.index and "signal" in signals.columns:
+        return str(signals.loc[ticker, "signal"] or "")
+    return ""
+
+
+def pick_defend(returns, meta, signals, analyst, diversification_data,
+                ccy_exposure_rows, industry_groups, metrics) -> dict | None:
+    """The single most material structural risk, or an honest no-pick."""
+    candidates: list[tuple[float, dict]] = []
+
+    top_sector = str(metrics.get("top_sector") or "")
+    top_share = metrics.get("top_share")
+    top_share = float(top_share) if isinstance(top_share, (int, float)) and top_share == top_share else 0.0
+    if top_sector and top_share >= DOCTOR_DEFEND_SECTOR_MIN:
+        tks = _open_names_in_sector(returns, meta, top_sector)
+        if tks:
+            candidates.append((top_share, {
+                "lens": "defend", "tickers": tks, "verb": "trim",
+                "why": f"{top_sector} is {top_share*100:.0f}% of your open names - "
+                       f"a single-sector shock would hit hard.",
+                "module_key": "industry", "module_label": "Industry outlook"}))
+
+    if returns is not None and not returns.empty:
+        for t in returns[returns["status"] == "open"].index.tolist():
+            lab = _signal_label(signals, t).lower()
+            tp = pd.to_numeric(returns.loc[t, "total_pct"], errors="coerce")
+            if ("downtrend" in lab or "trending down" in lab) and tp == tp and tp < 0:
+                sev = min(1.0, abs(float(tp)) / 40.0)
+                candidates.append((sev, {
+                    "lens": "defend", "tickers": [t], "verb": "exit",
+                    "why": f"{t} is in a downtrend and down {abs(float(tp)):.0f}% - "
+                           f"a clean exit candidate.",
+                    "module_key": "exit", "module_label": "Exit strategy"}))
+
+    for row in (ccy_exposure_rows or []):
+        share = row.get("share") if isinstance(row, dict) else None
+        share = float(share) if isinstance(share, (int, float)) and share == share else 0.0
+        if share > 0.5:
+            ccy = row.get("currency") if isinstance(row, dict) else ""
+            candidates.append((share, {
+                "lens": "defend", "tickers": [], "verb": "review",
+                "why": f"{ccy} is {share*100:.0f}% of the basket - concentrated FX risk.",
+                "module_key": "currency", "module_label": "Currency exposure"}))
+
+    if not candidates:
+        return {"lens": "defend",
+                "none_reason": "No single structural risk stands out - concentration, "
+                               "trend and FX all look balanced."}
+    candidates.sort(key=lambda kv: kv[0], reverse=True)
+    return candidates[0][1]
+
+
 def last_settled_close_date(index, now=None, settled_hour_utc=21):
     """Date of the last SETTLED trading session in ``index``.
 
