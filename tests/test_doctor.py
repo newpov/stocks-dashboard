@@ -92,3 +92,27 @@ def test_sector_effective_n_missing_sector_is_other_and_empty_safe():
     assert out["top_sector"] == "Other"
     empty = build.sector_effective_n(_returns_df([("Z", "closed", 1.0)]), meta)
     assert empty["n_sectors"] == 0 and np.isnan(empty["effective_n"])
+
+
+def test_basket_vol_trend_rising_when_recent_choppier():
+    # 40 calm days (+/-0.1%) then 20 choppy days (+/-3%)
+    import numpy as np
+    calm = []
+    v = 100.0
+    for i in range(40):
+        v *= (1 + (0.001 if i % 2 == 0 else -0.001))
+        calm.append(v)
+    choppy = []
+    for i in range(20):
+        v *= (1 + (0.03 if i % 2 == 0 else -0.03))
+        choppy.append(v)
+    basket = _series(calm + choppy)
+    out = build.basket_vol_trend(basket, recent_days=20)
+    assert out["recent_vol"] > out["baseline_vol"]
+    assert out["rising"] is True
+    assert out["vol"] > 0
+
+
+def test_basket_vol_trend_short_series_safe():
+    out = build.basket_vol_trend(_series([100, 101]), recent_days=20)
+    assert np.isnan(out["vol"]) and out["rising"] is False

@@ -6797,6 +6797,27 @@ def sector_effective_n(returns: pd.DataFrame, meta: pd.DataFrame) -> dict:
             "n_sectors": len(counts)}
 
 
+def basket_vol_trend(basket: pd.Series, recent_days: int = 30, ann: int = 252) -> dict:
+    """Annualized realized volatility (%) of basket daily returns, plus whether
+    the most recent `recent_days` window is choppier than the earlier baseline."""
+    out = {"vol": float("nan"), "recent_vol": float("nan"),
+           "baseline_vol": float("nan"), "rising": False}
+    if basket is None or len(basket) < (recent_days + 5):
+        return out
+    rets = basket.astype(float).pct_change().dropna()
+    if len(rets) < (recent_days + 2):
+        return out
+    scale = float(np.sqrt(ann)) * 100.0
+    out["vol"] = float(rets.std(ddof=0)) * scale
+    recent = rets.iloc[-recent_days:]
+    baseline = rets.iloc[:-recent_days]
+    if len(baseline) >= 2:
+        out["recent_vol"] = float(recent.std(ddof=0)) * scale
+        out["baseline_vol"] = float(baseline.std(ddof=0)) * scale
+        out["rising"] = bool(out["recent_vol"] > out["baseline_vol"] * DOCTOR_VOL_RISING_RATIO)
+    return out
+
+
 def last_settled_close_date(index, now=None, settled_hour_utc=21):
     """Date of the last SETTLED trading session in ``index``.
 
