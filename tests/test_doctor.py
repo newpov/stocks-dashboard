@@ -1,4 +1,5 @@
 # tests/test_doctor.py
+import inspect
 import numpy as np
 import pandas as pd
 import pytest
@@ -326,6 +327,29 @@ def test_compute_doctor_report_shape_and_three_actions():
     assert isinstance(rep["metrics"]["beta"], float)
 
 
+def test_compute_doctor_report_handles_percent_return_series():
+    # Real pipeline passes CUMULATIVE-RETURN-PERCENT series (start at 0, cross
+    # zero) -- not price levels. Beta/vol/drawdown must be finite, not NaN from
+    # pct_change() dividing by a 0.0 starting value.
+    lvl_b = _series([100, 102, 101, 105, 108, 110] + list(range(110, 150)))
+    # identical shape for basket and bench -> beta ~ 1.0
+    pct_b = (lvl_b / float(lvl_b.iloc[0]) - 1.0) * 100.0   # starts at 0.0
+    pct_bench = pct_b.copy()
+    returns = _returns_df([("AAA", "open", 5.0), ("BBB", "open", -3.0)])
+    meta = _meta_df([("AAA", "Tech"), ("BBB", "Energy")])
+    rep = build.compute_doctor_report(
+        returns=returns, meta=meta, basket=pct_b, bench=pct_bench,
+        contrib=pd.DataFrame(), signals=_signals_df([]), analyst=pd.DataFrame(),
+        quant_metrics=pd.DataFrame(), diversification_data=None, ccy_exposure_rows=[],
+        industry_groups=[], value_rows=[], auto_tickers=[], bb_universe_obs=[],
+        watchlist_payload={}, analyst_rows=[], as_of="x")
+    beta = rep["metrics"]["beta"]
+    assert beta == beta and abs(beta - 1.0) < 1e-6      # finite AND ~1.0
+    assert rep["metrics"]["vol"] == rep["metrics"]["vol"]        # not NaN
+    assert rep["metrics"]["drawdown_pct"] == rep["metrics"]["drawdown_pct"]
+    assert "n/a beta" not in rep["diagnosis"]
+
+
 def test_compute_doctor_report_never_raises_on_degenerate():
     basket = _series([100, 101])
     rep = build.compute_doctor_report(
@@ -375,3 +399,20 @@ def test_render_doctor_escapes_adversarial_text():
     html = build.render_doctor(rep)
     assert "<img src=x" not in html and "<script>" not in html
     assert "&lt;" in html
+
+
+def test_doctor_public_surface_importable():
+    for fn in ("basket_beta", "pct_open_underwater", "sector_effective_n",
+               "basket_vol_trend", "evaluate_health", "compute_doctor_report",
+               "render_doctor"):
+        assert callable(getattr(build, fn))
+
+
+def test_doctor_button_and_panel_in_page_source():
+    # The page f-string (returned by render_html) must contain the Doctor button
+    # id, the panel placeholder, and the toggle IIFE. Assert against the source
+    # so we don't need a full network build here.
+    src = inspect.getsource(build.render_html)
+    assert 'id="doctor-btn"' in src
+    assert "{doctor_html}" in src
+    assert "setupDoctor" in src

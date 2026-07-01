@@ -7085,17 +7085,24 @@ def compute_doctor_report(*, returns, meta, basket, bench, contrib, signals,
                           auto_tickers, bb_universe_obs, watchlist_payload,
                           analyst_rows, as_of: str) -> dict:
     """Pure whole-basket check-up. Never raises; degrades to honest no-picks."""
+    # `basket` / `bench` arrive as CUMULATIVE-RETURN-PERCENT series (start at 0,
+    # can cross zero) -- not price levels. Beta / vol / drawdown / alpha all need
+    # a positive LEVEL series, so convert once here: level = 1 + pct/100. This
+    # keeps `.pct_change()` finite (a 0.0 pct becomes level 1.0, never 0) and
+    # lets the price-level-based helpers work correctly on real pipeline data.
+    _basket_lvl = (1.0 + basket / 100.0) if (basket is not None and not basket.empty) else basket
+    _bench_lvl = (1.0 + bench / 100.0) if (bench is not None and not bench.empty) else bench
     sec = sector_effective_n(returns, meta)
-    vol = basket_vol_trend(basket)
+    vol = basket_vol_trend(_basket_lvl)
     dd = float("nan")
-    if basket is not None and not basket.empty:
-        peak = float(basket.cummax().iloc[-1])
+    if _basket_lvl is not None and not _basket_lvl.empty:
+        peak = float(_basket_lvl.cummax().iloc[-1])
         if peak != 0:
-            dd = (float(basket.iloc[-1]) / peak - 1) * 100.0
-    a30 = _pct_change_window(basket, 30) - _pct_change_window(bench, 30) \
-        if (basket is not None and bench is not None) else float("nan")
+            dd = (float(_basket_lvl.iloc[-1]) / peak - 1) * 100.0
+    a30 = _pct_change_window(_basket_lvl, 30) - _pct_change_window(_bench_lvl, 30) \
+        if (_basket_lvl is not None and _bench_lvl is not None) else float("nan")
     metrics = {
-        "beta": basket_beta(basket, bench),
+        "beta": basket_beta(_basket_lvl, _bench_lvl),
         "pct_underwater": pct_open_underwater(returns),
         "effective_n": sec["effective_n"], "top_sector": sec["top_sector"],
         "top_share": sec["top_share"], "hhi": sec["hhi"], "n_sectors": sec["n_sectors"],
@@ -7346,6 +7353,18 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     # since the screen's data is only as fresh as that fetch (computed once up top
     # as uni_as_of from the embedded cache_date, NOT mtime which CI resets).
     value_html = render_value_screen(value_rows, uni_as_of)
+
+    # v3.2 Doctor -- deterministic whole-basket check-up over already-computed
+    # data (zero extra fetch). Toggled panel; pinned far-left in the topbar.
+    _doctor_report = compute_doctor_report(
+        returns=returns, meta=meta, basket=basket, bench=bench, contrib=contrib,
+        signals=signals, analyst=analyst if analyst is not None else pd.DataFrame(),
+        quant_metrics=quant_metrics, diversification_data=diversification_data,
+        ccy_exposure_rows=ccy_exposure_rows, industry_groups=industry_groups,
+        value_rows=value_rows, auto_tickers=auto_tickers or [],
+        bb_universe_obs=bigbrain_observations, watchlist_payload=watchlist_payload,
+        analyst_rows=analyst_rows, as_of=close_as_of)
+    doctor_html = render_doctor(_doctor_report)
 
     n_total = len(returns)
     n_open = int((returns.status == "open").sum()) if not returns.empty else 0
@@ -8164,6 +8183,43 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
   .palette-toggle button:hover{{color:var(--text);border-color:var(--text-dim)}}
   .palette-toggle button.active{{background:var(--accent);color:var(--ink);
     border-color:var(--accent);font-weight:600}}
+
+  /* v3.2 Doctor panel -- mirrors the pocket-lesson slide-open pattern. */
+  .doctor-btn[aria-pressed="true"]{{background:var(--accent);color:var(--ink);border-color:var(--accent)}}
+  .doctor-wrap{{max-height:0;overflow:hidden;opacity:0;margin:0;
+    transition:max-height .3s ease,opacity .3s ease,margin .3s ease}}
+  .doctor-wrap.is-open{{max-height:1200px;opacity:1;margin:10px 0 4px}}
+  @media (prefers-reduced-motion:reduce){{.doctor-wrap{{transition:none}}}}
+  .doctor-card{{background:var(--card);border:1px solid var(--border);
+    border-radius:12px;padding:16px 18px}}
+  .doctor-head{{display:flex;align-items:center;gap:10px;flex-wrap:wrap}}
+  .doctor-eyebrow{{font-size:.72rem;letter-spacing:.08em;text-transform:uppercase;
+    color:var(--text-dim)}}
+  .doctor-state{{font-weight:700;font-size:.78rem;padding:2px 8px;border-radius:999px}}
+  .doctor-state.doc-ok{{background:rgba(52,211,153,.15);color:#34d399}}
+  .doctor-state.doc-warn{{background:rgba(251,191,36,.15);color:#fbbf24}}
+  .doctor-state.doc-bad{{background:rgba(248,113,113,.15);color:#f87171}}
+  .doctor-asof{{margin-left:auto;font-size:.72rem;color:var(--text-dim)}}
+  .doctor-chips{{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0 0}}
+  .doc-chip{{font-size:.72rem;padding:2px 8px;border-radius:999px;
+    border:1px solid var(--border);color:var(--text-dim)}}
+  .doc-chip.doc-danger{{border-color:#f87171;color:#f87171}}
+  .doc-chip.doc-warning{{border-color:#fbbf24;color:#fbbf24}}
+  .doctor-diagnosis{{font-family:Georgia,'Times New Roman',serif;font-size:.95rem;
+    line-height:1.5;color:var(--text);margin:10px 0 14px}}
+  .doctor-actions{{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}}
+  @media (max-width:760px){{.doctor-actions{{grid-template-columns:1fr}}}}
+  .doc-card{{background:var(--bg);border:1px solid var(--border);border-radius:10px;
+    padding:12px}}
+  .doc-lens{{font-size:.7rem;letter-spacing:.06em;text-transform:uppercase;
+    color:var(--text-dim);margin-bottom:6px}}
+  .doc-verb{{font-weight:700;font-size:.8rem;text-transform:capitalize}}
+  .doc-verb.doc-bad{{color:#f87171}} .doc-verb.doc-warn{{color:#fbbf24}}
+  .doc-verb.doc-ok{{color:#34d399}} .doc-verb.doc-neutral{{color:var(--text-dim)}}
+  .doc-tk{{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.8rem;color:var(--text)}}
+  .doc-why{{font-size:.82rem;line-height:1.45;color:var(--text);margin:6px 0 0}}
+  .doc-link{{font-size:.74rem;color:var(--accent);margin-top:8px}}
+  .doc-none{{font-size:.82rem;color:var(--text-dim);font-style:italic;margin-top:4px}}
 
   /* v1.9 Pocket Lesson: the topbar toggle uses .layout-toggle base styles
      (already defined) plus an aria-pressed=true state for the "on" visual.
@@ -9639,19 +9695,13 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
   <!-- v2.1: icon-only topbar. Each button shows a single SVG glyph + a
        data-tooltip that slides in on hover with the human-readable name.
        Saves ~70% horizontal space vs the v2.0 text labels. -->
-  <button class="layout-toggle icon-btn" id="edit-layout-btn" type="button" aria-pressed="false"
-          aria-label="Edit layout" data-tooltip="Edit layout">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-      <line x1="4" y1="6" x2="13" y2="6"/><line x1="19" y1="6" x2="20" y2="6"/><circle cx="16" cy="6" r="2"/>
-      <line x1="4" y1="12" x2="7" y2="12"/><line x1="13" y1="12" x2="20" y2="12"/><circle cx="10" cy="12" r="2"/>
-      <line x1="4" y1="18" x2="15" y2="18"/><circle cx="18" cy="18" r="2"/>
-    </svg>
-  </button>
-  <button class="layout-reset icon-btn" id="reset-layout-btn" type="button" hidden
-          aria-label="Reset layout" data-tooltip="Reset layout">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-      <path d="M3 7v6h6"/>
-      <path d="M21 17a9 9 0 0 0-15-6.7L3 13"/>
+  <!-- v3.2 Doctor: toggled whole-basket check-up. Pinned far-left (frequent use).
+       State persisted in localStorage as `doctorOn` (default OFF). -->
+  <button class="layout-toggle icon-btn doctor-btn" id="doctor-btn" type="button" aria-pressed="false"
+          aria-label="Basket check-up" data-tooltip="Doctor">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M8 2v4M8 6a4 4 0 0 0 8 0V2"/><path d="M8 6v5a6 6 0 0 0 12 0"/>
+      <circle cx="20" cy="11" r="2"/><path d="M11 16v2a4 4 0 0 0 8 0v-1"/>
     </svg>
   </button>
   <button class="layout-toggle icon-btn desktop-mode-btn" id="desktop-mode-btn" type="button" aria-pressed="false"
@@ -9691,7 +9741,26 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
       <circle cx="12" cy="12" r="8.5"/>
     </svg>
   </button>
+  <!-- v3.2: Edit layout + its Reset moved to the far right (a design control,
+       like the palette/theme), leaving the frequently-used Doctor at far left. -->
+  <button class="layout-reset icon-btn" id="reset-layout-btn" type="button" hidden
+          aria-label="Reset layout" data-tooltip="Reset layout">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M3 7v6h6"/>
+      <path d="M21 17a9 9 0 0 0-15-6.7L3 13"/>
+    </svg>
+  </button>
+  <button class="layout-toggle icon-btn" id="edit-layout-btn" type="button" aria-pressed="false"
+          aria-label="Edit layout" data-tooltip="Edit layout">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <line x1="4" y1="6" x2="13" y2="6"/><line x1="19" y1="6" x2="20" y2="6"/><circle cx="16" cy="6" r="2"/>
+      <line x1="4" y1="12" x2="7" y2="12"/><line x1="13" y1="12" x2="20" y2="12"/><circle cx="10" cy="12" r="2"/>
+      <line x1="4" y1="18" x2="15" y2="18"/><circle cx="18" cy="18" r="2"/>
+    </svg>
+  </button>
 </div>
+
+{doctor_html}
 
 <!-- v1.9 Pocket Lesson card. Sits just below the topbar. Default state is
      collapsed (no `.is-open` class). JS reads localStorage on load and adds
@@ -11422,6 +11491,28 @@ document.getElementById('hero-chart').addEventListener('click', (e) => {{
 
   btn.addEventListener('click', () => setEnabled(btn.getAttribute('aria-pressed') !== 'true'));
   nextBtn.addEventListener('click', () => renderTip(pickRandomTip()));
+}})();
+
+// v3.2 Doctor: toggled check-up panel. State `doctorOn` in localStorage
+// ('1'/'0'), default OFF. Mirrors the pocket-lesson slide-open pattern.
+(function setupDoctor() {{
+  const STORAGE_KEY = 'doctorOn';
+  const btn = document.getElementById('doctor-btn');
+  const wrap = document.getElementById('doctor-wrap');
+  if (!btn || !wrap) return;
+  function setEnabled(on, opts) {{
+    opts = opts || {{}};
+    btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+    wrap.classList.toggle('is-open', on);
+    wrap.setAttribute('aria-hidden', on ? 'false' : 'true');
+    if (!opts.silent) {{
+      try {{ localStorage.setItem(STORAGE_KEY, on ? '1' : '0'); }} catch (e) {{}}
+    }}
+  }}
+  let initial = false;
+  try {{ initial = localStorage.getItem(STORAGE_KEY) === '1'; }} catch (e) {{}}
+  setEnabled(initial, {{silent: true}});
+  btn.addEventListener('click', () => setEnabled(btn.getAttribute('aria-pressed') !== 'true'));
 }})();
 
 // v2.1: palette toggle collapsed from 4 buttons into 1 cycling button. Each
