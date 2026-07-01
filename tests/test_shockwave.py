@@ -100,3 +100,12 @@ def test_basket_weighted_move_uniform_vs_weighted():
     assert build.basket_weighted_move(fs, sc, "GBP") == pytest.approx(-10.0)   # mean(-20,0)
     fs[0]["weight"] = 3.0                                                       # weight the mover
     assert build.basket_weighted_move(fs, sc, "GBP") == pytest.approx(-15.0)   # (3*-20+1*0)/4
+
+
+def test_recovery_estimate_bands():
+    assert build.recovery_estimate(-3) is None
+    assert build.recovery_estimate(-10) == "~1 year"
+    assert build.recovery_estimate(-20) == "~2 years"
+    assert build.recovery_estimate(-35) == "~4 years"
+    assert build.recovery_estimate(-55) == "~5-6 years"
+    assert build.recovery_estimate(12) is None

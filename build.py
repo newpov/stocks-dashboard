@@ -6820,6 +6820,24 @@ def basket_weighted_move(factors_list, scenario, base_ccy: str = "GBP") -> float
     return acc / tot_w if tot_w > 0 else float("nan")
 
 
+def recovery_estimate(basket_move: float) -> "str | None":
+    """Historical rule-of-thumb recovery time by basket drawdown depth (S&P
+    bear-market history). None for shallow/positive moves."""
+    try:
+        m = float(basket_move)
+    except (TypeError, ValueError):
+        return None
+    if m != m or m >= -6:
+        return None
+    if m >= -15:
+        return "~1 year"
+    if m >= -25:
+        return "~2 years"
+    if m >= -40:
+        return "~4 years"
+    return "~5-6 years"
+
+
 # ============================ v3.2 Doctor ============================
 # A deterministic, build-time whole-basket check-up. Pure functions over data
 # already computed in render_html (zero extra network fetch). See
