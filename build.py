@@ -6754,6 +6754,22 @@ def basket_beta(basket: pd.Series, bench: pd.Series) -> float:
     return cov / var
 
 
+def pct_open_underwater(returns: pd.DataFrame) -> float:
+    """Share (0-100) of OPEN positions whose total return is below cost.
+    NaN when there are no open positions."""
+    if returns is None or returns.empty or "status" not in returns.columns:
+        return float("nan")
+    open_df = returns[returns["status"] == "open"]
+    if open_df.empty:
+        return float("nan")
+    pct = pd.to_numeric(open_df["total_pct"], errors="coerce")
+    n = int(pct.notna().sum())
+    if n == 0:
+        return float("nan")
+    under = int((pct < 0).sum())
+    return under / n * 100.0
+
+
 def last_settled_close_date(index, now=None, settled_hour_utc=21):
     """Date of the last SETTLED trading session in ``index``.
 

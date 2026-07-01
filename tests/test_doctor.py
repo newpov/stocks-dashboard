@@ -27,3 +27,27 @@ def test_basket_beta_insufficient_or_flat_is_nan():
     assert np.isnan(build.basket_beta(_series([100]), _series([100])))
     flat = _series([100, 100, 100, 100])
     assert np.isnan(build.basket_beta(_series([100, 101, 102, 103]), flat))
+
+
+def _returns_df(rows):
+    # rows: list of (ticker, status, total_pct)
+    return pd.DataFrame(
+        [{"status": s, "total_pct": p} for (_, s, p) in rows],
+        index=[t for (t, _, _) in rows],
+    )
+
+
+def test_pct_open_underwater_counts_only_open_below_zero():
+    df = _returns_df([
+        ("AAA", "open", -5.0),
+        ("BBB", "open", 12.0),
+        ("CCC", "open", -0.1),
+        ("DDD", "closed", -99.0),   # closed: ignored
+    ])
+    # 2 of 3 open names underwater -> 66.67%
+    assert build.pct_open_underwater(df) == pytest.approx(200.0 / 3.0, abs=1e-6)
+
+
+def test_pct_open_underwater_no_open_is_nan():
+    df = _returns_df([("DDD", "closed", -99.0)])
+    assert np.isnan(build.pct_open_underwater(df))
