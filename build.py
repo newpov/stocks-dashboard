@@ -6884,7 +6884,7 @@ def render_shockwave(payload: dict) -> str:
     </div>
     <div class="sw-hero" id="sw-hero"></div>
     <div class="sw-action" id="sw-action"></div>
-    <svg class="sw-field" id="sw-field" viewBox="0 0 640 320" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Resilience field"></svg>
+    <svg class="sw-field" id="sw-field" viewBox="0 0 900 280" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Resilience field"></svg>
     <div class="sw-impact" id="sw-impact"></div>
     <div class="sw-note">First-order 2-factor estimate; likelihood + recovery are historical rules of thumb, not predictions.</div>
   </div>
@@ -8380,7 +8380,7 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
   /* v3.3 Shockwave panel -- slide-open like the Doctor. */
   .shockwave-btn[aria-pressed="true"]{{background:var(--accent);color:var(--ink);border-color:var(--accent)}}
   .shockwave-wrap{{max-height:0;overflow:hidden;opacity:0;margin:0;transition:max-height .3s ease,opacity .3s ease,margin .3s ease}}
-  .shockwave-wrap.is-open{{max-height:1600px;opacity:1;margin:10px 0 4px}}
+  .shockwave-wrap.is-open{{max-height:3000px;opacity:1;margin:10px 0 4px}}
   @media (prefers-reduced-motion:reduce){{.shockwave-wrap{{transition:none}}.sw-field .dot{{transition:none}}.sw-field .pz{{animation:none}}}}
   .shockwave-card{{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:16px 18px}}
   .sw-head{{display:flex;align-items:center;gap:10px}}
@@ -8412,6 +8412,8 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
   .sw-field .pz{{animation:swpulse 1s ease-in-out infinite}}
   .sw-impact{{margin-top:8px}}
   .sw-ibar{{display:flex;align-items:center;gap:8px;padding:2px 0;font-size:12px}}
+  .sw-ibrk{{font-size:10.5px;color:var(--text-dim);font-variant-numeric:tabular-nums;white-space:nowrap;min-width:118px;text-align:right}}
+  @media (max-width:620px){{.sw-ibrk{{display:none}}}}
   .sw-more{{font-size:12px;color:var(--accent);cursor:pointer;margin-top:4px}}
   .sw-note{{font-size:11.5px;color:var(--text-dim);margin-top:10px}}
 
@@ -11799,8 +11801,8 @@ document.getElementById('hero-chart').addEventListener('click', (e) => {{
       b.onclick=function(){{mkt.value=p.spy; tec.value=p.tech; usd=p.usd; usdS.value=p.usd; active=p; render();}};
       chips.appendChild(b);
     }});
-    var X=function(b){{return 60+(Math.max(0.2,Math.min(2.4,b))-0.2)/2.2*540;}};
-    var Y=function(r){{return 270-(Math.max(-50,Math.min(70,r))+50)/120*240;}};
+    var X=function(b){{return 66+(Math.max(0.2,Math.min(2.4,b))-0.2)/2.2*796;}};
+    var Y=function(r){{return 236-(Math.max(-50,Math.min(70,r))+50)/120*212;}};
     function col(m){{return m<-3?LOSS:m>3?GAIN:FLAT;}}
     function fmt(x){{return (x>0?'+':'')+Math.round(x)+'%';}}
     function rad(f){{if(sizeMode==='eq')return 5; if(sizeMode==='w'){{var w=f.weight||1; return 3+Math.min(6,w*2.1);}} if(!f.mcap)return 5; return 3+Math.sqrt(f.mcap/maxMc)*7;}}
@@ -11828,29 +11830,43 @@ document.getElementById('hero-chart').addEventListener('click', (e) => {{
       var labeled={{}};
       d.slice().sort(function(a,b){{return b.contrib-a.contrib;}}).slice(0,{SHOCKWAVE_LABEL_TOP}).forEach(function(x){{labeled[x.t]=1;}});
       d.forEach(function(x){{ if(x.bm>1.2 && x.proj<0 && x.m<-30) labeled[x.t]=1; }});
+      var placed=[];
+      function labelY(cx,cy,r){{
+        var up=cy-r-4, dn=cy+r+12;
+        function clash(y){{ return placed.some(function(p){{ return Math.abs(p.x-cx)<34 && Math.abs(p.y-y)<11; }}); }}
+        var y = !clash(up) ? up : (!clash(dn) ? dn : up);
+        placed.push({{x:cx,y:y}}); return y;
+      }}
       field.innerHTML=''
-        +'<rect x="'+X(1.2).toFixed(1)+'" y="'+Y(0).toFixed(1)+'" width="'+(600-X(1.2)).toFixed(1)+'" height="'+(270-Y(0)).toFixed(1)+'" fill="'+LOSS+'" opacity="0.08"></rect>'
-        +'<line x1="60" y1="270" x2="600" y2="270" stroke="var(--border)"></line>'
-        +'<line x1="60" y1="30" x2="60" y2="270" stroke="var(--border)"></line>'
-        +'<line x1="60" y1="'+Y(0).toFixed(1)+'" x2="600" y2="'+Y(0).toFixed(1)+'" stroke="var(--border)" stroke-dasharray="3 3"></line>'
-        +'<text x="330" y="306" text-anchor="middle" font-size="11" fill="var(--text-dim)">market sensitivity &rarr;</text>'
-        +'<text x="52" y="34" text-anchor="end" font-size="10.5" fill="var(--text-dim)">+70%</text>'
-        +'<text x="52" y="'+(Y(0)+4).toFixed(1)+'" text-anchor="end" font-size="10.5" fill="var(--text-dim)">0%</text>'
-        +'<text x="52" y="272" text-anchor="end" font-size="10.5" fill="var(--text-dim)">-50%</text>'
+        +'<rect x="'+X(1.2).toFixed(1)+'" y="'+Y(0).toFixed(1)+'" width="'+(862-X(1.2)).toFixed(1)+'" height="'+(236-Y(0)).toFixed(1)+'" fill="'+LOSS+'" opacity="0.08"></rect>'
+        +'<line x1="66" y1="236" x2="862" y2="236" stroke="var(--border)"></line>'
+        +'<line x1="66" y1="24" x2="66" y2="236" stroke="var(--border)"></line>'
+        +'<line x1="66" y1="'+Y(0).toFixed(1)+'" x2="862" y2="'+Y(0).toFixed(1)+'" stroke="var(--border)" stroke-dasharray="3 3"></line>'
+        +'<text x="464" y="266" text-anchor="middle" font-size="11" fill="var(--text-dim)">market sensitivity &rarr;</text>'
+        +'<text x="18" y="130" text-anchor="middle" font-size="11" fill="var(--text-dim)" transform="rotate(-90 18 130)">projected return</text>'
+        +'<text x="58" y="28" text-anchor="end" font-size="10.5" fill="var(--text-dim)">+70%</text>'
+        +'<text x="58" y="'+(Y(0)+4).toFixed(1)+'" text-anchor="end" font-size="10.5" fill="var(--text-dim)">0%</text>'
+        +'<text x="58" y="240" text-anchor="end" font-size="10.5" fill="var(--text-dim)">-50%</text>'
         +d.map(function(x){{
-          var r=rad(x.f), c=col(x.m), lab=labeled[x.t], op=x.lc?0.3:(lab?1:0.5),
+          var cx=X(x.bm), cy=Y(x.proj), r=rad(x.f), c=col(x.m), lab=labeled[x.t], op=x.lc?0.3:(lab?1:0.5),
               pulse=(x.m<{SHOCKWAVE_PULSE_PCT} && x.bm>1.2)?' pz':'';
-          var tx=lab?'<text x="'+X(x.bm).toFixed(1)+'" y="'+(Y(x.proj)-r-3).toFixed(1)+'" text-anchor="middle" font-size="10" fill="var(--text-dim)">'+x.t+'</text>':'';
-          return '<g class="dot" style="transform:translate('+X(x.bm).toFixed(1)+'px,'+Y(x.proj).toFixed(1)+'px)"><circle class="'+pulse.trim()+'" r="'+r.toFixed(1)+'" fill="'+c+'" opacity="'+op+'"><title>'+x.t+': '+fmt(x.m)+(x.lc?' (low fit)':'')+'</title></circle></g>'+tx;
+          var tx='';
+          if(lab){{ var ly=labelY(cx,cy,r); tx='<text x="'+cx.toFixed(1)+'" y="'+ly.toFixed(1)+'" text-anchor="middle" font-size="10" fill="var(--text-dim)">'+x.t+'</text>'; }}
+          return '<g class="dot" style="transform:translate('+cx.toFixed(1)+'px,'+cy.toFixed(1)+'px)"><circle class="'+pulse.trim()+'" r="'+r.toFixed(1)+'" fill="'+c+'" opacity="'+op+'"><title>'+x.t+': '+fmt(x.m)+(x.lc?' (low fit)':'')+'</title></circle></g>'+tx;
         }}).join('');
       var ranked=d.slice().sort(function(a,b){{return b.contrib-a.contrib;}});
       var shown=showAll?ranked:ranked.slice(0,6);
       var mx=Math.max.apply(null,ranked.map(function(x){{return Math.abs(x.m);}}).concat([1]));
       impact.innerHTML=shown.map(function(x){{
         var neg=x.m<0, w=(Math.abs(x.m)/mx)*46, c=col(x.m);
-        return '<div class="sw-ibar"><span style="width:56px;font-weight:600">'+x.t+'</span>'
+        var mktC=(x.f.b_mkt||0)*sc.spy, techC=(x.f.b_tech||0)*sc.tech,
+            fxC=((x.f.ccy||base)===SHOCKWAVE.fx_ccy && SHOCKWAVE.fx_ccy!==base)?sc.usd:0;
+        var rawSum=mktC+techC+fxC;
+        var brk='market '+fmt(mktC)+' + tech '+fmt(techC)+(fxC?' + FX '+fmt(fxC):'')+' = '+fmt(rawSum)+(rawSum<-100?' (capped at -100%)':'');
+        return '<div class="sw-ibar" title="'+brk+'"><span style="width:56px;font-weight:600">'+x.t+'</span>'
           +'<div style="position:relative;flex:1;height:16px"><div style="position:absolute;left:50%;top:0;bottom:0;width:1px;background:var(--border)"></div>'
           +'<div style="position:absolute;top:2px;height:12px;border-radius:3px;background:'+c+';'+(neg?'right:50%;':'left:50%;')+'width:'+w+'%"></div></div>'
+          +'<span class="sw-ibrk">'+fmt(mktC)+' / '+fmt(techC)+(fxC?' / '+fmt(fxC):'')+'</span>'
           +'<span style="width:46px;text-align:right;font-weight:600;color:'+c+'">'+fmt(x.m)+'</span></div>';
       }}).join('')+(ranked.length>6?'<div class="sw-more" id="sw-more">'+(showAll?'Show less':'Show all '+ranked.length)+'</div>':'');
       var more=document.getElementById('sw-more');
