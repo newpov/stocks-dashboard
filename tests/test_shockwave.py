@@ -130,3 +130,22 @@ def test_build_shockwave_payload_shape_and_privacy():
     blob = str(pl)
     assert "shares" not in blob and "£" not in blob   # no shares, no GBP symbol
     assert pl["presets"][0]["label"] == build.SHOCKWAVE_PRESETS[0]["label"]
+
+
+def test_render_shockwave_shell():
+    pl = {"factors": [], "presets": [], "base_ccy": "GBP", "as_of": "30 Jun 2026",
+          "size_default": "eq"}
+    html = build.render_shockwave(pl)
+    assert 'id="shockwave-wrap"' in html
+    assert "Shockwave" in html
+    assert "as of 30 Jun 2026" in html
+    for cid in ("sw-chips", "sw-sliders", "sw-hero", "sw-action", "sw-field",
+                "sw-impact", "sw-size"):
+        assert 'id="' + cid + '"' in html
+
+
+def test_render_shockwave_escapes_as_of():
+    pl = {"factors": [], "presets": [], "base_ccy": "GBP",
+          "as_of": '<img src=x onerror=alert(1)>', "size_default": "eq"}
+    html = build.render_shockwave(pl)
+    assert "<img src=x" not in html and "&lt;img" in html

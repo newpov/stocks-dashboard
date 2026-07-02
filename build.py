@@ -6865,6 +6865,30 @@ def build_shockwave_payload(factors, presets, as_of, base_ccy,
     }
 
 
+def render_shockwave(payload: dict) -> str:
+    """Static panel shell; the client JS fills chips/sliders/field/impact from
+    the inline SHOCKWAVE const. All dynamic text (only as_of here) is escaped."""
+    as_of = _esc(str(payload.get("as_of", "")))
+    return f'''<section class="shockwave-wrap" id="shockwave-wrap" aria-hidden="true" aria-label="Shockwave stress test">
+  <div class="shockwave-card">
+    <div class="sw-head">
+      <span class="sw-eyebrow">Shockwave</span>
+      <span class="sw-asof">as of {as_of}</span>
+    </div>
+    <div class="sw-chips" id="sw-chips"></div>
+    <div class="sw-controls">
+      <div class="sw-sliders" id="sw-sliders"></div>
+      <div class="sw-sizewrap"><span class="sw-sizelbl">Dot size</span><div class="sw-size" id="sw-size"></div></div>
+    </div>
+    <div class="sw-hero" id="sw-hero"></div>
+    <div class="sw-action" id="sw-action"></div>
+    <svg class="sw-field" id="sw-field" viewBox="0 0 640 320" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Resilience field"></svg>
+    <div class="sw-impact" id="sw-impact"></div>
+    <div class="sw-note">First-order 2-factor estimate; likelihood + recovery are historical rules of thumb, not predictions.</div>
+  </div>
+</section>'''
+
+
 # ============================ v3.2 Doctor ============================
 # A deterministic, build-time whole-basket check-up. Pure functions over data
 # already computed in render_html (zero extra network fetch). See
