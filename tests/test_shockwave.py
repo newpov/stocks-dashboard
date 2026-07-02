@@ -178,3 +178,9 @@ def test_shockwave_button_and_js_in_source():
     assert 'id="shockwave-btn"' in src
     assert "setupShockwave" in src
     assert ".shockwave-wrap" in src
+
+
+def test_estimate_move_floors_at_total_loss():
+    # A position can't lose more than 100%; the linear model must not overshoot.
+    f = {"b_mkt": 2.5, "b_tech": 0.5, "ccy": "GBP"}
+    assert build.estimate_move(f, {"spy": -45, "tech": -15, "usd": 0}, "GBP") == -100.0

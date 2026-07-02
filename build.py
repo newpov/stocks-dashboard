@@ -6790,7 +6790,9 @@ def compute_stress_factors(prices_native, spy, qqq, meta, returns) -> list[dict]
 
 
 def estimate_move(factors: dict, scenario: dict, base_ccy: str = "GBP") -> float:
-    """First-order per-name move: b_mkt*spy + b_tech*tech + FX overlay. nan-safe."""
+    """First-order per-name move: b_mkt*spy + b_tech*tech + FX overlay. nan-safe.
+    Floored at -100% -- a position can't lose more than its whole value, so the
+    linear model is not allowed to overshoot past a total loss."""
     def _n(v):
         try:
             f = float(v)
@@ -6801,7 +6803,7 @@ def estimate_move(factors: dict, scenario: dict, base_ccy: str = "GBP") -> float
     move = bm * _n(scenario.get("spy")) + bt * _n(scenario.get("tech"))
     if str(factors.get("ccy") or base_ccy) == SHOCKWAVE_FX_CCY and SHOCKWAVE_FX_CCY != base_ccy:
         move += _n(scenario.get("usd"))
-    return move
+    return max(move, -100.0)
 
 
 def basket_weighted_move(factors_list, scenario, base_ccy: str = "GBP") -> float:
@@ -11803,14 +11805,14 @@ document.getElementById('hero-chart').addEventListener('click', (e) => {{
     function col(m){{return m<-3?LOSS:m>3?GAIN:FLAT;}}
     function fmt(x){{return (x>0?'+':'')+Math.round(x)+'%';}}
     function rad(f){{if(sizeMode==='eq')return 5; if(sizeMode==='w'){{var w=f.weight||1; return 3+Math.min(6,w*2.1);}} if(!f.mcap)return 5; return 3+Math.sqrt(f.mcap/maxMc)*7;}}
-    function move(f,sc){{var bm=(f.b_mkt===f.b_mkt&&f.b_mkt!=null)?f.b_mkt:0, bt=(f.b_tech===f.b_tech&&f.b_tech!=null)?f.b_tech:0; var m=bm*sc.spy+bt*sc.tech; if((f.ccy||base)===SHOCKWAVE.fx_ccy && SHOCKWAVE.fx_ccy!==base) m+=sc.usd; return m;}}
+    function move(f,sc){{var bm=(f.b_mkt===f.b_mkt&&f.b_mkt!=null)?f.b_mkt:0, bt=(f.b_tech===f.b_tech&&f.b_tech!=null)?f.b_tech:0; var m=bm*sc.spy+bt*sc.tech; if((f.ccy||base)===SHOCKWAVE.fx_ccy && SHOCKWAVE.fx_ccy!==base) m+=sc.usd; return Math.max(m,-100);}}
     function recov(b){{if(b>=-6)return null; if(b>=-15)return'~1 year'; if(b>=-25)return'~2 years'; if(b>=-40)return'~4 years'; return'~5-6 years';}}
     function render(){{
       var sc={{spy:+mkt.value, tech:+tec.value, usd:usd}};
       document.getElementById('sw-mktv').textContent=fmt(+mkt.value);
       document.getElementById('sw-tecv').textContent=fmt(+tec.value);
       document.getElementById('sw-usdv').textContent=fmt(usd);
-      var d=F.map(function(f){{var m=move(f,sc); return {{f:f,t:f.ticker,m:m,proj:(f.ret||0)+m,w:f.weight||1,bm:(f.b_mkt||0),lc:f.low_conf,contrib:Math.abs(m)*(f.weight||1)}};}});
+      var d=F.map(function(f){{var m=move(f,sc); return {{f:f,t:f.ticker,m:m,proj:Math.max((f.ret||0)+m,-100),w:f.weight||1,bm:(f.b_mkt||0),lc:f.low_conf,contrib:Math.abs(m)*(f.weight||1)}};}});
       var tw=d.reduce(function(a,x){{return a+x.w;}},0)||1;
       var basket=d.reduce(function(a,x){{return a+x.w*x.m;}},0)/tw;
       var rc=active&&active.recovery?active.recovery:recov(basket);
