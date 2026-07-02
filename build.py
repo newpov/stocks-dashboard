@@ -9931,8 +9931,7 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
   <button class="layout-toggle icon-btn doctor-btn" id="doctor-btn" type="button" aria-pressed="false"
           aria-label="Basket check-up" data-tooltip="Doctor">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-      <path d="M8 2v4M8 6a4 4 0 0 0 8 0V2"/><path d="M8 6v5a6 6 0 0 0 12 0"/>
-      <circle cx="20" cy="11" r="2"/><path d="M11 16v2a4 4 0 0 0 8 0v-1"/>
+      <rect x="4" y="4" width="16" height="16" rx="3"/><path d="M12 9v6M9 12h6"/>
     </svg>
   </button>
   <button class="layout-toggle icon-btn desktop-mode-btn" id="desktop-mode-btn" type="button" aria-pressed="false"
@@ -9966,7 +9965,7 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
   <button class="layout-toggle icon-btn shockwave-btn" id="shockwave-btn" type="button" aria-pressed="false"
           aria-label="Shockwave stress test" data-tooltip="Shockwave">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-      <path d="M3 4h18"/><path d="M6 8h12"/><path d="M8 12h8"/><path d="M10 16h4"/><path d="M11 20h2"/>
+      <path d="M13 3l0 7l6 0l-8 11l0 -7l-6 0l8 -11"/>
     </svg>
   </button>
   <!-- v2.1: 4 palette buttons collapsed to a single cycling button. Click
