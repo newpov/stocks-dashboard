@@ -149,3 +149,24 @@ def test_render_shockwave_escapes_as_of():
           "as_of": '<img src=x onerror=alert(1)>', "size_default": "eq"}
     html = build.render_shockwave(pl)
     assert "<img src=x" not in html and "&lt;img" in html
+
+
+def test_render_html_accepts_stress_factors_param():
+    import inspect
+    assert "stress_factors" in inspect.signature(build.render_html).parameters
+
+
+def test_render_html_source_has_shockwave_hooks():
+    import inspect
+    src = inspect.getsource(build.render_html)
+    assert "render_shockwave(" in src
+    assert "build_shockwave_payload(" in src
+    assert "{shockwave_html}" in src
+    assert "SHOCKWAVE" in src
+
+
+def test_main_source_calls_compute_stress_factors():
+    import inspect
+    src = inspect.getsource(build.main)
+    assert "compute_stress_factors(" in src
+    assert "stress_factors=" in src

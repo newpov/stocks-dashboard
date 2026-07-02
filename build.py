@@ -7407,7 +7407,8 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
                 prediction_rows: list[dict] | None = None,
                 nasdaq_series: pd.Series | None = None,
                 value_rows: "list[dict] | None" = None,
-                auto_tickers: "list[str] | None" = None) -> str:
+                auto_tickers: "list[str] | None" = None,
+                stress_factors: "list[dict] | None" = None) -> str:
     weekly = prices.resample("W-FRI").last().ffill()
     defs_html = render_svg_defs()
     # v3.1 #1: per-module "as of" dates. Price/return-derived modules (detractors,
@@ -7539,6 +7540,22 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
         bb_universe_obs=bigbrain_observations, watchlist_payload=watchlist_payload,
         analyst_rows=analyst_rows, as_of=close_as_of)
     doctor_html = render_doctor(_doctor_report)
+
+    # v3.3 Shockwave -- 2-factor stress test over the baked per-name sensitivities.
+    # mcap (for the "By market cap" size toggle) comes from the universe cache when
+    # the held name is an S&P member; missing -> None (graceful uniform size).
+    _mcap_by_ticker = {}
+    if universe_outlook is not None and "market_cap" in getattr(universe_outlook, "columns", []):
+        for _t in [f["ticker"] for f in (stress_factors or [])]:
+            if _t in universe_outlook.index:
+                _mv = universe_outlook.loc[_t, "market_cap"]
+                if pd.notna(_mv):
+                    _mcap_by_ticker[_t] = float(_mv)
+    _shockwave_payload = build_shockwave_payload(
+        stress_factors or [], SHOCKWAVE_PRESETS, close_as_of, BASE_CCY,
+        mcap_by_ticker=_mcap_by_ticker)
+    shockwave_html = render_shockwave(_shockwave_payload)
+    shockwave_json = _json_for_script(_shockwave_payload, separators=(",", ":"), ensure_ascii=False)
 
     n_total = len(returns)
     n_open = int((returns.status == "open").sum()) if not returns.empty else 0
@@ -9936,6 +9953,8 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
 
 {doctor_html}
 
+{shockwave_html}
+
 <!-- v1.9 Pocket Lesson card. Sits just below the topbar. Default state is
      collapsed (no `.is-open` class). JS reads localStorage on load and adds
      the class only if the user previously enabled it. Toggle from the topbar
@@ -10180,6 +10199,7 @@ const AUX_DATA = {aux_json};
 // the POCKET_LESSONS list in build.py. JS picks one at random on each page
 // load; a Next-tip button rotates without reloading.
 const POCKET_LESSONS = {pocket_lessons_json};
+const SHOCKWAVE = {shockwave_json};
 
 // v2.1 Quiz: 50-question pool, 5 categories x 10 questions. Schema:
 //   {{id, category, format ("cloze"|"direct"), question, options[3], correct, explanation}}
@@ -12911,6 +12931,10 @@ def main(demo: bool = False, watchlist_only: bool = False,
     except Exception as e:
         print(f"WARN Big Brain universe lane skipped: {e}", file=sys.stderr)
 
+    # v3.3 Shockwave: per-name 2-factor sensitivities (uses the RAW SPY/QQQ price
+    # series + native prices, all in scope here), threaded into render_html.
+    stress_factors = compute_stress_factors(prices_native, bench, nasdaq_b, meta, returns)
+
     html = render_html(returns, prices, meta, basket, bench_series, contrib, transactions,
                        signals, prices_native, returns_native, untracked=untracked,
                        watchlist=watchlist, news_items=news_items, analyst=analyst,
@@ -12931,7 +12955,8 @@ def main(demo: bool = False, watchlist_only: bool = False,
                        prediction_rows=prediction_rows,
                        nasdaq_series=nasdaq_series,
                        value_rows=auto_value_rows,
-                       auto_tickers=auto_tickers)
+                       auto_tickers=auto_tickers,
+                       stress_factors=stress_factors)
 
     out_path = DEMO_OUT_HTML if demo else OUT_HTML
     out_path.parent.mkdir(parents=True, exist_ok=True)
