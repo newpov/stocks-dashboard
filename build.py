@@ -8375,6 +8375,44 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
   .palette-toggle button.active{{background:var(--accent);color:var(--ink);
     border-color:var(--accent);font-weight:600}}
 
+  /* v3.3 Shockwave panel -- slide-open like the Doctor. */
+  .shockwave-btn[aria-pressed="true"]{{background:var(--accent);color:var(--ink);border-color:var(--accent)}}
+  .shockwave-wrap{{max-height:0;overflow:hidden;opacity:0;margin:0;transition:max-height .3s ease,opacity .3s ease,margin .3s ease}}
+  .shockwave-wrap.is-open{{max-height:1600px;opacity:1;margin:10px 0 4px}}
+  @media (prefers-reduced-motion:reduce){{.shockwave-wrap{{transition:none}}.sw-field .dot{{transition:none}}.sw-field .pz{{animation:none}}}}
+  .shockwave-card{{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:16px 18px}}
+  .sw-head{{display:flex;align-items:center;gap:10px}}
+  .sw-eyebrow{{font-size:.72rem;letter-spacing:.08em;text-transform:uppercase;color:var(--text-dim)}}
+  .sw-asof{{margin-left:auto;font-size:.72rem;color:var(--text-dim)}}
+  .sw-chips{{display:flex;flex-wrap:wrap;gap:7px;margin:12px 0}}
+  .sw-chip{{font-size:12px;padding:5px 9px;display:flex;align-items:center;gap:6px;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text);cursor:pointer}}
+  .sw-chip:hover{{border-color:var(--text-dim)}}
+  .sw-lk{{width:8px;height:8px;border-radius:50%;display:inline-block}}
+  .sw-controls{{display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start}}
+  .sw-sliders{{flex:1 1 260px;min-width:240px}}
+  .sw-srow{{display:flex;align-items:center;gap:10px;margin-bottom:7px}}
+  .sw-srow span.l{{font-size:12px;color:var(--text-dim);min-width:88px}}
+  .sw-srow input{{flex:1}}
+  .sw-srow span.v{{font-size:12px;font-weight:600;min-width:42px;text-align:right}}
+  .sw-sizelbl{{font-size:11px;color:var(--text-dim);display:block;margin-bottom:4px}}
+  .sw-size{{display:flex}}
+  .sw-seg{{font-size:11px;padding:4px 9px;background:var(--bg);border:1px solid var(--border);color:var(--text-dim);cursor:pointer}}
+  .sw-seg:first-child{{border-radius:8px 0 0 8px}}
+  .sw-seg:last-child{{border-radius:0 8px 8px 0}}
+  .sw-seg.on{{background:var(--accent);color:var(--ink);border-color:var(--accent);font-weight:600}}
+  .sw-hero{{font-family:Georgia,'Times New Roman',serif;font-size:34px;line-height:1.1;margin:12px 0 2px;font-variant-numeric:tabular-nums}}
+  .sw-hero small{{font-family:inherit;font-size:12px;color:var(--text-dim);margin-left:8px}}
+  .sw-action{{font-size:13px;line-height:1.5;padding:8px 11px;border-left:3px solid var(--border);margin:8px 0 4px;color:var(--text)}}
+  .sw-field{{width:100%;height:auto;margin-top:6px}}
+  .sw-field .dot{{transition:transform .5s ease}}
+  .sw-field .dot circle{{transition:fill .3s ease,r .3s ease,opacity .3s ease}}
+  @keyframes swpulse{{0%,100%{{opacity:1}}50%{{opacity:.3}}}}
+  .sw-field .pz{{animation:swpulse 1s ease-in-out infinite}}
+  .sw-impact{{margin-top:8px}}
+  .sw-ibar{{display:flex;align-items:center;gap:8px;padding:2px 0;font-size:12px}}
+  .sw-more{{font-size:12px;color:var(--accent);cursor:pointer;margin-top:4px}}
+  .sw-note{{font-size:11.5px;color:var(--text-dim);margin-top:10px}}
+
   /* v3.2 Doctor panel -- mirrors the pocket-lesson slide-open pattern. */
   .doctor-btn[aria-pressed="true"]{{background:var(--accent);color:var(--ink);border-color:var(--accent)}}
   .doctor-wrap{{max-height:0;overflow:hidden;opacity:0;margin:0;
@@ -9920,6 +9958,13 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
       <circle cx="12" cy="12" r="10"/>
       <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/>
       <line x1="12" y1="17" x2="12.01" y2="17"/>
+    </svg>
+  </button>
+  <!-- v3.3 Shockwave: toggled market stress-test. State localStorage `shockwaveOn` (default off). -->
+  <button class="layout-toggle icon-btn shockwave-btn" id="shockwave-btn" type="button" aria-pressed="false"
+          aria-label="Shockwave stress test" data-tooltip="Shockwave">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M3 4h18"/><path d="M6 8h12"/><path d="M8 12h8"/><path d="M10 16h4"/><path d="M11 20h2"/>
     </svg>
   </button>
   <!-- v2.1: 4 palette buttons collapsed to a single cycling button. Click
@@ -11707,6 +11752,114 @@ document.getElementById('hero-chart').addEventListener('click', (e) => {{
   try {{ initial = localStorage.getItem(STORAGE_KEY) === '1'; }} catch (e) {{}}
   setEnabled(initial, {{silent: true}});
   btn.addEventListener('click', () => setEnabled(btn.getAttribute('aria-pressed') !== 'true'));
+}})();
+
+// v3.3 Shockwave: interactive market stress test over the baked SHOCKWAVE const.
+// Toggles like the Doctor; panel builds lazily on first open.
+(function setupShockwave() {{
+  var btn=document.getElementById('shockwave-btn'), wrap=document.getElementById('shockwave-wrap');
+  if(!btn||!wrap||typeof SHOCKWAVE==='undefined') return;
+  var KEY='shockwaveOn', SKEY='shockwaveSize';
+  function setOpen(on,silent){{
+    btn.setAttribute('aria-pressed',on?'true':'false');
+    wrap.classList.toggle('is-open',on);
+    wrap.setAttribute('aria-hidden',on?'false':'true');
+    if(on && !wrap.dataset.init){{ initPanel(); wrap.dataset.init='1'; }}
+    if(!silent){{ try{{localStorage.setItem(KEY,on?'1':'0');}}catch(e){{}} }}
+  }}
+  var i0=false; try{{i0=localStorage.getItem(KEY)==='1';}}catch(e){{}}
+  setOpen(i0,true);
+  btn.addEventListener('click',function(){{setOpen(btn.getAttribute('aria-pressed')!=='true');}});
+
+  function initPanel(){{
+    var F=SHOCKWAVE.factors||[], P=SHOCKWAVE.presets||[], base=SHOCKWAVE.base_ccy||'GBP';
+    var LOSS='#f87171', GAIN='#34d399', FLAT='#8a8a8a';
+    var LK={{common:'#34d399',occasional:'#fbbf24',rare:'#f87171'}};
+    var sizeMode=SHOCKWAVE.size_default||'eq'; try{{var sm=localStorage.getItem(SKEY); if(sm)sizeMode=sm;}}catch(e){{}}
+    var usd=0, active=null, showAll=false;
+    var maxMc=Math.max.apply(null,F.map(function(f){{return f.mcap||0;}}).concat([1]));
+    var chips=document.getElementById('sw-chips'), sliders=document.getElementById('sw-sliders'),
+        sizeBox=document.getElementById('sw-size'), hero=document.getElementById('sw-hero'),
+        action=document.getElementById('sw-action'), field=document.getElementById('sw-field'),
+        impact=document.getElementById('sw-impact');
+    sliders.innerHTML=''
+      +'<div class="sw-srow"><span class="l">Market (SPY)</span><input id="sw-mkt" type="range" min="-45" max="20" step="1" value="-20"><span class="v" id="sw-mktv"></span></div>'
+      +'<div class="sw-srow"><span class="l">Tech tilt</span><input id="sw-tec" type="range" min="-30" max="30" step="1" value="-10"><span class="v" id="sw-tecv"></span></div>'
+      +'<div class="sw-srow"><span class="l">USD vs '+base+'</span><input id="sw-usd" type="range" min="-15" max="15" step="1" value="0"><span class="v" id="sw-usdv"></span></div>';
+    var mkt=document.getElementById('sw-mkt'), tec=document.getElementById('sw-tec'), usdS=document.getElementById('sw-usd');
+    [['eq','Equal'],['w','By weight'],['mc','By market cap']].forEach(function(m){{
+      var b=document.createElement('button'); b.className='sw-seg'+(m[0]===sizeMode?' on':''); b.textContent=m[1];
+      b.onclick=function(){{sizeMode=m[0]; try{{localStorage.setItem(SKEY,m[0]);}}catch(e){{}} [].forEach.call(sizeBox.children,function(c){{c.className='sw-seg';}}); b.className='sw-seg on'; render();}};
+      sizeBox.appendChild(b);
+    }});
+    P.forEach(function(p){{
+      var b=document.createElement('button'); b.className='sw-chip';
+      b.innerHTML='<span class="sw-lk" style="background:'+(LK[p.likelihood]||FLAT)+'"></span>'+p.label+(p.recovery?'<span style="color:var(--text-dim)"> '+p.recovery+'</span>':'');
+      b.onclick=function(){{mkt.value=p.spy; tec.value=p.tech; usd=p.usd; usdS.value=p.usd; active=p; render();}};
+      chips.appendChild(b);
+    }});
+    var X=function(b){{return 60+(Math.max(0.2,Math.min(2.4,b))-0.2)/2.2*540;}};
+    var Y=function(r){{return 270-(Math.max(-50,Math.min(70,r))+50)/120*240;}};
+    function col(m){{return m<-3?LOSS:m>3?GAIN:FLAT;}}
+    function fmt(x){{return (x>0?'+':'')+Math.round(x)+'%';}}
+    function rad(f){{if(sizeMode==='eq')return 5; if(sizeMode==='w'){{var w=f.weight||1; return 3+Math.min(6,w*2.1);}} if(!f.mcap)return 5; return 3+Math.sqrt(f.mcap/maxMc)*7;}}
+    function move(f,sc){{var bm=(f.b_mkt===f.b_mkt&&f.b_mkt!=null)?f.b_mkt:0, bt=(f.b_tech===f.b_tech&&f.b_tech!=null)?f.b_tech:0; var m=bm*sc.spy+bt*sc.tech; if((f.ccy||base)===SHOCKWAVE.fx_ccy && SHOCKWAVE.fx_ccy!==base) m+=sc.usd; return m;}}
+    function recov(b){{if(b>=-6)return null; if(b>=-15)return'~1 year'; if(b>=-25)return'~2 years'; if(b>=-40)return'~4 years'; return'~5-6 years';}}
+    function render(){{
+      var sc={{spy:+mkt.value, tech:+tec.value, usd:usd}};
+      document.getElementById('sw-mktv').textContent=fmt(+mkt.value);
+      document.getElementById('sw-tecv').textContent=fmt(+tec.value);
+      document.getElementById('sw-usdv').textContent=fmt(usd);
+      var d=F.map(function(f){{var m=move(f,sc); return {{f:f,t:f.ticker,m:m,proj:(f.ret||0)+m,w:f.weight||1,bm:(f.b_mkt||0),lc:f.low_conf,contrib:Math.abs(m)*(f.weight||1)}};}});
+      var tw=d.reduce(function(a,x){{return a+x.w;}},0)||1;
+      var basket=d.reduce(function(a,x){{return a+x.w*x.m;}},0)/tw;
+      var rc=active&&active.recovery?active.recovery:recov(basket);
+      hero.innerHTML=fmt(basket)+'<small>estimated basket move'+(rc?' &middot; est. recovery '+rc:'')+'</small>';
+      hero.style.color=col(basket);
+      var worst=d.slice().sort(function(a,b){{return a.m-b.m;}})[0]||{{t:'',m:0}};
+      var best=d.slice().sort(function(a,b){{return b.m-a.m;}})[0]||{{t:'',m:0}};
+      var act;
+      if(basket<=-15) act='Deep drawdown. Most exposed: '+worst.t+' ('+fmt(worst.m)+')'+(rc?', ~'+rc.replace(/[~ ]/g,'')+' to recover historically':'')+' &mdash; consider trimming high-beta names.';
+      else if(basket<=-5) act='Moderate hit. '+worst.t+' leads the downside ('+fmt(worst.m)+') &mdash; worth a hedge or a lighter position.';
+      else if(basket<3) act='Your basket looks resilient to this scenario &mdash; no urgent action.';
+      else act='Upside scenario: '+best.t+' benefits most ('+fmt(best.m)+'). Defensive names lag.';
+      action.innerHTML=act;
+      var labeled={{}};
+      d.slice().sort(function(a,b){{return b.contrib-a.contrib;}}).slice(0,{SHOCKWAVE_LABEL_TOP}).forEach(function(x){{labeled[x.t]=1;}});
+      d.forEach(function(x){{ if(x.bm>1.2 && x.proj<0 && x.m<-30) labeled[x.t]=1; }});
+      field.innerHTML=''
+        +'<rect x="'+X(1.2).toFixed(1)+'" y="'+Y(0).toFixed(1)+'" width="'+(600-X(1.2)).toFixed(1)+'" height="'+(270-Y(0)).toFixed(1)+'" fill="'+LOSS+'" opacity="0.08"></rect>'
+        +'<line x1="60" y1="270" x2="600" y2="270" stroke="var(--border)"></line>'
+        +'<line x1="60" y1="30" x2="60" y2="270" stroke="var(--border)"></line>'
+        +'<line x1="60" y1="'+Y(0).toFixed(1)+'" x2="600" y2="'+Y(0).toFixed(1)+'" stroke="var(--border)" stroke-dasharray="3 3"></line>'
+        +'<text x="330" y="306" text-anchor="middle" font-size="11" fill="var(--text-dim)">market sensitivity &rarr;</text>'
+        +'<text x="52" y="34" text-anchor="end" font-size="10.5" fill="var(--text-dim)">+70%</text>'
+        +'<text x="52" y="'+(Y(0)+4).toFixed(1)+'" text-anchor="end" font-size="10.5" fill="var(--text-dim)">0%</text>'
+        +'<text x="52" y="272" text-anchor="end" font-size="10.5" fill="var(--text-dim)">-50%</text>'
+        +d.map(function(x){{
+          var r=rad(x.f), c=col(x.m), lab=labeled[x.t], op=x.lc?0.3:(lab?1:0.5),
+              pulse=(x.m<{SHOCKWAVE_PULSE_PCT} && x.bm>1.2)?' pz':'';
+          var tx=lab?'<text x="'+X(x.bm).toFixed(1)+'" y="'+(Y(x.proj)-r-3).toFixed(1)+'" text-anchor="middle" font-size="10" fill="var(--text-dim)">'+x.t+'</text>':'';
+          return '<g class="dot" style="transform:translate('+X(x.bm).toFixed(1)+'px,'+Y(x.proj).toFixed(1)+'px)"><circle class="'+pulse.trim()+'" r="'+r.toFixed(1)+'" fill="'+c+'" opacity="'+op+'"><title>'+x.t+': '+fmt(x.m)+(x.lc?' (low fit)':'')+'</title></circle></g>'+tx;
+        }}).join('');
+      var ranked=d.slice().sort(function(a,b){{return b.contrib-a.contrib;}});
+      var shown=showAll?ranked:ranked.slice(0,6);
+      var mx=Math.max.apply(null,ranked.map(function(x){{return Math.abs(x.m);}}).concat([1]));
+      impact.innerHTML=shown.map(function(x){{
+        var neg=x.m<0, w=(Math.abs(x.m)/mx)*46, c=col(x.m);
+        return '<div class="sw-ibar"><span style="width:56px;font-weight:600">'+x.t+'</span>'
+          +'<div style="position:relative;flex:1;height:16px"><div style="position:absolute;left:50%;top:0;bottom:0;width:1px;background:var(--border)"></div>'
+          +'<div style="position:absolute;top:2px;height:12px;border-radius:3px;background:'+c+';'+(neg?'right:50%;':'left:50%;')+'width:'+w+'%"></div></div>'
+          +'<span style="width:46px;text-align:right;font-weight:600;color:'+c+'">'+fmt(x.m)+'</span></div>';
+      }}).join('')+(ranked.length>6?'<div class="sw-more" id="sw-more">'+(showAll?'Show less':'Show all '+ranked.length)+'</div>':'');
+      var more=document.getElementById('sw-more');
+      if(more) more.onclick=function(){{showAll=!showAll; render();}};
+    }}
+    mkt.addEventListener('input',function(){{active=null; render();}});
+    tec.addEventListener('input',function(){{active=null; render();}});
+    usdS.addEventListener('input',function(){{usd=+usdS.value; active=null; render();}});
+    render();
+  }}
 }})();
 
 // v2.1: palette toggle collapsed from 4 buttons into 1 cycling button. Each

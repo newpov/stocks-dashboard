@@ -170,3 +170,11 @@ def test_main_source_calls_compute_stress_factors():
     src = inspect.getsource(build.main)
     assert "compute_stress_factors(" in src
     assert "stress_factors=" in src
+
+
+def test_shockwave_button_and_js_in_source():
+    import inspect
+    src = inspect.getsource(build.render_html)
+    assert 'id="shockwave-btn"' in src
+    assert "setupShockwave" in src
+    assert ".shockwave-wrap" in src
