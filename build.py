@@ -954,7 +954,7 @@ VALUE_MIN_SECTOR_N = 3       # #2 sector-median P/E needs >= this many priced pe
 # JS), so a page is always gap-free. CSS forces these column counts per breakpoint.
 WATCH_COLS_DESKTOP = 6       # cards per row on desktop
 WATCH_COLS_MOBILE  = 3       # cards per row on mobile; also the "needs paging" floor
-AUTO_WATCH_MAX     = 4       # v3.0 #5: max auto (Value ∩ Big Brain) watchlist picks
+AUTO_WATCH_MAX     = None    # v3.3: no cap -- ALL Value+BB two-signal names auto-add (was 4)
 
 # How many candidates the analyst panel shows in total (the grid scrolls
 # internally past ~6 visible). Safety cap for very large closed-position lists.
@@ -3968,8 +3968,9 @@ def two_signal_tickers(value_rows: "list[dict] | None") -> list[str]:
 
 def select_auto_watchlist(value_rows: "list[dict] | None", manual_tickers,
                           max_n: "int | None" = None) -> list[str]:
-    """Up to max_n 2-signal tickers NOT already in the manual watchlist. Held
-    names are already excluded by build_value_screen (discovery-only)."""
+    """2-signal (Value+BB) tickers NOT already in the manual watchlist, in
+    screen order. Uncapped by default (AUTO_WATCH_MAX is None -> all of them);
+    pass max_n to cap. Held names are already excluded by build_value_screen."""
     cap = AUTO_WATCH_MAX if max_n is None else max_n
     manual = set(manual_tickers or ())
     return [t for t in two_signal_tickers(value_rows) if t not in manual][:cap]
@@ -6715,6 +6716,182 @@ def build_aux_payload(returns: pd.DataFrame, prices: pd.DataFrame,
     return out
 
 
+# ============================ v3.3 Shockwave ============================
+# Interactive market stress-test. A per-name two-factor sensitivity (market +
+# tech tilt) is computed at build time and baked inline; the client applies
+# shock scenarios over it. Deterministic, zero extra fetch, equal-weight,
+# returns-only. See temp/shockwave-spec.md.
+
+SHOCKWAVE_MIN_OBS   = 60
+SHOCKWAVE_R2_FLOOR  = 0.20
+SHOCKWAVE_PULSE_PCT = -25.0
+SHOCKWAVE_LABEL_TOP = 7
+SHOCKWAVE_FX_CCY    = "USD"
+
+# Narrative scenarios mapped onto the 3 factors (an approximation, not literal
+# instrument betas). Negative + positive; likelihood + historical recovery.
+SHOCKWAVE_PRESETS = [
+    {"label": "Tech correction",   "spy": -8,  "tech": -18, "usd": 0,  "likelihood": "occasional", "recovery": "~1 yr"},
+    {"label": "Risk-off bear",     "spy": -22, "tech": -8,  "usd": 6,  "likelihood": "occasional", "recovery": "~2 yrs"},
+    {"label": "2008-style crash",  "spy": -45, "tech": -15, "usd": 10, "likelihood": "rare",       "recovery": "~4 yrs"},
+    {"label": "Rate shock",        "spy": -12, "tech": -22, "usd": 8,  "likelihood": "occasional", "recovery": "~1.5 yrs"},
+    {"label": "Soft-landing rally","spy": 10,  "tech": 8,   "usd": 0,  "likelihood": "common",     "recovery": None},
+    {"label": "AI breakthrough",   "spy": 8,   "tech": 30,  "usd": 0,  "likelihood": "rare",       "recovery": None},
+    {"label": "Crypto mainstream", "spy": 6,   "tech": 18,  "usd": -5, "likelihood": "rare",       "recovery": None},
+]
+
+
+def compute_stress_factors(prices_native, spy, qqq, meta, returns) -> list[dict]:
+    """Per open position, a 2-factor sensitivity from native daily returns
+    regressed on [SPY, QQQ-SPY]. Returns b_mkt, b_tech, r2 + ccy/ret/weight/name/
+    sector/low_conf. Never raises; degrades to low_conf on thin/missing data."""
+    if returns is None or returns.empty or "status" not in returns.columns:
+        return []
+    spy_r = spy.astype(float).pct_change() if (spy is not None and len(spy)) else pd.Series(dtype=float)
+    have_qqq = qqq is not None and len(qqq) > 0
+    qqq_r = qqq.astype(float).pct_change() if have_qqq else None
+    out: list[dict] = []
+    open_idx = returns[returns["status"] == "open"].index.tolist()
+    for t in open_idx:
+        name = str(meta.loc[t, "name"]) if (meta is not None and t in meta.index) else t
+        sector = str(meta.loc[t, "sector"]) if (meta is not None and t in meta.index) else ""
+        ccy = str(meta.loc[t, "currency"]) if (meta is not None and t in meta.index) else "USD"
+        ret = float(pd.to_numeric(returns.loc[t].get("total_pct"), errors="coerce"))
+        weight = float(pd.to_numeric(returns.loc[t].get("weight"), errors="coerce"))
+        if weight != weight:
+            weight = 1.0
+        rec = {"ticker": t, "name": name, "sector": sector, "ccy": ccy,
+               "ret": ret, "weight": weight,
+               "b_mkt": float("nan"), "b_tech": float("nan"), "r2": float("nan"),
+               "low_conf": True}
+        if prices_native is None or t not in prices_native.columns:
+            out.append(rec); continue
+        name_r = prices_native[t].astype(float).pct_change()
+        cols = {"y": name_r, "spy": spy_r}
+        if qqq_r is not None:
+            cols["qqq"] = qqq_r
+        j = pd.concat(cols, axis=1).dropna()
+        if len(j) < SHOCKWAVE_MIN_OBS:
+            out.append(rec); continue
+        y = j["y"].to_numpy()
+        s = j["spy"].to_numpy()
+        tech = (j["qqq"].to_numpy() - s) if "qqq" in j else np.zeros_like(s)
+        X = np.column_stack([np.ones_like(s), s, tech])
+        coef, *_ = np.linalg.lstsq(X, y, rcond=None)
+        pred = X @ coef
+        ss_res = float(np.sum((y - pred) ** 2))
+        ss_tot = float(np.sum((y - y.mean()) ** 2))
+        r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
+        rec["b_mkt"] = float(coef[1])
+        rec["b_tech"] = float(coef[2]) if "qqq" in j else 0.0
+        rec["r2"] = r2
+        rec["low_conf"] = bool(("qqq" not in j) or r2 < SHOCKWAVE_R2_FLOOR)
+        out.append(rec)
+    return out
+
+
+def estimate_move(factors: dict, scenario: dict, base_ccy: str = "GBP") -> float:
+    """First-order per-name move: b_mkt*spy + b_tech*tech + FX overlay. nan-safe.
+    Floored at -100% -- a position can't lose more than its whole value, so the
+    linear model is not allowed to overshoot past a total loss."""
+    def _n(v):
+        try:
+            f = float(v)
+            return f if f == f else 0.0
+        except (TypeError, ValueError):
+            return 0.0
+    bm, bt = _n(factors.get("b_mkt")), _n(factors.get("b_tech"))
+    move = bm * _n(scenario.get("spy")) + bt * _n(scenario.get("tech"))
+    if str(factors.get("ccy") or base_ccy) == SHOCKWAVE_FX_CCY and SHOCKWAVE_FX_CCY != base_ccy:
+        move += _n(scenario.get("usd"))
+    return max(move, -100.0)
+
+
+def basket_weighted_move(factors_list, scenario, base_ccy: str = "GBP") -> float:
+    """Weight-weighted mean of per-name moves (uniform weights -> simple mean)."""
+    tot_w = 0.0
+    acc = 0.0
+    for f in (factors_list or []):
+        try:
+            w = float(f.get("weight"))
+        except (TypeError, ValueError):
+            w = 1.0
+        if w != w or w <= 0:
+            w = 1.0
+        acc += w * estimate_move(f, scenario, base_ccy)
+        tot_w += w
+    return acc / tot_w if tot_w > 0 else float("nan")
+
+
+def recovery_estimate(basket_move: float) -> "str | None":
+    """Historical rule-of-thumb recovery time by basket drawdown depth (S&P
+    bear-market history). None for shallow/positive moves."""
+    try:
+        m = float(basket_move)
+    except (TypeError, ValueError):
+        return None
+    if m != m or m >= -6:
+        return None
+    if m >= -15:
+        return "~1 year"
+    if m >= -25:
+        return "~2 years"
+    if m >= -40:
+        return "~4 years"
+    return "~5-6 years"
+
+
+def build_shockwave_payload(factors, presets, as_of, base_ccy,
+                            mcap_by_ticker: "dict | None" = None) -> dict:
+    """Assemble the inline payload block. Enriches each factor with mcap (or
+    None). Privacy-safe: weight is unitless, mcap is public company data; no
+    shares or money amounts. size_default follows WEIGHT_MODE."""
+    mc = mcap_by_ticker or {}
+    keep = ("ticker", "name", "sector", "b_mkt", "b_tech", "r2", "ccy", "ret",
+            "weight", "low_conf")
+    out_factors = []
+    for f in (factors or []):
+        d = {k: f.get(k) for k in keep}
+        raw = mc.get(f.get("ticker"))
+        try:
+            d["mcap"] = float(raw) if raw is not None and raw == raw else None
+        except (TypeError, ValueError):
+            d["mcap"] = None
+        out_factors.append(d)
+    return {
+        "factors": out_factors,
+        "presets": [dict(p) for p in (presets or [])],
+        "base_ccy": base_ccy,
+        "as_of": as_of,
+        "fx_ccy": SHOCKWAVE_FX_CCY,
+        "size_default": "eq" if WEIGHT_MODE == "equal" else "w",
+    }
+
+
+def render_shockwave(payload: dict) -> str:
+    """Static panel shell; the client JS fills chips/sliders/field/impact from
+    the inline SHOCKWAVE const. All dynamic text (only as_of here) is escaped."""
+    as_of = _esc(str(payload.get("as_of", "")))
+    return f'''<section class="shockwave-wrap" id="shockwave-wrap" aria-hidden="true" aria-label="Shockwave stress test">
+  <div class="shockwave-card">
+    <div class="sw-head">
+      <span class="sw-eyebrow">Shockwave</span>
+      <span class="sw-asof">as of {as_of}</span>
+    </div>
+    <div class="sw-chips" id="sw-chips"></div>
+    <div class="sw-controls">
+      <div class="sw-sliders" id="sw-sliders"></div>
+      <div class="sw-sizewrap"><span class="sw-sizelbl">Dot size</span><div class="sw-size" id="sw-size"></div></div>
+    </div>
+    <div class="sw-hero" id="sw-hero"></div>
+    <div class="sw-action" id="sw-action"></div>
+    <svg class="sw-field" id="sw-field" viewBox="0 0 900 350" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Resilience field"></svg>
+    <div class="sw-impact" id="sw-impact"></div>
+    <div class="sw-note">First-order 2-factor estimate; likelihood + recovery are historical rules of thumb, not predictions.</div>
+  </div>
+</section>'''
+
+
 # ============================ v3.2 Doctor ============================
 # A deterministic, build-time whole-basket check-up. Pure functions over data
 # already computed in render_html (zero extra network fetch). See
@@ -7233,7 +7410,8 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
                 prediction_rows: list[dict] | None = None,
                 nasdaq_series: pd.Series | None = None,
                 value_rows: "list[dict] | None" = None,
-                auto_tickers: "list[str] | None" = None) -> str:
+                auto_tickers: "list[str] | None" = None,
+                stress_factors: "list[dict] | None" = None) -> str:
     weekly = prices.resample("W-FRI").last().ffill()
     defs_html = render_svg_defs()
     # v3.1 #1: per-module "as of" dates. Price/return-derived modules (detractors,
@@ -7365,6 +7543,22 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
         bb_universe_obs=bigbrain_observations, watchlist_payload=watchlist_payload,
         analyst_rows=analyst_rows, as_of=close_as_of)
     doctor_html = render_doctor(_doctor_report)
+
+    # v3.3 Shockwave -- 2-factor stress test over the baked per-name sensitivities.
+    # mcap (for the "By market cap" size toggle) comes from the universe cache when
+    # the held name is an S&P member; missing -> None (graceful uniform size).
+    _mcap_by_ticker = {}
+    if universe_outlook is not None and "market_cap" in getattr(universe_outlook, "columns", []):
+        for _t in [f["ticker"] for f in (stress_factors or [])]:
+            if _t in universe_outlook.index:
+                _mv = universe_outlook.loc[_t, "market_cap"]
+                if pd.notna(_mv):
+                    _mcap_by_ticker[_t] = float(_mv)
+    _shockwave_payload = build_shockwave_payload(
+        stress_factors or [], SHOCKWAVE_PRESETS, close_as_of, BASE_CCY,
+        mcap_by_ticker=_mcap_by_ticker)
+    shockwave_html = render_shockwave(_shockwave_payload)
+    shockwave_json = _json_for_script(_shockwave_payload, separators=(",", ":"), ensure_ascii=False)
 
     n_total = len(returns)
     n_open = int((returns.status == "open").sum()) if not returns.empty else 0
@@ -8183,6 +8377,47 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
   .palette-toggle button:hover{{color:var(--text);border-color:var(--text-dim)}}
   .palette-toggle button.active{{background:var(--accent);color:var(--ink);
     border-color:var(--accent);font-weight:600}}
+
+  /* v3.3 Shockwave panel -- slide-open like the Doctor. */
+  .shockwave-btn[aria-pressed="true"]{{background:var(--accent);color:var(--ink);border-color:var(--accent)}}
+  .shockwave-wrap{{max-height:0;overflow:hidden;opacity:0;margin:0;transition:max-height .3s ease,opacity .3s ease,margin .3s ease}}
+  .shockwave-wrap.is-open{{max-height:3000px;opacity:1;margin:10px 0 4px}}
+  @media (prefers-reduced-motion:reduce){{.shockwave-wrap{{transition:none}}.sw-field .dot{{transition:none}}.sw-field .pz{{animation:none}}}}
+  .shockwave-card{{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:16px 18px}}
+  .sw-head{{display:flex;align-items:center;gap:10px}}
+  .sw-eyebrow{{font-size:.72rem;letter-spacing:.08em;text-transform:uppercase;color:var(--text-dim)}}
+  .sw-asof{{margin-left:auto;font-size:.72rem;color:var(--text-dim)}}
+  .sw-chips{{display:flex;flex-wrap:wrap;gap:7px;margin:12px 0}}
+  .sw-chip{{font-size:12px;padding:5px 9px;display:flex;align-items:center;gap:6px;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text);cursor:pointer}}
+  .sw-chip:hover{{border-color:var(--text-dim)}}
+  .sw-lk{{width:8px;height:8px;border-radius:50%;display:inline-block}}
+  .sw-controls{{display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start}}
+  .sw-sliders{{flex:1 1 260px;min-width:240px}}
+  .sw-srow{{display:flex;align-items:center;gap:10px;margin-bottom:7px}}
+  .sw-srow span.l{{font-size:12px;color:var(--text-dim);min-width:88px}}
+  .sw-srow input{{flex:1}}
+  .sw-srow span.v{{font-size:12px;font-weight:600;min-width:42px;text-align:right}}
+  .sw-sizelbl{{font-size:11px;color:var(--text-dim);display:block;margin-bottom:4px}}
+  .sw-size{{display:flex}}
+  .sw-seg{{font-size:11px;padding:4px 9px;background:var(--bg);border:1px solid var(--border);color:var(--text-dim);cursor:pointer}}
+  .sw-seg:first-child{{border-radius:8px 0 0 8px}}
+  .sw-seg:last-child{{border-radius:0 8px 8px 0}}
+  .sw-seg.on{{background:var(--accent);color:var(--ink);border-color:var(--accent);font-weight:600}}
+  .sw-hero{{font-family:Georgia,'Times New Roman',serif;font-size:34px;line-height:1.1;margin:12px 0 2px;font-variant-numeric:tabular-nums}}
+  .sw-hero small{{font-family:inherit;font-size:12px;color:var(--text-dim);margin-left:8px}}
+  .sw-action{{font-size:13px;line-height:1.5;padding:8px 11px;border-left:3px solid var(--border);margin:8px 0 4px;color:var(--text)}}
+  .sw-field{{width:100%;height:auto;margin-top:6px}}
+  .sw-field .dot{{transition:transform .5s ease}}
+  .sw-field .dot circle{{transition:fill .3s ease,r .3s ease,opacity .3s ease}}
+  @keyframes swpulse{{0%,100%{{opacity:1}}50%{{opacity:.3}}}}
+  .sw-field .pz{{animation:swpulse 1s ease-in-out infinite}}
+  .sw-impact{{margin-top:8px}}
+  .sw-ihead{{display:flex;align-items:center;gap:8px;padding:0 0 3px;font-size:10px;color:var(--text-dim);text-transform:uppercase;letter-spacing:.04em;border-bottom:1px solid var(--border);margin-bottom:3px}}
+  .sw-ibar{{display:flex;align-items:center;gap:8px;padding:2px 0;font-size:12px}}
+  .sw-ibrk{{font-size:10.5px;color:var(--text-dim);font-variant-numeric:tabular-nums;white-space:nowrap;min-width:118px;text-align:right}}
+  @media (max-width:620px){{.sw-ibrk{{display:none}}}}
+  .sw-more{{font-size:12px;color:var(--accent);cursor:pointer;margin-top:4px}}
+  .sw-note{{font-size:11.5px;color:var(--text-dim);margin-top:10px}}
 
   /* v3.2 Doctor panel -- mirrors the pocket-lesson slide-open pattern. */
   .doctor-btn[aria-pressed="true"]{{background:var(--accent);color:var(--ink);border-color:var(--accent)}}
@@ -9700,8 +9935,7 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
   <button class="layout-toggle icon-btn doctor-btn" id="doctor-btn" type="button" aria-pressed="false"
           aria-label="Basket check-up" data-tooltip="Doctor">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-      <path d="M8 2v4M8 6a4 4 0 0 0 8 0V2"/><path d="M8 6v5a6 6 0 0 0 12 0"/>
-      <circle cx="20" cy="11" r="2"/><path d="M11 16v2a4 4 0 0 0 8 0v-1"/>
+      <rect x="4" y="4" width="16" height="16" rx="3"/><path d="M12 9v6M9 12h6"/>
     </svg>
   </button>
   <button class="layout-toggle icon-btn desktop-mode-btn" id="desktop-mode-btn" type="button" aria-pressed="false"
@@ -9729,6 +9963,13 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
       <circle cx="12" cy="12" r="10"/>
       <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/>
       <line x1="12" y1="17" x2="12.01" y2="17"/>
+    </svg>
+  </button>
+  <!-- v3.3 Shockwave: toggled market stress-test. State localStorage `shockwaveOn` (default off). -->
+  <button class="layout-toggle icon-btn shockwave-btn" id="shockwave-btn" type="button" aria-pressed="false"
+          aria-label="Shockwave stress test" data-tooltip="Shockwave">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M13 3l0 7l6 0l-8 11l0 -7l-6 0l8 -11"/>
     </svg>
   </button>
   <!-- v2.1: 4 palette buttons collapsed to a single cycling button. Click
@@ -9761,6 +10002,8 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
 </div>
 
 {doctor_html}
+
+{shockwave_html}
 
 <!-- v1.9 Pocket Lesson card. Sits just below the topbar. Default state is
      collapsed (no `.is-open` class). JS reads localStorage on load and adds
@@ -10006,6 +10249,7 @@ const AUX_DATA = {aux_json};
 // the POCKET_LESSONS list in build.py. JS picks one at random on each page
 // load; a Next-tip button rotates without reloading.
 const POCKET_LESSONS = {pocket_lessons_json};
+const SHOCKWAVE = {shockwave_json};
 
 // v2.1 Quiz: 50-question pool, 5 categories x 10 questions. Schema:
 //   {{id, category, format ("cloze"|"direct"), question, options[3], correct, explanation}}
@@ -11515,6 +11759,131 @@ document.getElementById('hero-chart').addEventListener('click', (e) => {{
   btn.addEventListener('click', () => setEnabled(btn.getAttribute('aria-pressed') !== 'true'));
 }})();
 
+// v3.3 Shockwave: interactive market stress test over the baked SHOCKWAVE const.
+// Toggles like the Doctor; panel builds lazily on first open.
+(function setupShockwave() {{
+  var btn=document.getElementById('shockwave-btn'), wrap=document.getElementById('shockwave-wrap');
+  if(!btn||!wrap||typeof SHOCKWAVE==='undefined') return;
+  var KEY='shockwaveOn', SKEY='shockwaveSize';
+  function setOpen(on,silent){{
+    btn.setAttribute('aria-pressed',on?'true':'false');
+    wrap.classList.toggle('is-open',on);
+    wrap.setAttribute('aria-hidden',on?'false':'true');
+    if(on && !wrap.dataset.init){{ initPanel(); wrap.dataset.init='1'; }}
+    if(!silent){{ try{{localStorage.setItem(KEY,on?'1':'0');}}catch(e){{}} }}
+  }}
+  var i0=false; try{{i0=localStorage.getItem(KEY)==='1';}}catch(e){{}}
+  setOpen(i0,true);
+  btn.addEventListener('click',function(){{setOpen(btn.getAttribute('aria-pressed')!=='true');}});
+
+  function initPanel(){{
+    var F=SHOCKWAVE.factors||[], P=SHOCKWAVE.presets||[], base=SHOCKWAVE.base_ccy||'GBP';
+    var LOSS='#f87171', GAIN='#34d399', FLAT='#8a8a8a';
+    var LK={{common:'#34d399',occasional:'#fbbf24',rare:'#f87171'}};
+    var sizeMode=SHOCKWAVE.size_default||'eq'; try{{var sm=localStorage.getItem(SKEY); if(sm)sizeMode=sm;}}catch(e){{}}
+    var usd=0, active=null, showAll=false;
+    var maxMc=Math.max.apply(null,F.map(function(f){{return f.mcap||0;}}).concat([1]));
+    var chips=document.getElementById('sw-chips'), sliders=document.getElementById('sw-sliders'),
+        sizeBox=document.getElementById('sw-size'), hero=document.getElementById('sw-hero'),
+        action=document.getElementById('sw-action'), field=document.getElementById('sw-field'),
+        impact=document.getElementById('sw-impact');
+    sliders.innerHTML=''
+      +'<div class="sw-srow"><span class="l">Market (SPY)</span><input id="sw-mkt" type="range" min="-45" max="20" step="1" value="-20"><span class="v" id="sw-mktv"></span></div>'
+      +'<div class="sw-srow"><span class="l">Tech tilt</span><input id="sw-tec" type="range" min="-30" max="30" step="1" value="-10"><span class="v" id="sw-tecv"></span></div>'
+      +'<div class="sw-srow"><span class="l">USD vs '+base+'</span><input id="sw-usd" type="range" min="-15" max="15" step="1" value="0"><span class="v" id="sw-usdv"></span></div>';
+    var mkt=document.getElementById('sw-mkt'), tec=document.getElementById('sw-tec'), usdS=document.getElementById('sw-usd');
+    [['eq','Equal'],['w','By weight'],['mc','By market cap']].forEach(function(m){{
+      var b=document.createElement('button'); b.className='sw-seg'+(m[0]===sizeMode?' on':''); b.textContent=m[1];
+      b.onclick=function(){{sizeMode=m[0]; try{{localStorage.setItem(SKEY,m[0]);}}catch(e){{}} [].forEach.call(sizeBox.children,function(c){{c.className='sw-seg';}}); b.className='sw-seg on'; render();}};
+      sizeBox.appendChild(b);
+    }});
+    P.forEach(function(p){{
+      var b=document.createElement('button'); b.className='sw-chip';
+      b.innerHTML='<span class="sw-lk" style="background:'+(LK[p.likelihood]||FLAT)+'"></span>'+p.label+(p.recovery?'<span style="color:var(--text-dim)"> '+p.recovery+'</span>':'');
+      b.onclick=function(){{mkt.value=p.spy; tec.value=p.tech; usd=p.usd; usdS.value=p.usd; active=p; render();}};
+      chips.appendChild(b);
+    }});
+    var X=function(b){{return 66+(Math.max(0.2,Math.min(2.4,b))-0.2)/2.2*796;}};
+    var Y=function(r){{return 300-(Math.max(-100,Math.min(80,r))+100)/180*270;}};
+    function col(m){{return m<-3?LOSS:m>3?GAIN:FLAT;}}
+    function fmt(x){{return (x>0?'+':'')+Math.round(x)+'%';}}
+    function rad(f){{if(sizeMode==='eq')return 5; if(sizeMode==='w'){{var w=f.weight||1; return 3+Math.min(6,w*2.1);}} if(!f.mcap)return 5; return 3+Math.sqrt(f.mcap/maxMc)*7;}}
+    function move(f,sc){{var bm=(f.b_mkt===f.b_mkt&&f.b_mkt!=null)?f.b_mkt:0, bt=(f.b_tech===f.b_tech&&f.b_tech!=null)?f.b_tech:0; var m=bm*sc.spy+bt*sc.tech; if((f.ccy||base)===SHOCKWAVE.fx_ccy && SHOCKWAVE.fx_ccy!==base) m+=sc.usd; return Math.max(m,-100);}}
+    function recov(b){{if(b>=-6)return null; if(b>=-15)return'~1 year'; if(b>=-25)return'~2 years'; if(b>=-40)return'~4 years'; return'~5-6 years';}}
+    function render(){{
+      var sc={{spy:+mkt.value, tech:+tec.value, usd:usd}};
+      document.getElementById('sw-mktv').textContent=fmt(+mkt.value);
+      document.getElementById('sw-tecv').textContent=fmt(+tec.value);
+      document.getElementById('sw-usdv').textContent=fmt(usd);
+      var d=F.map(function(f){{var m=move(f,sc); return {{f:f,t:f.ticker,m:m,proj:Math.max((f.ret||0)+m,-100),w:f.weight||1,bm:(f.b_mkt||0),lc:f.low_conf,contrib:Math.abs(m)*(f.weight||1)}};}});
+      var tw=d.reduce(function(a,x){{return a+x.w;}},0)||1;
+      var basket=d.reduce(function(a,x){{return a+x.w*x.m;}},0)/tw;
+      var rc=active&&active.recovery?active.recovery:recov(basket);
+      hero.innerHTML=fmt(basket)+'<small>estimated basket move'+(rc?' &middot; est. recovery '+rc:'')+'</small>';
+      hero.style.color=col(basket);
+      var worst=d.slice().sort(function(a,b){{return a.m-b.m;}})[0]||{{t:'',m:0}};
+      var best=d.slice().sort(function(a,b){{return b.m-a.m;}})[0]||{{t:'',m:0}};
+      var act;
+      if(basket<=-15) act='Deep drawdown. Most exposed: '+worst.t+' ('+fmt(worst.m)+')'+(rc?', ~'+rc.replace(/[~ ]/g,'')+' to recover historically':'')+' &mdash; consider trimming high-beta names.';
+      else if(basket<=-5) act='Moderate hit. '+worst.t+' leads the downside ('+fmt(worst.m)+') &mdash; worth a hedge or a lighter position.';
+      else if(basket<3) act='Your basket looks resilient to this scenario &mdash; no urgent action.';
+      else act='Upside scenario: '+best.t+' benefits most ('+fmt(best.m)+'). Defensive names lag.';
+      action.innerHTML=act;
+      var labeled={{}};
+      d.slice().sort(function(a,b){{return b.contrib-a.contrib;}}).slice(0,{SHOCKWAVE_LABEL_TOP}).forEach(function(x){{labeled[x.t]=1;}});
+      d.forEach(function(x){{ if(x.bm>1.2 && x.proj<0 && x.m<-30) labeled[x.t]=1; }});
+      var placed=[];
+      function labelY(cx,cy,r){{
+        var up=cy-r-4, dn=cy+r+12;
+        function clash(y){{ return placed.some(function(p){{ return Math.abs(p.x-cx)<34 && Math.abs(p.y-y)<11; }}); }}
+        var y = !clash(up) ? up : (!clash(dn) ? dn : up);
+        placed.push({{x:cx,y:y}}); return y;
+      }}
+      field.innerHTML=''
+        +'<rect x="'+X(1.2).toFixed(1)+'" y="'+Y(0).toFixed(1)+'" width="'+(862-X(1.2)).toFixed(1)+'" height="'+(300-Y(0)).toFixed(1)+'" fill="'+LOSS+'" opacity="0.08"></rect>'
+        +'<line x1="66" y1="300" x2="862" y2="300" stroke="var(--border)"></line>'
+        +'<line x1="66" y1="30" x2="66" y2="300" stroke="var(--border)"></line>'
+        +'<line x1="66" y1="'+Y(0).toFixed(1)+'" x2="862" y2="'+Y(0).toFixed(1)+'" stroke="var(--border)" stroke-dasharray="3 3"></line>'
+        +'<text x="464" y="334" text-anchor="middle" font-size="11" fill="var(--text-dim)">market sensitivity &rarr;</text>'
+        +'<text x="18" y="165" text-anchor="middle" font-size="11" fill="var(--text-dim)" transform="rotate(-90 18 165)">projected return</text>'
+        +'<text x="58" y="34" text-anchor="end" font-size="10.5" fill="var(--text-dim)">+80%</text>'
+        +'<text x="58" y="'+(Y(0)+4).toFixed(1)+'" text-anchor="end" font-size="10.5" fill="var(--text-dim)">0%</text>'
+        +'<text x="58" y="'+(Y(-50)+4).toFixed(1)+'" text-anchor="end" font-size="10.5" fill="var(--text-dim)">-50%</text>'
+        +'<text x="58" y="302" text-anchor="end" font-size="10.5" fill="var(--text-dim)">-100%</text>'
+        +d.map(function(x){{
+          var cx=X(x.bm), cy=Y(x.proj), r=rad(x.f), c=col(x.m), lab=labeled[x.t], op=x.lc?0.3:(lab?1:0.5),
+              pulse=(x.m<{SHOCKWAVE_PULSE_PCT} && x.bm>1.2)?' pz':'';
+          var tx='';
+          if(lab){{ var ly=labelY(cx,cy,r); tx='<text x="'+cx.toFixed(1)+'" y="'+ly.toFixed(1)+'" text-anchor="middle" font-size="10" fill="var(--text-dim)">'+x.t+'</text>'; }}
+          return '<g class="dot" style="transform:translate('+cx.toFixed(1)+'px,'+cy.toFixed(1)+'px)"><circle class="'+pulse.trim()+'" r="'+r.toFixed(1)+'" fill="'+c+'" opacity="'+op+'"><title>'+x.t+': '+fmt(x.m)+(x.lc?' (low fit)':'')+'</title></circle></g>'+tx;
+        }}).join('');
+      var ranked=d.slice().sort(function(a,b){{return b.contrib-a.contrib;}});
+      var shown=showAll?ranked:ranked.slice(0,6);
+      var mx=Math.max.apply(null,ranked.map(function(x){{return Math.abs(x.m);}}).concat([1]));
+      var ihead='<div class="sw-ihead"><span style="width:56px">name</span><span style="flex:1"></span>'
+        +'<span class="sw-ibrk">mkt / tech / FX</span><span style="width:46px;text-align:right">net</span></div>';
+      impact.innerHTML=ihead+shown.map(function(x){{
+        var neg=x.m<0, w=(Math.abs(x.m)/mx)*46, c=col(x.m);
+        var fxApplies=((x.f.ccy||base)===SHOCKWAVE.fx_ccy && SHOCKWAVE.fx_ccy!==base);
+        var mktC=(x.f.b_mkt||0)*sc.spy, techC=(x.f.b_tech||0)*sc.tech, fxC=fxApplies?sc.usd:0;
+        var rawSum=mktC+techC+fxC;
+        var brk='market '+fmt(mktC)+' + tech '+fmt(techC)+(fxApplies?' + FX '+fmt(fxC):'')+' = '+fmt(rawSum)+(rawSum<-100?' (capped at -100%)':'');
+        return '<div class="sw-ibar" title="'+brk+'"><span style="width:56px;font-weight:600">'+x.t+'</span>'
+          +'<div style="position:relative;flex:1;height:16px"><div style="position:absolute;left:50%;top:0;bottom:0;width:1px;background:var(--border)"></div>'
+          +'<div style="position:absolute;top:2px;height:12px;border-radius:3px;background:'+c+';'+(neg?'right:50%;':'left:50%;')+'width:'+w+'%"></div></div>'
+          +'<span class="sw-ibrk">'+fmt(mktC)+' / '+fmt(techC)+' / '+(fxApplies?fmt(fxC):'&mdash;')+'</span>'
+          +'<span style="width:46px;text-align:right;font-weight:600;color:'+c+'">'+fmt(x.m)+'</span></div>';
+      }}).join('')+(ranked.length>6?'<div class="sw-more" id="sw-more">'+(showAll?'Show less':'Show all '+ranked.length)+'</div>':'');
+      var more=document.getElementById('sw-more');
+      if(more) more.onclick=function(){{showAll=!showAll; render();}};
+    }}
+    mkt.addEventListener('input',function(){{active=null; render();}});
+    tec.addEventListener('input',function(){{active=null; render();}});
+    usdS.addEventListener('input',function(){{usd=+usdS.value; active=null; render();}});
+    render();
+  }}
+}})();
+
 // v2.1: palette toggle collapsed from 4 buttons into 1 cycling button. Each
 // click advances through the ORDER list; label updates to the current palette
 // name. Persistence key + body-class scheme unchanged from v1.x for backwards
@@ -12737,6 +13106,10 @@ def main(demo: bool = False, watchlist_only: bool = False,
     except Exception as e:
         print(f"WARN Big Brain universe lane skipped: {e}", file=sys.stderr)
 
+    # v3.3 Shockwave: per-name 2-factor sensitivities (uses the RAW SPY/QQQ price
+    # series + native prices, all in scope here), threaded into render_html.
+    stress_factors = compute_stress_factors(prices_native, bench, nasdaq_b, meta, returns)
+
     html = render_html(returns, prices, meta, basket, bench_series, contrib, transactions,
                        signals, prices_native, returns_native, untracked=untracked,
                        watchlist=watchlist, news_items=news_items, analyst=analyst,
@@ -12757,7 +13130,8 @@ def main(demo: bool = False, watchlist_only: bool = False,
                        prediction_rows=prediction_rows,
                        nasdaq_series=nasdaq_series,
                        value_rows=auto_value_rows,
-                       auto_tickers=auto_tickers)
+                       auto_tickers=auto_tickers,
+                       stress_factors=stress_factors)
 
     out_path = DEMO_OUT_HTML if demo else OUT_HTML
     out_path.parent.mkdir(parents=True, exist_ok=True)

@@ -26,11 +26,11 @@ def test_select_auto_watchlist_excludes_manual_and_caps():
     assert out == ["AAA", "CCC", "DDD"]          # BBB excluded, capped at 3, order kept
 
 
-def test_select_auto_watchlist_default_cap_is_constant():
+def test_select_auto_watchlist_default_is_uncapped():
     rows = [_vrow(t, True) for t in ("A", "B", "C", "D", "E", "F")]
     out = build.select_auto_watchlist(rows, manual_tickers=set())
-    assert out == ["A", "B", "C", "D"]           # AUTO_WATCH_MAX == 4
-    assert build.AUTO_WATCH_MAX == 4
+    assert out == ["A", "B", "C", "D", "E", "F"]   # v3.3: no cap, all two-signal names
+    assert build.AUTO_WATCH_MAX is None
 
 
 def test_select_auto_watchlist_no_bb_returns_empty():
