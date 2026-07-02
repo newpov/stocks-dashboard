@@ -954,7 +954,7 @@ VALUE_MIN_SECTOR_N = 3       # #2 sector-median P/E needs >= this many priced pe
 # JS), so a page is always gap-free. CSS forces these column counts per breakpoint.
 WATCH_COLS_DESKTOP = 6       # cards per row on desktop
 WATCH_COLS_MOBILE  = 3       # cards per row on mobile; also the "needs paging" floor
-AUTO_WATCH_MAX     = 4       # v3.0 #5: max auto (Value ∩ Big Brain) watchlist picks
+AUTO_WATCH_MAX     = None    # v3.3: no cap -- ALL Value+BB two-signal names auto-add (was 4)
 
 # How many candidates the analyst panel shows in total (the grid scrolls
 # internally past ~6 visible). Safety cap for very large closed-position lists.
@@ -3968,8 +3968,9 @@ def two_signal_tickers(value_rows: "list[dict] | None") -> list[str]:
 
 def select_auto_watchlist(value_rows: "list[dict] | None", manual_tickers,
                           max_n: "int | None" = None) -> list[str]:
-    """Up to max_n 2-signal tickers NOT already in the manual watchlist. Held
-    names are already excluded by build_value_screen (discovery-only)."""
+    """2-signal (Value+BB) tickers NOT already in the manual watchlist, in
+    screen order. Uncapped by default (AUTO_WATCH_MAX is None -> all of them);
+    pass max_n to cap. Held names are already excluded by build_value_screen."""
     cap = AUTO_WATCH_MAX if max_n is None else max_n
     manual = set(manual_tickers or ())
     return [t for t in two_signal_tickers(value_rows) if t not in manual][:cap]
@@ -11803,7 +11804,7 @@ document.getElementById('hero-chart').addEventListener('click', (e) => {{
       chips.appendChild(b);
     }});
     var X=function(b){{return 66+(Math.max(0.2,Math.min(2.4,b))-0.2)/2.2*796;}};
-    var Y=function(r){{return 300-(Math.max(-50,Math.min(70,r))+50)/120*270;}};
+    var Y=function(r){{return 300-(Math.max(-100,Math.min(80,r))+100)/180*270;}};
     function col(m){{return m<-3?LOSS:m>3?GAIN:FLAT;}}
     function fmt(x){{return (x>0?'+':'')+Math.round(x)+'%';}}
     function rad(f){{if(sizeMode==='eq')return 5; if(sizeMode==='w'){{var w=f.weight||1; return 3+Math.min(6,w*2.1);}} if(!f.mcap)return 5; return 3+Math.sqrt(f.mcap/maxMc)*7;}}
@@ -11845,9 +11846,10 @@ document.getElementById('hero-chart').addEventListener('click', (e) => {{
         +'<line x1="66" y1="'+Y(0).toFixed(1)+'" x2="862" y2="'+Y(0).toFixed(1)+'" stroke="var(--border)" stroke-dasharray="3 3"></line>'
         +'<text x="464" y="334" text-anchor="middle" font-size="11" fill="var(--text-dim)">market sensitivity &rarr;</text>'
         +'<text x="18" y="165" text-anchor="middle" font-size="11" fill="var(--text-dim)" transform="rotate(-90 18 165)">projected return</text>'
-        +'<text x="58" y="34" text-anchor="end" font-size="10.5" fill="var(--text-dim)">+70%</text>'
+        +'<text x="58" y="34" text-anchor="end" font-size="10.5" fill="var(--text-dim)">+80%</text>'
         +'<text x="58" y="'+(Y(0)+4).toFixed(1)+'" text-anchor="end" font-size="10.5" fill="var(--text-dim)">0%</text>'
-        +'<text x="58" y="302" text-anchor="end" font-size="10.5" fill="var(--text-dim)">-50%</text>'
+        +'<text x="58" y="'+(Y(-50)+4).toFixed(1)+'" text-anchor="end" font-size="10.5" fill="var(--text-dim)">-50%</text>'
+        +'<text x="58" y="302" text-anchor="end" font-size="10.5" fill="var(--text-dim)">-100%</text>'
         +d.map(function(x){{
           var cx=X(x.bm), cy=Y(x.proj), r=rad(x.f), c=col(x.m), lab=labeled[x.t], op=x.lc?0.3:(lab?1:0.5),
               pulse=(x.m<{SHOCKWAVE_PULSE_PCT} && x.bm>1.2)?' pz':'';

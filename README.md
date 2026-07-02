@@ -195,7 +195,7 @@ then context, then details, then actions:
 
 ┌─ Watchlist ───────────────────────────────────────────────────────────┐
 │ Names you track but don't hold (watchlist.csv), each with an entry    │
-│ read: verdict + trigger chips + news cite. Auto-adds up to 4 names    │
+│ read: verdict + trigger chips + news cite. Auto-adds ALL names        │
 │ flagged by BOTH Value screen + Big Brain (shaded, "Value + BB").      │
 └───────────────────────────────────────────────────────────────────────┘
 
@@ -418,9 +418,9 @@ it slots into the shapes-not-amounts model cleanly. (Want to *track performance*
 of a watchlist instead, with each name equal-weighted from its start? That's the
 separate `--watchlist-only` build mode below.)
 
-**Auto-surfaced 2-signal names (v3.0).** Beyond the names in your `watchlist.csv`,
-the module automatically adds up to **4** stocks flagged by **both** the Value
-screen **and** Big Brain — high-conviction discoveries you may not be tracking yet.
+**Auto-surfaced 2-signal names (v3.0, uncapped in v3.3).** Beyond the names in your
+`watchlist.csv`, the module automatically adds **every** stock flagged by **both** the
+Value screen **and** Big Brain — high-conviction discoveries you may not be tracking yet.
 They appear **first**, shaded, with a **`Value + BB`** badge, ahead of your manual
 names; a name you already track that *also* qualifies keeps its place but gains the
 validation badge. The picks are computed each build (reusing data already fetched

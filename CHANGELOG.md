@@ -29,6 +29,7 @@ build time, zero extra network fetch; equal-weight and returns-only (never £).
 - **Resilience field** — x = market sensitivity, y = *projected* return under the shock (dots sink as it lands), colour = estimated move, a shaded **danger quadrant** (sensitive AND projected-underwater); the hardest-hit dots **pulse**. A live **recommended-action sentence** names the most-exposed holding and what to do. Ranked **impact bars** (by weighted contribution) sit beneath with a "show all" expander.
 - **Objective density handling** — every open name is plotted (the aggregate never filters); only the top contributors + danger names are labelled (hover for the rest). Dot **size** follows `WEIGHT_MODE` with an **Equal / By weight / By market cap** toggle — market cap is available but never the author's equal-weight default.
 - **Honest by construction** — first-order linear estimate (labelled, not a forecast), low-fit names de-emphasised, per-name moves **floored at −100%** (a position can't overshoot a total loss), and likelihood/recovery framed as historical rules of thumb. `compute_stress_factors` + `estimate_move` (pure, mirrored by the client JS) + `build_shockwave_payload` + `render_shockwave`; `tests/test_shockwave.py` (16 tests). *(Bug caught in browser verification: the linear model showed −109% under an extreme crash; floored at −100%.)*
+- **Auto-watchlist cap lifted** — the Value ∩ Big Brain "two-signal" auto-adds are no longer capped at 4 (`AUTO_WATCH_MAX = None`); **all** flagged names surface first, then the manual `watchlist.csv` names.
 
 ---
 
