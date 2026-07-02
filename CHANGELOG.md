@@ -14,6 +14,24 @@ than a barely-working prototype.
 
 ---
 
+## v3.3 — Shockwave: interactive market stress-test · 2 July 2026
+
+A new top-level **Shockwave** panel — the what-if counterpart to the Doctor. You
+apply market/tech/currency shocks and every open position reacts by its **own
+historical sensitivity**, rendered as an animated resilience field plus a weighted
+impact list. It surfaces *hidden fragilities* (names that are both highly sensitive
+and already underwater) that no per-name module shows. Deterministic, computed at
+build time, zero extra network fetch; equal-weight and returns-only (never £).
+
+- **Toggled panel, tornado button** placed after Quiz / before the theme button (default off, `localStorage shockwaveOn`). Pairs with the Doctor as the two "centrepiece" tools.
+- **Two-factor engine** — each open name's native daily returns are regressed on `[SPY, QQQ−SPY]` for a market beta (`b_mkt`) and a tech-tilt loading (`b_tech`) plus fit quality (`r2`); an **exact USD-vs-GBP FX overlay** adds the currency leg. So a shock moves each name by its own sensitivity, not uniformly. Reuses the SPY + QQQ series already fetched — nothing new downloaded.
+- **Scenario presets, positive and negative** — Tech correction, Risk-off bear, 2008-style crash, Rate shock, Soft-landing rally, AI breakthrough, Crypto mainstream — each with a **likelihood** dot (common / occasional / rare) and, for drawdowns, an **estimated historical recovery time** ("~2 yrs"). Three live sliders (Market / Tech / USD) drive it too.
+- **Resilience field** — x = market sensitivity, y = *projected* return under the shock (dots sink as it lands), colour = estimated move, a shaded **danger quadrant** (sensitive AND projected-underwater); the hardest-hit dots **pulse**. A live **recommended-action sentence** names the most-exposed holding and what to do. Ranked **impact bars** (by weighted contribution) sit beneath with a "show all" expander.
+- **Objective density handling** — every open name is plotted (the aggregate never filters); only the top contributors + danger names are labelled (hover for the rest). Dot **size** follows `WEIGHT_MODE` with an **Equal / By weight / By market cap** toggle — market cap is available but never the author's equal-weight default.
+- **Honest by construction** — first-order linear estimate (labelled, not a forecast), low-fit names de-emphasised, per-name moves **floored at −100%** (a position can't overshoot a total loss), and likelihood/recovery framed as historical rules of thumb. `compute_stress_factors` + `estimate_move` (pure, mirrored by the client JS) + `build_shockwave_payload` + `render_shockwave`; `tests/test_shockwave.py` (16 tests). *(Bug caught in browser verification: the linear model showed −109% under an extreme crash; floored at −100%.)*
+
+---
+
 ## v3.2 — Doctor: basket check-up · 1 July 2026
 
 A new top-level **Doctor** panel that synthesises the whole basket into an

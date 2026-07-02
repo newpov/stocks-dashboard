@@ -499,6 +499,31 @@ of the pool has been answered so the experience never dead-ends.
 
 ![Quiz modal showing a correct answer (green highlight + explanation) for a Market mechanics question about Regulation SHO](docs/assets/demo-quiz.jpeg)
 
+### Shockwave — interactive market stress-test (v3.3)
+
+A toggled top panel (tornado icon in the topbar, default off) that lets you
+shock the market, tech, and USD/GBP, and watch every open position react by its
+**own historical sensitivity** — an animated "resilience field" (dots sink to
+their projected return, the hardest-hit ones pulse, a danger quadrant flags
+names that are both fragile and already underwater) plus a weighted impact list
+and a live recommended-action line. Preset scenarios (positive and negative)
+carry a **likelihood** dot and an estimated **historical recovery time**.
+
+Each name's sensitivity is a build-time **two-factor regression** of its native
+daily returns on `[SPY, QQQ−SPY]` (market beta + tech tilt), with an exact
+USD-vs-GBP FX overlay — reusing the SPY and QQQ series already fetched, so no
+extra network calls.
+
+**What it is not:** a forecast. It's a deliberately simple **first-order linear**
+estimate — it ignores idiosyncratic moves, convexity, and the correlation
+breakdown that real crises bring (when everything falls together and betas
+understate the hit). Per-name moves are floored at −100% (you can't lose more
+than a position's value); low-fit names are visibly de-emphasised; the preset
+scenarios are **narrative labels mapped onto the three factors** (e.g. "crypto
+mainstream" ≈ tech up + USD soft), not literal instrument betas; and the
+likelihood/recovery figures are historical rules of thumb. Treat it as a way to
+*explore* your basket's shape under stress, not to predict outcomes.
+
 ### Decision-flow ordering
 
 The vertical order is deliberate — verdict → research → details → action →
