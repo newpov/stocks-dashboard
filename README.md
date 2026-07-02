@@ -501,7 +501,7 @@ of the pool has been answered so the experience never dead-ends.
 
 ### Shockwave — interactive market stress-test (v3.3)
 
-A toggled top panel (tornado icon in the topbar, default off) that lets you
+A toggled top panel (lightning-bolt icon in the topbar, default off) that lets you
 shock the market, tech, and USD/GBP, and watch every open position react by its
 **own historical sensitivity** — an animated "resilience field" (dots sink to
 their projected return, the hardest-hit ones pulse, a danger quadrant flags

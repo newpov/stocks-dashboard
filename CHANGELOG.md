@@ -23,7 +23,7 @@ impact list. It surfaces *hidden fragilities* (names that are both highly sensit
 and already underwater) that no per-name module shows. Deterministic, computed at
 build time, zero extra network fetch; equal-weight and returns-only (never £).
 
-- **Toggled panel, tornado button** placed after Quiz / before the theme button (default off, `localStorage shockwaveOn`). Pairs with the Doctor as the two "centrepiece" tools.
+- **Toggled panel, lightning-bolt button** placed after Quiz / before the theme button (default off, `localStorage shockwaveOn`). Pairs with the Doctor as the two "centrepiece" tools.
 - **Two-factor engine** — each open name's native daily returns are regressed on `[SPY, QQQ−SPY]` for a market beta (`b_mkt`) and a tech-tilt loading (`b_tech`) plus fit quality (`r2`); an **exact USD-vs-GBP FX overlay** adds the currency leg. So a shock moves each name by its own sensitivity, not uniformly. Reuses the SPY + QQQ series already fetched — nothing new downloaded.
 - **Scenario presets, positive and negative** — Tech correction, Risk-off bear, 2008-style crash, Rate shock, Soft-landing rally, AI breakthrough, Crypto mainstream — each with a **likelihood** dot (common / occasional / rare) and, for drawdowns, an **estimated historical recovery time** ("~2 yrs"). Three live sliders (Market / Tech / USD) drive it too.
 - **Resilience field** — x = market sensitivity, y = *projected* return under the shock (dots sink as it lands), colour = estimated move, a shaded **danger quadrant** (sensitive AND projected-underwater); the hardest-hit dots **pulse**. A live **recommended-action sentence** names the most-exposed holding and what to do. Ranked **impact bars** (by weighted contribution) sit beneath with a "show all" expander.
