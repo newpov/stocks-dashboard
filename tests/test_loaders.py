@@ -123,6 +123,12 @@ def test_public_pipeline_surface_exists():
         # v3.3 Shockwave public surface
         "compute_stress_factors", "estimate_move", "basket_weighted_move",
         "recovery_estimate", "build_shockwave_payload", "render_shockwave",
+        # v3.4 #2 Signal stacking public surface
+        "record_signal_history", "compute_signal_stacking", "render_signal_stacking",
+        # v3.4 #4 Industry overlay public surface
+        "build_industry_overlay_series",
+        # v3.4 #3 Short-term view public surface
+        "rebase_cumulative_returns",
     ]
     missing = [n for n in expected if not callable(getattr(build, n, None))]
     assert missing == [], f"missing/renamed public functions: {missing}"

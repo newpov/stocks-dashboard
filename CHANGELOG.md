@@ -14,6 +14,23 @@ than a barely-working prototype.
 
 ---
 
+## v3.4 — Signal memory, industry overlay & short-term view · 3 July 2026
+
+A fixes-and-relevance release (all author-flagged): three new ways to read the
+basket plus three targeted fixes. Everything stays deterministic, build-time,
+and zero-extra-fetch — reusing data the other modules already compute.
+
+- **#2 Signal stacking** — a new toggled top panel (notepad button next to the Doctor, `localStorage signalStackingOn`, default off) that remembers which *non-owned* names keep getting flagged. Names churn build-to-build as things recompute; this keeps a monthly reference. Four engines feed it — Big Brain ideas, Value screen, Re-entry ideas, Rating-moves upgrades — captured daily to a committed `data/signal_history.parquet` (`{date, ticker, source}`, non-owned only, pruned to 90d, public-safe like the analyst history). The panel ranks names by **distinct days seen this month** + engine breadth, with a **"hot this week"** flag (≥3 of those days in the last 7). Rows show `ticker · name · price · Seen Nd · engine chips`; clicking opens the full modal (tracked names) or the #5 analyst card (universe names). `record_signal_history` / `compute_signal_stacking` / `render_signal_stacking`; `tests/test_signal_stacking.py`.
+- **#4 Industry overlay on the hero** — an optional **Industries** legend toggle (Nasdaq pattern, default off) draws the top **3 owned industries** as real equal-weight trajectory lines (built like the basket via `compute_basket_mtm_series` on each industry's held tickers, ranked by window return) plus the top **2 non-owned industries** as **hollow-diamond "12m" markers** from the Industry outlook. Honest about the horizon mismatch (owned = since-inception lines, non-owned = 12-month markers, clearly tagged); non-owned 12m returns beyond ±200% are treated as outliers and never drive the y-scale (they clamp into the plot). `build_industry_overlay_series`; `tests/test_industry_overlay.py`.
+- **#3 Short-term view** — a segmented **`All · 3M · 1M`** control on the hero (default All, transient). Switching **rebases** basket + SPY to the window start (proper growth-factor rebase via `rebase_cumulative_returns`, mirrored in the client JS) from a compact ~95-day daily payload slice, with a slide transition. The since-inception decorations (vs-SPY area, alpha/drawdown sparklines, FX band, fiscal-year stat) hide in short-term mode and return on All; the Δ badge becomes the window Δ. `tests/test_short_term_view.py`.
+- **#5 Lightweight analyst modal** — non-owned names in **Rating moves** (e.g. FANG = Diamondback Energy) used to click into nothing (no positions payload). They now open a compact **analyst-snapshot card** in the info-modal — price, mean target + implied upside, **target range**, rating + coverage depth, and the flagging move — sourced from the same analyst frame that generated the moves. `build_rating_moves_modal_payload` / `render_analyst_card` / `build_signal_modal_cards`.
+- **#1 Doctor "see &lt;module&gt;" links now work** — each Doctor action's `→ see …` is a real link that reveals the target module (un-hiding it if it was toggled off in the stack) and smooth-scrolls with a brief highlight. Previously dead text; the picker's `module_key` is now mapped to the DOM module id.
+- **#6 Losers / Bottom 10 sort fixed** — those filters now lead with the **biggest loss** (ascending on since-baseline) instead of the smallest; extracted a shared `sortTable(col, asc)` so per-mode sort direction is deterministic. Winners / Top 10 unchanged.
+- **Polish** — the industry-legend name chips no longer eat hero-legend space when Industries is off (a `.hero-ind-legend{display:flex}` rule had been overriding the `hidden` attribute). **413 tests.**
+- **Deferred (its own release):** the Industry-outlook module's inflated group returns (e.g. "Computer Hardware +1606%") — diagnosed as *real* feed data (the memory/semi sector genuinely ran 8–40× in this data), mis-aggregated by **current**-cap weighting on 3–7-name sub-industries. Validated fix for the follow-up: group by **sector** (~15-name minimum) with **start-of-period** cap weighting (`market_cap / (1 + ret/100)`) → credible numbers (Technology +34%) with no caps.
+
+---
+
 ## v3.3 — Shockwave: interactive market stress-test · 2 July 2026
 
 A new top-level **Shockwave** panel — the what-if counterpart to the Doctor. You

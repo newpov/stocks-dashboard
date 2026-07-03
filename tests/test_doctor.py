@@ -416,3 +416,49 @@ def test_doctor_button_and_panel_in_page_source():
     assert 'id="doctor-btn"' in src
     assert "{doctor_html}" in src
     assert "setupDoctor" in src
+
+
+# --- v3.4 #1: Doctor "see <module>" is a working link ------------------------
+
+def test_render_doctor_link_carries_mapped_module_dom_target():
+    # The action's module_key ("industry", "signal") must be translated to the
+    # actual DOM module id ("outlook", "quadrant") so the click can scroll there.
+    html = build.render_doctor(_sample_report())
+    assert 'data-module-target="outlook"' in html      # industry -> outlook module
+    assert 'data-module-target="quadrant"' in html      # signal   -> quadrant module
+    # The human label is still shown next to the arrow.
+    assert "Industry outlook" in html and "Signal map" in html
+
+
+def test_render_doctor_link_is_actionable_element():
+    # Not a bare <div>: it must be clickable (a real anchor/button the JS wires).
+    html = build.render_doctor(_sample_report())
+    # locate the defend card's link fragment
+    assert 'class="doc-link"' in html
+    # an actionable element: <a ...> or role="button" or an href anchor target
+    assert ('<a ' in html and 'doc-link' in html) or 'role="button"' in html
+
+
+def test_render_doctor_no_link_when_module_key_absent():
+    rep = _sample_report()
+    # a none-reason card has no module_key; a card can also lack the key
+    rep["actions"]["tune"].pop("module_key", None)
+    rep["actions"]["tune"].pop("module_label", None)
+    html = build.render_doctor(rep)
+    # only the defend card (industry) should emit a target now
+    assert html.count("data-module-target") == 1
+
+
+def test_module_key_to_dom_id_map_covers_all_doctor_keys():
+    # Every module_key the Doctor pickers emit must have a DOM-id mapping.
+    emitted = {"industry", "exit", "currency", "signal", "holdings",
+               "value", "watchlist"}
+    for key in emitted:
+        assert build._DOCTOR_MODULE_DOM.get(key), f"unmapped module_key {key}"
+
+
+def test_doctor_links_wired_in_page_source():
+    src = inspect.getsource(build.render_html)
+    # modules carry a stable scroll id, and a handler targets the doctor links
+    assert 'id="module-' in src
+    assert "doc-link[data-module-target]" in src

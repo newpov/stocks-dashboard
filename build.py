@@ -84,6 +84,7 @@ PRIOR_ANALYST_CACHE = ROOT / "data" / "prior_analyst_cache.parquet"
 # file's mtime each run, so the baseline never aged. Instead we commit a rolling
 # history of daily analyst snapshots and pick a sliding ~2-week baseline from it.
 ANALYST_HISTORY = ROOT / "data" / "analyst_history.parquet"
+SIGNAL_HISTORY = ROOT / "data" / "signal_history.parquet"  # v3.4 #2 recurrence memory
 RATING_SEED_META = ROOT / "data" / "rating_seed.json"  # records the cold-start seed date so the UI can flag a provisional baseline
 RATING_WINDOW_DAYS = 14        # compare today vs ~this many days ago
 RATING_HISTORY_KEEP_DAYS = 18  # prune history a little beyond the window
@@ -6140,6 +6141,399 @@ def _rm_rec_row(m: dict) -> str:
     )
 
 
+# === v3.4 #2: Signal stacking (non-owned recurrence memory) ==================
+SIGNAL_STACK_MIN_DAYS = 2      # drop one-off appearances
+SIGNAL_STACK_CAP = 8           # rows shown
+SIGNAL_STACK_HOT_WINDOW = 7    # "hot this week" lookback (days)
+SIGNAL_STACK_HOT_MIN = 3       # distinct days in the window to flag hot
+SIGNAL_STACK_KEEP_DAYS = 90    # history prune horizon
+_SS_ENGINE_NAMES = {"BB": "Big Brain idea", "VS": "Value screen",
+                    "RE": "Re-entry / upside", "RM": "Rating move"}
+
+
+def record_signal_history(flagged, today, history_path=SIGNAL_HISTORY,
+                          keep_days=SIGNAL_STACK_KEEP_DAYS):
+    """Append today's non-owned signal flags to the rolling history parquet,
+    replacing any existing same-day rows and pruning older than keep_days.
+    ``flagged`` maps source key -> iterable of tickers. Long-form rows are
+    [date, ticker, source]. Best-effort; never raises. Returns the frame."""
+    today = pd.Timestamp(today).normalize()
+    out_cols = ["date", "ticker", "source"]
+    rows = []
+    for source, tickers in (flagged or {}).items():
+        for t in dict.fromkeys(tickers or []):   # de-dupe, preserve order
+            if t:
+                rows.append({"date": today, "ticker": str(t), "source": str(source)})
+    cur = pd.DataFrame(rows, columns=out_cols)
+    if history_path.exists():
+        try:
+            hist = pd.read_parquet(history_path)
+        except Exception:
+            hist = pd.DataFrame(columns=out_cols)
+    else:
+        hist = pd.DataFrame(columns=out_cols)
+    if not hist.empty:
+        hist["date"] = pd.to_datetime(hist["date"]).dt.normalize()
+        hist = hist[hist["date"] != today]        # idempotent same-day replace
+    combined = pd.concat([hist, cur], ignore_index=True)
+    if not combined.empty:
+        combined["date"] = pd.to_datetime(combined["date"]).dt.normalize()
+        cutoff = today - pd.Timedelta(days=keep_days)
+        combined = combined[combined["date"] >= cutoff].reset_index(drop=True)
+    try:
+        history_path.parent.mkdir(parents=True, exist_ok=True)
+        combined.to_parquet(history_path)
+    except Exception as e:
+        print(f"WARN couldn't write signal history: {e}", file=sys.stderr)
+    return combined
+
+
+def _is_rm_upgrade(m: dict) -> bool:
+    """A Rating-moves entry that counts as a positive signal: a target hike or
+    a recommendation upgrade."""
+    if not isinstance(m, dict):
+        return False
+    if m.get("kind") == "target":
+        try:
+            return float(m.get("pct_change", 0.0)) > 0
+        except (TypeError, ValueError):
+            return False
+    if m.get("kind") == "recommendation":
+        return _rec_direction(m.get("before", ""), m.get("after", "")) == "up"
+    return False
+
+
+def compute_signal_stacking(history, as_of, price_lookup=None, name_lookup=None,
+                            *, owned=None, min_days=SIGNAL_STACK_MIN_DAYS,
+                            cap=SIGNAL_STACK_CAP, hot_window=SIGNAL_STACK_HOT_WINDOW,
+                            hot_min=SIGNAL_STACK_HOT_MIN):
+    """Aggregate the rolling history into ranked 'recurring signal' rows for the
+    current calendar month of ``as_of``. ``price_lookup`` / ``name_lookup`` are
+    dicts {ticker: (price, symbol)} / {ticker: name}. Pure; never raises.
+    Returns a list of {ticker,name,price,ccy_symbol,days,engines,hot}."""
+    if history is None or getattr(history, "empty", True):
+        return []
+    try:
+        h = history.copy()
+        h["date"] = pd.to_datetime(h["date"]).dt.normalize()
+        asof = pd.Timestamp(as_of).normalize()
+        month_start = asof.replace(day=1)
+        h = h[(h["date"] >= month_start) & (h["date"] <= asof)]
+        if h.empty:
+            return []
+        owned_set = set(owned or [])
+        hot_cutoff = asof - pd.Timedelta(days=hot_window - 1)
+        price_lookup = price_lookup or {}
+        name_lookup = name_lookup or {}
+        rows = []
+        for tkr, g in h.groupby("ticker"):
+            if tkr in owned_set:
+                continue
+            days = int(g["date"].nunique())
+            if days < min_days:
+                continue
+            engines = sorted(set(g["source"].astype(str).tolist()))
+            hot_days = int(g[g["date"] >= hot_cutoff]["date"].nunique())
+            price, sym = None, "$"
+            pv = price_lookup.get(tkr)
+            if isinstance(pv, (tuple, list)) and len(pv) == 2:
+                price, sym = float(pv[0]), str(pv[1])
+            elif pv is not None:
+                price = float(pv)
+            rows.append({
+                "ticker": tkr, "name": str(name_lookup.get(tkr, tkr)),
+                "price": price, "ccy_symbol": sym, "days": days,
+                "engines": engines, "hot": hot_days >= hot_min,
+            })
+        rows.sort(key=lambda r: (-r["days"], -len(r["engines"]), r["ticker"]))
+        return rows[:cap]
+    except Exception:
+        return []
+
+
+def render_signal_stacking(rows, as_of) -> str:
+    """Toggled inline panel (Doctor/Shockwave pattern): ranked recurring
+    non-owned names. All dynamic text is _esc-escaped."""
+    as_of_e = _esc(str(as_of or ""))
+    if not rows:
+        body = ('<p class="ss-empty muted">Building signal history &mdash; recurring '
+                'names appear as daily snapshots accumulate.</p>')
+    else:
+        items = []
+        for r in rows:
+            tkr = _esc(str(r.get("ticker", "")))
+            name = _esc(str(r.get("name", "")))
+            sym = _esc(str(r.get("ccy_symbol", "$")))
+            price = r.get("price")
+            price_html = f"{sym}{price:,.2f}" if price is not None else "&mdash;"
+            days = int(r.get("days", 0))
+            hot = '<span class="ss-hot">hot</span>' if r.get("hot") else ""
+            chips = "".join(
+                f'<span class="ss-eng ss-eng-{_esc(str(e).lower())}" '
+                f'title="{_esc(_SS_ENGINE_NAMES.get(e, str(e)))}">{_esc(str(e))}</span>'
+                for e in (r.get("engines") or []))
+            items.append(
+                f'<div class="ss-row">'
+                f'<span class="ss-tkr ticker-clickable" data-ticker="{tkr}">{tkr}</span>'
+                f'<span class="ss-name">{name}</span>'
+                f'<span class="ss-price">{price_html}</span>'
+                f'<span class="ss-seen">Seen {days}d</span>'
+                f'<span class="ss-engs">{chips}{hot}</span>'
+                f'</div>')
+        body = '<div class="ss-list">' + "".join(items) + "</div>"
+    return f'''<section class="signal-stacking-wrap" id="signal-stacking-wrap" aria-hidden="true" aria-label="Signal stacking">
+  <div class="signal-stacking-card">
+    <div class="ss-head">
+      <span class="ss-eyebrow">Signal stacking</span>
+      <span class="ss-sub muted">non-owned names flagged repeatedly this month</span>
+      <span class="ss-asof">as of {as_of_e}</span>
+    </div>
+    {body}
+  </div>
+</section>'''
+
+
+# === v3.4 #4: Industry overlay on the hero chart ============================
+INDUSTRY_OVERLAY_N_OWNED = 3
+INDUSTRY_OVERLAY_N_NONOWNED = 2
+INDUSTRY_OVERLAY_COLORS = ["#5dcaa5", "#85b7eb", "#e09a85", "#d4537e", "#ef9f27"]
+# Non-owned 12m returns beyond this (abs) are almost certainly a data glitch in
+# a universe constituent (bad split/price) — skip so the chart isn't hijacked.
+INDUSTRY_OVERLAY_MAX_ABS_RET = 200.0
+
+
+def build_industry_overlay_series(transactions, prices, meta, returns,
+                                  industry_groups, *,
+                                  n_owned=INDUSTRY_OVERLAY_N_OWNED,
+                                  n_nonowned=INDUSTRY_OVERLAY_N_NONOWNED,
+                                  colors=INDUSTRY_OVERLAY_COLORS):
+    """v3.4 #4: up to n_owned owned-industry equal-weight TWR series (built like
+    the basket, ranked by window return) + up to n_nonowned non-owned industry
+    12m endpoints from the outlook (excluding owned industries). Pure; never
+    raises; returns [] when nothing to show."""
+    out: list[dict] = []
+    try:
+        owned_industries: dict[str, list] = {}
+        if (returns is not None and not returns.empty and meta is not None
+                and "status" in returns.columns):
+            for t in returns[returns.status == "open"].index:
+                ind = (str(meta.loc[t, "industry"]).strip()
+                       if t in meta.index and pd.notna(meta.loc[t, "industry"]) else "")
+                if ind:
+                    owned_industries.setdefault(ind, []).append(t)
+        owned_series = []
+        if transactions is not None and not transactions.empty:
+            for ind, tkrs in owned_industries.items():
+                sub = transactions[transactions["ticker"].isin(tkrs)]
+                if sub.empty:
+                    continue
+                ser = compute_basket_mtm_series(sub, prices)
+                if ser is None or ser.empty:
+                    continue
+                w = ser.resample("W-FRI").last().ffill().dropna()
+                if w.empty:
+                    continue
+                owned_series.append((ind, float(w.iloc[-1]),
+                                     [d.strftime("%Y-%m-%d") for d in w.index],
+                                     [round(float(v), 4) for v in w.tolist()]))
+        owned_series.sort(key=lambda x: x[1], reverse=True)
+        owned_series = owned_series[:n_owned]
+        owned_names = {o[0] for o in owned_series}
+        ci = 0
+        for ind, _fin, dates, vals in owned_series:
+            out.append({"name": ind, "kind": "owned",
+                        "color": colors[ci % len(colors)],
+                        "series": {"dates": dates, "values": vals}})
+            ci += 1
+        picked = 0
+        for g in (industry_groups or []):
+            if picked >= n_nonowned:
+                break
+            ind = str(g.get("industry") or "").strip()
+            if not ind or ind in owned_names:
+                continue
+            ar = g.get("avg_ret_12m")
+            if ar is None or pd.isna(ar):
+                continue
+            if abs(float(ar)) > INDUSTRY_OVERLAY_MAX_ABS_RET:
+                continue                       # data-glitch outlier — skip
+            out.append({"name": ind, "kind": "outlook",
+                        "color": colors[ci % len(colors)],
+                        "endpoint": round(float(ar), 4)})
+            ci += 1
+            picked += 1
+        return out
+    except Exception:
+        return []
+
+
+# === v3.4 #5: lightweight analyst modal for NON-OWNED Rating-moves names =====
+# Owned/tracked tickers open the full chart modal (DATA payload). Names that
+# appear in Rating moves but aren't in the basket (e.g. re-entry candidates like
+# FANG) have no chart data, so they get a compact analyst-snapshot card drawn
+# from the same analyst frame that generated the moves. Pure + escaped.
+
+def _rmm_name(ticker, meta=None, universe=None, analyst=None):
+    """Best display name for a non-owned ticker; falls back to the ticker."""
+    for src in (meta, universe, analyst):
+        idx = getattr(src, "index", None)
+        if idx is not None and ticker in idx:
+            row = src.loc[ticker]
+            nm = row.get("name") if hasattr(row, "get") else None
+            if nm is not None and str(nm).strip() and str(nm).strip() != ticker:
+                return str(nm).strip()
+    return ticker
+
+
+def render_analyst_card(f: dict) -> str:
+    """Escaped HTML body for the non-owned analyst-snapshot modal (v3.4 #5)."""
+    sym = f.get("sym", "$")
+
+    def money(v):
+        return f"{sym}{v:,.2f}" if v is not None else "&mdash;"
+
+    up = f.get("upside")
+    up_html = (f'<span class="rmm-up {"pos" if up >= 0 else "neg"}">'
+               f'{"+" if up >= 0 else ""}{up:.1f}%</span>'
+               if up is not None else '')
+    rlabel, rcls = _rec_label(str(f.get("rec", "")))
+    n = f.get("n_analysts")
+    n_html = (f'{n} analyst{"s" if n != 1 else ""}' if n is not None
+              else "coverage n/a")
+    thigh, tlow = f.get("target_high"), f.get("target_low")
+    range_html = ""
+    if thigh is not None and tlow is not None:
+        range_html = ('<div class="rmm-row"><span class="rmm-k">Target range</span>'
+                      f'<span class="rmm-v">{money(tlow)} &ndash; {money(thigh)}</span></div>')
+    move_bits = []
+    for m in (f.get("moves") or []):
+        if m.get("kind") == "target":
+            pc = float(m.get("pct_change", 0.0) or 0.0)
+            move_bits.append(f'target {money(m.get("before"))} &rarr; '
+                             f'{money(m.get("after"))} ({"+" if pc >= 0 else ""}{pc:.1f}%)')
+        elif m.get("kind") == "recommendation":
+            bl, _ = _rec_label(str(m.get("before", "")))
+            al, _ = _rec_label(str(m.get("after", "")))
+            move_bits.append(f'{bl} &rarr; {al}')
+    move_html = ('<div class="rmm-move"><span class="rmm-k">Flagged</span> '
+                 + " &middot; ".join(move_bits) + '</div>') if move_bits else ""
+    return (
+        '<div class="rmm-card">'
+        '<div class="rmm-tag">discovery only &middot; no position</div>'
+        '<div class="rmm-grid">'
+        f'<div class="rmm-row"><span class="rmm-k">Price</span>'
+        f'<span class="rmm-v">{money(f.get("price"))}</span></div>'
+        f'<div class="rmm-row"><span class="rmm-k">Mean target</span>'
+        f'<span class="rmm-v">{money(f.get("target"))} {up_html}</span></div>'
+        f'{range_html}'
+        f'<div class="rmm-row"><span class="rmm-k">Rating</span>'
+        f'<span class="rmm-v {rcls}">{rlabel} '
+        f'<span class="muted">&middot; {n_html}</span></span></div>'
+        f'</div>{move_html}</div>'
+    )
+
+
+def build_rating_moves_modal_payload(moves, analyst, owned_tickers,
+                                     meta=None, universe=None) -> dict:
+    """Map non-owned Rating-moves tickers -> {name, title, sub, html}. Pure;
+    tolerates None/empty inputs. Owned names are skipped (they keep the full
+    modal); a ticker with no analyst row is skipped (nothing to show)."""
+    if not moves or analyst is None or getattr(analyst, "empty", True):
+        return {}
+    owned = set(owned_tickers or [])
+    by_tkr: dict[str, list] = {}
+    for m in (moves or []):
+        t = m.get("ticker")
+        if not t or t in owned:
+            continue
+        by_tkr.setdefault(t, []).append(m)
+    out: dict[str, dict] = {}
+    for t, ms in by_tkr.items():
+        if t not in analyst.index:
+            continue
+        row = analyst.loc[t]
+
+        def _f(col):
+            v = row.get(col) if hasattr(row, "get") else None
+            try:
+                return float(v) if v is not None and pd.notna(v) else None
+            except (TypeError, ValueError):
+                return None
+
+        price, target = _f("current_price"), _f("target_mean")
+        n_an = _f("num_analysts")
+        rec = _norm_rec(row.get("recommendation") if hasattr(row, "get") else "")
+        if price is None and target is None and not rec:
+            continue
+        upside = (((target / price) - 1.0) * 100.0
+                  if (price and target and price > 0 and target > 0) else None)
+        name = _rmm_name(t, meta, universe, analyst)
+        ccy = "USD"
+        if meta is not None and t in getattr(meta, "index", []):
+            ccy = ticker_currency(meta, t) or "USD"
+        fields = {
+            "ticker": t, "name": name, "sym": CCY_SYMBOLS.get(ccy, "$"),
+            "price": price, "target": target,
+            "target_high": _f("target_high"), "target_low": _f("target_low"),
+            "upside": upside, "rec": rec,
+            "n_analysts": int(n_an) if n_an is not None else None, "moves": ms,
+        }
+        out[t] = {"name": name, "title": _esc(t),
+                  "sub": f"{_esc(name)} &middot; not in your basket",
+                  "html": render_analyst_card(fields)}
+    return out
+
+
+def build_signal_modal_cards(tickers, universe, analyst=None, owned=None,
+                             meta=None) -> dict:
+    """v3.4 #2: analyst-snapshot cards for non-owned Signal-stacking names,
+    sourced from the universe outlook (preferred) then the portfolio analyst
+    frame. Reuses render_analyst_card (range/flagged lines omit gracefully when
+    the source lacks them). Pure; safe on None/empty. Returns {ticker: {...}}."""
+    owned_set = set(owned or [])
+    out: dict[str, dict] = {}
+    for t in dict.fromkeys(tickers or []):
+        if t in owned_set:
+            continue
+        row = None
+        for src in (universe, analyst):
+            if src is not None and t in getattr(src, "index", []):
+                row = src.loc[t]
+                break
+        if row is None:
+            continue
+
+        def _f(col):
+            v = row.get(col) if hasattr(row, "get") else None
+            try:
+                return float(v) if v is not None and pd.notna(v) else None
+            except (TypeError, ValueError):
+                return None
+
+        price, target = _f("current_price"), _f("target_mean")
+        rec = _norm_rec(row.get("recommendation") if hasattr(row, "get") else "")
+        if price is None and target is None and not rec:
+            continue
+        n_an = _f("num_analysts")
+        upside = (((target / price) - 1.0) * 100.0
+                  if (price and target and price > 0 and target > 0) else None)
+        name = _rmm_name(t, meta, universe, analyst)
+        ccy = "USD"
+        if meta is not None and t in getattr(meta, "index", []):
+            ccy = ticker_currency(meta, t) or "USD"
+        fields = {
+            "ticker": t, "name": name, "sym": CCY_SYMBOLS.get(ccy, "$"),
+            "price": price, "target": target,
+            "target_high": _f("target_high"), "target_low": _f("target_low"),
+            "upside": upside, "rec": rec,
+            "n_analysts": int(n_an) if n_an is not None else None, "moves": [],
+        }
+        out[t] = {"name": name, "title": _esc(t),
+                  "sub": f"{_esc(name)} &middot; not in your basket",
+                  "html": render_analyst_card(fields)}
+    return out
+
+
 def render_rating_moves(moves: list[dict], prior_exists: bool,
                         baseline_date=None, baseline_seeded: bool = False) -> str:
     """v2.7 #4: split into two groups so BOTH kinds always show:
@@ -6526,10 +6920,12 @@ def build_data_payload(returns: pd.DataFrame, prices: pd.DataFrame,
     return payload
 
 
-def _hero_legend_html(has_nasdaq: bool) -> str:
-    """Hero-chart legend items. Nasdaq is an optional toggle button rendered only
-    when QQQ data is present; basket + SPY are fixed reference labels (they drive
-    the vs-SPY area, delta badge and alpha sparkline, so they are not toggleable)."""
+def _hero_legend_html(has_nasdaq: bool, industries=None) -> str:
+    """Hero-chart legend items. Nasdaq + Industries are optional toggle buttons
+    rendered only when their data is present; basket + SPY are fixed reference
+    labels (they drive the vs-SPY area, delta badge and alpha sparkline, so they
+    are not toggleable). v3.4 #4: the Industries toggle reveals the top owned
+    industry lines + non-owned 12m markers, with a hidden name legend group."""
     items = [
         '<div class="leg"><span class="leg-swatch basket"></span>Basket</div>',
         '<div class="leg"><span class="leg-swatch spy"></span>SPY</div>',
@@ -6540,8 +6936,37 @@ def _hero_legend_html(has_nasdaq: bool) -> str:
             'aria-pressed="false" title="Show/hide the Nasdaq-100 (QQQ) line">'
             '<span class="leg-swatch nasdaq"></span>Nasdaq</button>'
         )
+    if industries:
+        items.append(
+            '<button type="button" class="leg leg-toggle" data-series="industries" '
+            'aria-pressed="false" title="Show top industries vs the basket '
+            '(owned = trajectory, non-owned = 12m marker)">'
+            '<span class="leg-swatch ind"></span>Industries</button>'
+        )
+        chips = "".join(
+            (f'<span class="leg-ind-item">'
+             f'<span class="leg-swatch" style="background:{_esc(str(e.get("color", "")))}"></span>'
+             f'{_esc(str(e.get("name", "")))}'
+             f'{" &#9671; 12m" if e.get("kind") == "outlook" else ""}</span>')
+            for e in industries)
+        items.append(f'<span class="hero-ind-legend" hidden>{chips}</span>')
     items.append('<div class="leg"><span class="leg-swatch fx"></span>GBP/USD</div>')
     return "\n        ".join(items)
+
+
+SHORT_TERM_DAYS = 95   # daily slice horizon for the 1M/3M hero view (v3.4 #3)
+
+
+def rebase_cumulative_returns(values, start_idx=0):
+    """Rebase cumulative-return-% values so values[start_idx] becomes 0, using
+    the growth-factor formula (returns compound, so this is NOT subtraction).
+    Pure; safe on empty/short lists."""
+    if not values or start_idx >= len(values):
+        return list(values or [])
+    base = 1.0 + float(values[start_idx]) / 100.0
+    if base == 0:
+        return [0.0 for _ in values]
+    return [round(((1.0 + float(v) / 100.0) / base - 1.0) * 100.0, 4) for v in values]
 
 
 def build_portfolio_payload(basket: pd.Series, bench: pd.Series,
@@ -6554,6 +6979,22 @@ def build_portfolio_payload(basket: pd.Series, bench: pd.Series,
             return [], []
         w = s.resample("W-FRI").last().ffill().dropna()
         return [d.strftime("%Y-%m-%d") for d in w.index], [round(float(v), 4) for v in w.tolist()]
+
+    # v3.4 #3: compact DAILY slice (last SHORT_TERM_DAYS) of basket + SPY for the
+    # 1M/3M short-term view. Rebasing to the window start happens client-side.
+    def _short_daily(bk, sp):
+        if bk is None or sp is None or bk.empty or sp.empty:
+            return {"dates": [], "basket": [], "spy": []}
+        idx = bk.index.intersection(sp.index)
+        if len(idx) == 0:
+            return {"dates": [], "basket": [], "spy": []}
+        cutoff = idx.max() - pd.Timedelta(days=SHORT_TERM_DAYS)
+        idx = idx[idx >= cutoff]
+        return {
+            "dates": [d.strftime("%Y-%m-%d") for d in idx],
+            "basket": [round(float(v), 4) for v in bk.reindex(idx).tolist()],
+            "spy": [round(float(v), 4) for v in sp.reindex(idx).tolist()],
+        }
 
     b_dates, b_values = _weekly(basket)
     s_dates, s_values = _weekly(bench)
@@ -6575,6 +7016,7 @@ def build_portfolio_payload(basket: pd.Series, bench: pd.Series,
         "spy":    {"dates": s_dates, "values": s_values},
         "nasdaq": {"dates": n_dates, "values": n_values},
         "fx":     {"dates": fx_dates, "values": fx_values, "pair": "GBP/USD"},
+        "short":  _short_daily(basket, bench),
     }
 
 
@@ -7301,6 +7743,20 @@ def compute_doctor_report(*, returns, meta, basket, bench, contrib, signals,
             "metrics": metrics, "actions": actions, "as_of": as_of}
 
 
+# v3.4 #1: Doctor actions carry a `module_key` (the picker's semantic name);
+# translate it to the DOM module id used in the stack (`data-module=` / the
+# `id="module-<id>"` scroll target) so "see <module>" becomes a working link.
+_DOCTOR_MODULE_DOM = {
+    "industry": "outlook",
+    "exit": "detractors",
+    "currency": "ccy_exposure",
+    "signal": "quadrant",
+    "holdings": "holdings",
+    "value": "value_screen",
+    "watchlist": "watchlist",
+}
+
+
 def render_doctor(report: dict) -> str:
     """Toggled inline panel: header + state badge + driver chips + diagnosis +
     three action cards (Defend / Tune / Grow). All dynamic text is _esc-escaped."""
@@ -7332,7 +7788,15 @@ def render_doctor(report: dict) -> str:
         if tickers:
             head += f' <span class="doc-tk">{tickers}</span>'
         link = ""
-        if a.get("module_label"):
+        mkey = a.get("module_key")
+        dom_id = _DOCTOR_MODULE_DOM.get(str(mkey)) if mkey else None
+        if dom_id and a.get("module_label"):
+            # Real link: reveals (if hidden) + smooth-scrolls to the module.
+            # dom_id is from a fixed internal map, so it needs no escaping.
+            link = (f'<a class="doc-link" role="button" tabindex="0" '
+                    f'href="#module-{dom_id}" data-module-target="{dom_id}">'
+                    f'&rarr; see {_esc(str(a["module_label"]))}</a>')
+        elif a.get("module_label"):
             link = (f'<div class="doc-link">&rarr; see '
                     f'{_esc(str(a["module_label"]))}</div>')
         cards.append(
@@ -7411,7 +7875,8 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
                 nasdaq_series: pd.Series | None = None,
                 value_rows: "list[dict] | None" = None,
                 auto_tickers: "list[str] | None" = None,
-                stress_factors: "list[dict] | None" = None) -> str:
+                stress_factors: "list[dict] | None" = None,
+                signal_history: "pd.DataFrame | None" = None) -> str:
     weekly = prices.resample("W-FRI").last().ffill()
     defs_html = render_svg_defs()
     # v3.1 #1: per-module "as of" dates. Price/return-derived modules (detractors,
@@ -7559,6 +8024,47 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
         mcap_by_ticker=_mcap_by_ticker)
     shockwave_html = render_shockwave(_shockwave_payload)
     shockwave_json = _json_for_script(_shockwave_payload, separators=(",", ":"), ensure_ascii=False)
+
+    # v3.4 #5: lightweight analyst cards for non-owned Rating-moves names.
+    _rm_analyst_payload = build_rating_moves_modal_payload(
+        rating_moves, analyst,
+        set(returns.index) if returns is not None and not returns.empty else set(),
+        meta=meta, universe=universe_outlook)
+
+    # v3.4 #2: Signal stacking — recurring non-owned names this month.
+    _ss_price, _ss_name = {}, {}
+    for _src in (analyst, universe_outlook):
+        if _src is not None and not getattr(_src, "empty", True):
+            for _t in _src.index:
+                _row = _src.loc[_t]
+                if _t not in _ss_price:
+                    _cp = _row.get("current_price") if hasattr(_row, "get") else None
+                    if _cp is not None and pd.notna(_cp):
+                        _ccy = (ticker_currency(meta, _t)
+                                if (meta is not None and _t in getattr(meta, "index", []))
+                                else "USD") or "USD"
+                        _ss_price[_t] = (float(_cp), CCY_SYMBOLS.get(_ccy, "$"))
+                if _t not in _ss_name:
+                    _nm = _row.get("name") if hasattr(_row, "get") else None
+                    if _nm is not None and str(_nm).strip():
+                        _ss_name[_t] = str(_nm).strip()
+    _ss_open = (set(returns[returns.status == "open"].index)
+                if returns is not None and not returns.empty else set())
+    _ss_asof = _settled if _settled is not None else (
+        prices.index[-1] if len(prices.index) else None)
+    _ss_rows = compute_signal_stacking(signal_history, _ss_asof,
+                                       price_lookup=_ss_price, name_lookup=_ss_name,
+                                       owned=_ss_open)
+    signal_stacking_html = render_signal_stacking(_ss_rows, close_as_of)
+    # Make every non-owned Signal-stacking name clickable: build analyst cards
+    # for those not already covered by the rating-moves payload, then merge
+    # (rating-moves entries win — they carry the flagging-move context).
+    _sig_cards = build_signal_modal_cards([r["ticker"] for r in _ss_rows],
+                                          universe_outlook, analyst=analyst,
+                                          owned=_ss_open, meta=meta)
+    for _k, _v in _sig_cards.items():
+        _rm_analyst_payload.setdefault(_k, _v)
+    rm_analyst_json = _json_for_script(_rm_analyst_payload, separators=(",", ":"), ensure_ascii=False)
 
     n_total = len(returns)
     n_open = int((returns.status == "open").sum()) if not returns.empty else 0
@@ -8053,8 +8559,12 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     news_worker_url_js = _json_for_script(NEWS_WORKER_URL or "")
     _portfolio_payload = build_portfolio_payload(basket, bench, first_purchase,
                                                  fx=fx, nasdaq=nasdaq_series)
+    # v3.4 #4: top owned-industry trajectory lines + non-owned 12m markers.
+    _industry_overlay = build_industry_overlay_series(
+        transactions, prices, meta, returns, industry_groups)
+    _portfolio_payload["industries"] = _industry_overlay
     has_nasdaq = bool(_portfolio_payload.get("nasdaq", {}).get("values"))
-    hero_legend_html = _hero_legend_html(has_nasdaq)
+    hero_legend_html = _hero_legend_html(has_nasdaq, industries=_industry_overlay)
     portfolio_json = _json_for_script(_portfolio_payload, separators=(",", ":"))
     # T11/T12/T14/T15: aux payload for click-to-expand drill-down modals.
     # Reuses diversification_data (computed below) for the pair list -- this
@@ -8107,7 +8617,7 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
 
     def _wrap_module(mid: str, label: str, inner: str) -> str:
         return (
-            f'<div class="module" data-module="{mid}">'
+            f'<div class="module" id="module-{mid}" data-module="{mid}">'
             f'<div class="module-bar">'
             f'<span class="module-grip" aria-hidden="true">⋮⋮</span>'
             f'<span class="module-name">{label}</span>'
@@ -8453,7 +8963,61 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
   .doc-verb.doc-ok{{color:#34d399}} .doc-verb.doc-neutral{{color:var(--text-dim)}}
   .doc-tk{{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.8rem;color:var(--text)}}
   .doc-why{{font-size:.82rem;line-height:1.45;color:var(--text);margin:6px 0 0}}
-  .doc-link{{font-size:.74rem;color:var(--accent);margin-top:8px}}
+  .doc-link{{font-size:.74rem;color:var(--accent);margin-top:8px;display:inline-block;
+    text-decoration:none;cursor:pointer}}
+  a.doc-link:hover{{text-decoration:underline}}
+  a.doc-link:focus-visible{{outline:2px solid var(--accent);outline-offset:2px;border-radius:3px}}
+  /* v3.4 #1: brief highlight when a Doctor link scrolls you to its module. */
+  @keyframes moduleFlash{{0%{{background:var(--accent-soft,rgba(99,102,241,.18))}}
+    100%{{background:transparent}}}}
+  .module.module-flash{{animation:moduleFlash 1.5s ease-out}}
+  /* v3.4 #5: non-owned analyst snapshot card (rendered in the info-modal body). */
+  .rmm-card{{font-size:.86rem}}
+  .rmm-tag{{display:inline-block;font-size:.64rem;text-transform:uppercase;
+    letter-spacing:.1em;color:var(--text-dim);border:1px solid var(--border);
+    border-radius:999px;padding:2px 9px;margin-bottom:14px}}
+  .rmm-grid{{display:flex;flex-direction:column;gap:9px}}
+  .rmm-row{{display:flex;justify-content:space-between;align-items:baseline;gap:14px;
+    padding-bottom:9px;border-bottom:1px solid var(--border)}}
+  .rmm-k{{color:var(--text-dim)}}
+  .rmm-v{{font-family:'Geist Mono',monospace;text-align:right}}
+  .rmm-up{{margin-left:6px;font-size:.82rem}}
+  .rmm-up.pos{{color:var(--up)}}
+  .rmm-up.neg{{color:var(--down)}}
+  .rmm-move{{margin-top:14px;font-size:.8rem;color:var(--text-2)}}
+  .rmm-move .rmm-k{{margin-right:5px;text-transform:uppercase;
+    font-size:.64rem;letter-spacing:.08em}}
+  /* v3.4 #2: Signal stacking toggled panel (mirrors .doctor-wrap). */
+  .signal-stacking-wrap{{max-height:0;overflow:hidden;opacity:0;
+    transition:max-height .35s ease,opacity .3s ease,margin .3s ease;margin:0 auto}}
+  .signal-stacking-wrap.is-open{{max-height:1400px;opacity:1;margin:0 auto 22px}}
+  .signal-stacking-card{{background:var(--surface);border:0.5px solid var(--border);
+    border-radius:12px;padding:16px 18px;max-width:760px;margin:0 auto}}
+  .ss-head{{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:10px}}
+  .ss-eyebrow{{font-size:12px;text-transform:uppercase;letter-spacing:.12em;
+    color:var(--text);font-weight:600}}
+  .ss-asof{{margin-left:auto;font-family:'Geist Mono',monospace;font-size:11px;
+    color:var(--text-dim)}}
+  .ss-list{{display:flex;flex-direction:column;gap:2px}}
+  .ss-row{{display:flex;align-items:center;gap:10px;padding:7px 0;
+    border-bottom:0.5px solid var(--border)}}
+  .ss-row:last-child{{border-bottom:none}}
+  .ss-tkr{{font-family:'Geist Mono',monospace;font-size:13px;color:var(--accent);
+    min-width:54px;cursor:pointer}}
+  .ss-tkr:hover{{text-decoration:underline}}
+  .ss-name{{font-size:12px;color:var(--text-2);flex:1;overflow:hidden;
+    white-space:nowrap;text-overflow:ellipsis}}
+  .ss-price{{font-family:'Geist Mono',monospace;font-size:12px;color:var(--text);
+    min-width:64px;text-align:right}}
+  .ss-seen{{font-family:'Geist Mono',monospace;font-size:12px;color:var(--text);
+    background:var(--surface-2);border:0.5px solid var(--border);border-radius:10px;
+    padding:2px 8px}}
+  .ss-engs{{display:flex;gap:3px;align-items:center;min-width:96px;justify-content:flex-end}}
+  .ss-eng{{font-family:'Geist Mono',monospace;font-size:10px;border:0.5px solid var(--border);
+    border-radius:3px;padding:1px 4px;color:var(--text-2)}}
+  .ss-hot{{font-family:'Geist Mono',monospace;font-size:10px;color:var(--up);
+    border:0.5px solid var(--up);border-radius:3px;padding:1px 5px}}
+  .ss-empty{{font-size:13px;padding:6px 0}}
   .doc-none{{font-size:.82rem;color:var(--text-dim);font-style:italic;margin-top:4px}}
 
   /* v1.9 Pocket Lesson: the topbar toggle uses .layout-toggle base styles
@@ -8729,6 +9293,21 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
   .leg-swatch.basket{{background:var(--accent)}}
   .leg-swatch.spy{{background:var(--text-dim);height:1px;border-top:1px dashed var(--text-dim)}}
   .leg-swatch.nasdaq{{background:#a78bfa;height:0;border-top:2px dotted #a78bfa}}
+  .leg-swatch.ind{{background:linear-gradient(90deg,#5dcaa5,#85b7eb,#e09a85);height:3px;border-radius:2px}}
+  /* :not([hidden]) so the `hidden` attribute (default off / Industries toggle off)
+     actually collapses the chips — a bare `.hero-ind-legend{{display:flex}}` would
+     override [hidden] and always show them, eating legend space. */
+  .hero-ind-legend:not([hidden]){{display:flex;gap:12px;flex-wrap:wrap;align-items:center}}
+  .leg-ind-item{{display:flex;align-items:center;gap:5px;font-family:var(--font-mono);font-size:11px;color:var(--text-2)}}
+  /* v3.4 #3: short-term range control (All / 3M / 1M). */
+  .hero-range{{display:inline-flex;gap:2px;border:0.5px solid var(--border);border-radius:6px;overflow:hidden;margin-left:12px}}
+  .hero-range-btn{{background:none;border:none;color:var(--text-dim);font-family:var(--font-mono);font-size:11px;padding:3px 9px;cursor:pointer}}
+  .hero-range-btn:hover{{color:var(--text-2)}}
+  .hero-range-btn[aria-pressed="true"]{{background:var(--surface-2);color:var(--text)}}
+  .hero-chart-svg-wrap{{transition:opacity .18s ease, transform .18s ease}}
+  .hero-chart-wrap.range-anim .hero-chart-svg-wrap{{opacity:0.35;transform:translateX(10px)}}
+  .hero-chart-wrap.range-short #alpha-sparkline-wrap,
+  .hero-chart-wrap.range-short #dd-sparkline-wrap{{display:none}}
   .leg-toggle{{background:none;border:none;padding:0;margin:0;font:inherit;color:var(--text-2);cursor:pointer}}
   .leg-toggle[aria-pressed="false"]{{opacity:0.45}}
   .leg-swatch.fx{{
@@ -9938,6 +10517,13 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
       <rect x="4" y="4" width="16" height="16" rx="3"/><path d="M12 9v6M9 12h6"/>
     </svg>
   </button>
+  <!-- v3.4 #2 Signal stacking: toggled recurrence-memory panel. State localStorage `signalStackingOn` (default off). -->
+  <button class="layout-toggle icon-btn signal-stacking-btn" id="signal-stacking-btn" type="button" aria-pressed="false"
+          aria-label="Signal stacking" data-tooltip="Signal stacking">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <rect x="5" y="3" width="14" height="18" rx="2"/><path d="M9 3v18"/><path d="M12 8h4M12 12h4M12 16h2"/>
+    </svg>
+  </button>
   <button class="layout-toggle icon-btn desktop-mode-btn" id="desktop-mode-btn" type="button" aria-pressed="false"
           aria-label="Force desktop view" data-tooltip="Desktop view">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -10005,6 +10591,8 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
 
 {shockwave_html}
 
+{signal_stacking_html}
+
 <!-- v1.9 Pocket Lesson card. Sits just below the topbar. Default state is
      collapsed (no `.is-open` class). JS reads localStorage on load and adds
      the class only if the user previously enabled it. Toggle from the topbar
@@ -10050,6 +10638,11 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
       </div>
       <div class="hero-legend">
         {hero_legend_html}
+      </div>
+      <div class="hero-range" role="group" aria-label="Time range">
+        <button type="button" class="hero-range-btn" data-range="all" aria-pressed="true">All</button>
+        <button type="button" class="hero-range-btn" data-range="3m" aria-pressed="false">3M</button>
+        <button type="button" class="hero-range-btn" data-range="1m" aria-pressed="false">1M</button>
       </div>
     </div>
     <div class="hero-chart-svg-wrap">
@@ -10250,6 +10843,7 @@ const AUX_DATA = {aux_json};
 // load; a Next-tip button rotates without reloading.
 const POCKET_LESSONS = {pocket_lessons_json};
 const SHOCKWAVE = {shockwave_json};
+const RM_ANALYST = {rm_analyst_json};
 
 // v2.1 Quiz: 50-question pool, 5 categories x 10 questions. Schema:
 //   {{id, category, format ("cloze"|"direct"), question, options[3], correct, explanation}}
@@ -10284,6 +10878,14 @@ function fmtAxisDate(iso) {{
 
 // ---- Hero chart (basket + SPY)
 let showNasdaq = (function() {{ try {{ return localStorage.getItem('heroNasdaq') === '1'; }} catch (e) {{ return false; }} }})();
+let showIndustries = (function() {{ try {{ return localStorage.getItem('heroIndustries') === '1'; }} catch (e) {{ return false; }} }})();
+let heroRange = 'all';   // v3.4 #3: 'all' | '3m' | '1m' (transient, not persisted)
+function rebaseWindow(vals) {{
+  if (!vals.length) return [];
+  const base = 1 + vals[0] / 100;
+  if (base === 0) return vals.map(() => 0);
+  return vals.map(v => ((1 + v / 100) / base - 1) * 100);
+}}
 function renderHeroChart() {{
   const svg = document.getElementById('hero-chart');
   const wrap = svg.parentElement;
@@ -10294,15 +10896,39 @@ function renderHeroChart() {{
   svg.setAttribute('width', W);
   svg.setAttribute('height', H);
 
-  const b = PORTFOLIO.basket;
-  const s = PORTFOLIO.spy;
-  const fx = PORTFOLIO.fx || {{dates:[], values:[]}};
+  const isAll = heroRange === 'all';
+  let b = PORTFOLIO.basket;
+  let s = PORTFOLIO.spy;
+  let fx = PORTFOLIO.fx || {{dates:[], values:[]}};
   const nzRaw = PORTFOLIO.nasdaq || {{dates:[], values:[]}};
-  const nz = showNasdaq ? nzRaw : {{dates:[], values:[]}};
+  let nz = showNasdaq ? nzRaw : {{dates:[], values:[]}};
+  const indRaw = PORTFOLIO.industries || [];
+  let ind = showIndustries ? indRaw : [];
+  // v3.4 #3: short-term window — rebase basket+SPY to the window start and drop
+  // the since-inception extras (FX/Nasdaq/industries self-skip on empty arrays).
+  if (!isAll) {{
+    const days = heroRange === '1m' ? 30 : 90;
+    const st = PORTFOLIO.short || {{dates:[], basket:[], spy:[]}};
+    let i0 = 0;
+    if (st.dates.length) {{
+      const cut = Date.parse(st.dates[st.dates.length - 1]) - days * 86400000;
+      while (i0 < st.dates.length && Date.parse(st.dates[i0]) < cut) i0++;
+      if (i0 >= st.dates.length) i0 = 0;
+    }}
+    const wd = st.dates.slice(i0);
+    b = {{dates: wd, values: rebaseWindow(st.basket.slice(i0))}};
+    s = {{dates: wd, values: rebaseWindow(st.spy.slice(i0))}};
+    fx = {{dates:[], values:[]}}; nz = {{dates:[], values:[]}}; ind = [];
+  }}
+  // Only OWNED industry lines (real trajectories) drive the y-scale. Non-owned
+  // 12m endpoints are clamped into the plot area instead, so a large or glitchy
+  // outlook return can never flatten the chart.
+  const indVals = [];
+  ind.forEach(e => {{ if (e.series) indVals.push(...e.series.values); }});
   if (!b.values.length) {{ svg.innerHTML = '<text x="50%" y="50%" fill="#6b7185" font-family="Geist Mono" font-size="12" text-anchor="middle">No basket data</text>'; return; }}
 
   // Combined min/max across both series
-  const allVals = [...b.values, ...s.values, ...nz.values, 0];
+  const allVals = [...b.values, ...s.values, ...nz.values, ...indVals, 0];
   const vmin = Math.min(...allVals);
   const vmax = Math.max(...allVals);
   const span = (vmax - vmin) || 1;
@@ -10546,9 +11172,12 @@ function renderHeroChart() {{
     html += `<rect x="${{padL}}" y="${{zeroY.toFixed(1)}}" width="${{innerW.toFixed(1)}}" height="${{(chartBottom - zeroY).toFixed(1)}}" fill="${{lossWashFill}}"/>`;
   }}
   // Vs-SPY area segments (paint *before* the zero line + lines so they stay crisp).
-  html += vsSpySegments.map(seg =>
-    `<polygon points="${{seg.pts.map(p => p[0].toFixed(1) + ',' + p[1].toFixed(1)).join(' ')}}" fill="${{seg.color}}"/>`
-  ).join('');
+  // v3.4 #3: hidden in the short-term view (since-inception decoration).
+  if (isAll) {{
+    html += vsSpySegments.map(seg =>
+      `<polygon points="${{seg.pts.map(p => p[0].toFixed(1) + ',' + p[1].toFixed(1)).join(' ')}}" fill="${{seg.color}}"/>`
+    ).join('');
+  }}
   // Zero line — bumped from 0.18 to 0.34 alpha + 1.2 stroke so it's clearly
   // the "Oct '24 baseline" reference, not just another gridline.
   html += `<line x1="${{padL}}" y1="${{zeroY.toFixed(1)}}" x2="${{padL + innerW}}" y2="${{zeroY.toFixed(1)}}" stroke="rgba(255,255,255,0.34)" stroke-width="1.2" stroke-dasharray="4 3"/>`;
@@ -10568,10 +11197,32 @@ function renderHeroChart() {{
   if (nasdaq.xs.length) {{
     html += `<polyline points="${{nasdaqPL}}" fill="none" stroke="${{nasdaqColor}}" stroke-width="1.4" stroke-dasharray="1 3" stroke-linejoin="round"/>`;
   }}
+  // v3.4 #4: industry overlay — owned trajectory lines + non-owned 12m markers.
+  // Drawn under the basket line so the basket stays dominant. Toggle-gated.
+  if (ind.length) {{
+    ind.forEach(e => {{
+      if (e.series && e.series.values.length) {{
+        const p = buildPoints(e.series);
+        if (p.dates && p.dates.length && p.dates.length <= basket.dates.length) {{
+          const rem = p.dates.map(d => {{ const i = basket.dates.indexOf(d); return i >= 0 ? basket.xs[i] : NaN; }});
+          if (rem.every(v => !Number.isNaN(v))) p.xs = rem;
+        }}
+        const pl = p.xs.map((x, i) => `${{x.toFixed(1)}},${{p.ys[i].toFixed(1)}}`).join(' ');
+        html += `<polyline points="${{pl}}" fill="none" stroke="${{e.color}}" stroke-width="1.4" stroke-linejoin="round" opacity="0.9"/>`;
+      }} else if (e.endpoint != null) {{
+        const rawY = padT + (1 - (e.endpoint - vmin) / span) * innerH;
+        const my = Math.max(padT + 5, Math.min(padT + innerH - 5, rawY));
+        const mx = padL + innerW;
+        html += `<path d="M${{(mx-4).toFixed(1)}},${{my.toFixed(1)}} L${{mx.toFixed(1)}},${{(my-4).toFixed(1)}} L${{(mx+4).toFixed(1)}},${{my.toFixed(1)}} L${{mx.toFixed(1)}},${{(my+4).toFixed(1)}} Z" fill="none" stroke="${{e.color}}" stroke-width="1.4"/>`;
+        const sgn = e.endpoint >= 0 ? '+' : '';
+        html += `<text x="${{(mx-8).toFixed(1)}}" y="${{(my+3).toFixed(1)}}" text-anchor="end" fill="${{e.color}}" font-size="8.5" font-family="Geist Mono, monospace">${{sgn}}${{Math.round(e.endpoint)}}% 12m</text>`;
+      }}
+    }});
+  }}
   // Basket line
   html += `<polyline points="${{basketPL}}" fill="none" stroke="${{basketColor}}" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"/>`;
   // v2.7: last-completed fiscal-year return (top-left, on top of the line).
-  html += fyStatHtml;
+  if (isAll) html += fyStatHtml;   // v3.4 #3: since-inception only
 
   // End labels (basket + SPY) + vs-SPY delta badge
   html += `<text x="${{(padL + innerW + 6).toFixed(1)}}" y="${{(basket.ys[n-1] + 4).toFixed(1)}}" fill="${{basketColor}}" font-size="11" font-family="Geist Mono, monospace" font-weight="500">${{basketEnd >= 0 ? '+' : ''}}${{basketEnd.toFixed(1)}}%</text>`;
@@ -10730,6 +11381,40 @@ window.addEventListener('resize', renderHeroChart);
     renderHeroChart();
   }});
 }})();
+// v3.4 #4: Industry overlay legend toggle (default off, persisted). Shows/hides
+// the owned industry lines + non-owned 12m markers + the name legend group.
+(function() {{
+  const btn = document.querySelector('.hero-legend .leg-toggle[data-series="industries"]');
+  if (!btn) return;
+  const grp = document.querySelector('.hero-legend .hero-ind-legend');
+  btn.setAttribute('aria-pressed', showIndustries ? 'true' : 'false');
+  if (grp) grp.hidden = !showIndustries;
+  btn.addEventListener('click', () => {{
+    showIndustries = !showIndustries;
+    try {{ localStorage.setItem('heroIndustries', showIndustries ? '1' : '0'); }} catch (e) {{}}
+    btn.setAttribute('aria-pressed', showIndustries ? 'true' : 'false');
+    if (grp) grp.hidden = !showIndustries;
+    renderHeroChart();
+  }});
+}})();
+
+// v3.4 #3: short-term range control (All / 3M / 1M). Transient (not persisted).
+(function() {{
+  const wrap = document.querySelector('.hero-chart-wrap');
+  const btns = document.querySelectorAll('.hero-range .hero-range-btn');
+  if (!btns.length) return;
+  btns.forEach(btn => btn.addEventListener('click', () => {{
+    const r = btn.dataset.range;
+    if (r === heroRange) return;
+    heroRange = r;
+    btns.forEach(b2 => b2.setAttribute('aria-pressed', b2.dataset.range === r ? 'true' : 'false'));
+    if (wrap) {{
+      wrap.classList.toggle('range-short', r !== 'all');
+      wrap.classList.add('range-anim');
+      setTimeout(() => {{ renderHeroChart(); wrap.classList.remove('range-anim'); }}, 120);
+    }} else {{ renderHeroChart(); }}
+  }}));
+}})();
 
 // ---- Stagger animations
 document.querySelectorAll('#ret-table tbody tr').forEach((row, i) => {{
@@ -10741,27 +11426,35 @@ document.querySelectorAll('.card').forEach((c, i) => {{
 
 // ---- Sort
 let sortState = {{col: -1, asc: false}};
+// Shared sort so both header clicks and per-mode defaults can set direction
+// explicitly (v3.4 #6: losers/bottom10 need a forced ascending "worst first").
+function sortTable(col, asc) {{
+  const th = document.querySelector(`#ret-table th[data-col="${{col}}"]`);
+  const numeric = !!(th && th.dataset.num === '1');
+  const tbody = document.querySelector('#ret-table tbody');
+  if (!tbody) return;
+  const rows = [...tbody.querySelectorAll('tr')];
+  rows.sort((a, b) => {{
+    const ac = a.cells[col], bc = b.cells[col];
+    const av = numeric ? parseFloat(ac.dataset.v ?? ac.textContent.replace(/[^-\\d.]/g,'')) : ac.textContent;
+    const bv = numeric ? parseFloat(bc.dataset.v ?? bc.textContent.replace(/[^-\\d.]/g,'')) : bc.textContent;
+    return (av < bv ? -1 : av > bv ? 1 : 0) * (asc ? 1 : -1);
+  }});
+  rows.forEach(r => tbody.appendChild(r));
+  sortState.col = col;
+  sortState.asc = asc;
+  document.querySelectorAll('#ret-table th').forEach(x => x.classList.remove('sort-asc', 'sort-desc'));
+  if (th) th.classList.add(asc ? 'sort-asc' : 'sort-desc');
+}}
 document.querySelectorAll('#ret-table th[data-col]').forEach(th => {{
   th.addEventListener('click', (e) => {{
     e.stopPropagation();
     const col = +th.dataset.col;
-    const numeric = th.dataset.num === '1';
-    sortState.asc = (sortState.col === col) ? !sortState.asc : false;
-    sortState.col = col;
-    const tbody = document.querySelector('#ret-table tbody');
-    const rows = [...tbody.querySelectorAll('tr')];
-    rows.sort((a, b) => {{
-      const ac = a.cells[col], bc = b.cells[col];
-      const av = numeric ? parseFloat(ac.dataset.v ?? ac.textContent.replace(/[^-\\d.]/g,'')) : ac.textContent;
-      const bv = numeric ? parseFloat(bc.dataset.v ?? bc.textContent.replace(/[^-\\d.]/g,'')) : bc.textContent;
-      return (av < bv ? -1 : av > bv ? 1 : 0) * (sortState.asc ? 1 : -1);
-    }});
-    rows.forEach(r => tbody.appendChild(r));
-    document.querySelectorAll('#ret-table th').forEach(x => x.classList.remove('sort-asc', 'sort-desc'));
-    th.classList.add(sortState.asc ? 'sort-asc' : 'sort-desc');
+    const asc = (sortState.col === col) ? !sortState.asc : false;
+    sortTable(col, asc);
   }});
 }});
-document.querySelector('#ret-table th[data-col="9"]')?.click();
+sortTable(9, false);
 
 // ---- Filtering
 const TOTALS = Object.fromEntries(Object.entries(DATA).map(([t, d]) => [t, d.total]));
@@ -10806,18 +11499,18 @@ document.querySelectorAll('.panel').forEach(panel => {{
       group.querySelectorAll('.chip').forEach(c => c.classList.remove('active'));
       chip.classList.add('active');
       applyFilter(panel);
-      // v2.1 #3: Apply default sort for the new status-filter mode. Closed
-      // positions default to Signal (col 4) so like-signal rows group together
-      // for fast triage ("which closed names exited on Strong uptrend?"); every
-      // other mode falls back to Since-baseline (col 9), the original default.
+      // v2.1 #3 / v3.4 #6: Apply default sort for the new status-filter mode.
+      // Losers / Bottom 10 read as a "worst first" list -> ascending on
+      // Since-baseline (biggest loss on top). Closed positions default to
+      // Signal (col 4) so like-signal rows group together. Every other mode
+      // falls back to Since-baseline descending (best first). Direction is set
+      // explicitly rather than toggled, so switching modes is deterministic.
       // Only fires for status chips -- sector-filter chips keep current sort.
       if (!group.classList.contains('chips-sectors')) {{
         const newMode = chip.dataset.filter;
-        const defaultCol = (newMode === 'closed') ? 4 : 9;
-        if (sortState.col !== defaultCol) {{
-          const targetTh = document.querySelector(`#ret-table th[data-col="${{defaultCol}}"]`);
-          if (targetTh) targetTh.click();
-        }}
+        if (newMode === 'losers' || newMode === 'bottom10') sortTable(9, true);
+        else if (newMode === 'closed') sortTable(4, false);
+        else sortTable(9, false);
       }}
       // v1.8.1 B5: reset scroll to top when filter changes -- otherwise the
       // user is mid-list in "Open" and switching to "Closed" leaves them at
@@ -11390,7 +12083,40 @@ document.querySelectorAll('.ticker-clickable[data-ticker]').forEach(el => {{
   el.addEventListener('click', (e) => {{
     e.preventDefault();
     e.stopPropagation();
-    openModal(el.dataset.ticker);
+    const t = el.dataset.ticker;
+    // v3.4 #5: non-owned names (no DATA payload) but with an analyst snapshot
+    // open a lightweight card instead of the (chartless) full modal no-op.
+    if (!DATA[t] && typeof RM_ANALYST !== 'undefined' && RM_ANALYST[t]) {{ openAnalystInfo(t); return; }}
+    openModal(t);
+  }});
+}});
+
+// v3.4 #5: render the lightweight analyst card in the info-modal shell.
+function openAnalystInfo(t) {{
+  const d = (typeof RM_ANALYST !== 'undefined') ? RM_ANALYST[t] : null;
+  if (!d) return;
+  openInfoModal(d.title, d.sub, d.html);
+}}
+
+// v3.4 #1: Doctor "see <module>" links. A hidden module is display:none, so
+// reveal it first (re-using the module-visibility change handler to persist),
+// then smooth-scroll and briefly flash it.
+document.querySelectorAll('.doc-link[data-module-target]').forEach(el => {{
+  el.addEventListener('click', (e) => {{
+    e.preventDefault();
+    const id = el.dataset.moduleTarget;
+    const mod = document.querySelector('#module-stack > .module[data-module="' + id + '"]');
+    if (!mod) return;
+    if (mod.dataset.hidden === 'true') {{
+      const cb = mod.querySelector('.module-vis-cb');
+      if (cb) {{ cb.checked = true; cb.dispatchEvent(new Event('change', {{ bubbles: true }})); }}
+      else {{ mod.dataset.hidden = 'false'; }}
+    }}
+    mod.scrollIntoView({{ behavior: 'smooth', block: 'start' }});
+    mod.classList.remove('module-flash');
+    void mod.offsetWidth;               // restart the flash animation if re-clicked
+    mod.classList.add('module-flash');
+    setTimeout(() => mod.classList.remove('module-flash'), 1500);
   }});
 }});
 
@@ -11882,6 +12608,27 @@ document.getElementById('hero-chart').addEventListener('click', (e) => {{
     usdS.addEventListener('input',function(){{usd=+usdS.value; active=null; render();}});
     render();
   }}
+}})();
+
+// v3.4 #2 Signal stacking: toggled recurrence panel over the baked history.
+(function setupSignalStacking() {{
+  const STORAGE_KEY = 'signalStackingOn';
+  const btn = document.getElementById('signal-stacking-btn');
+  const wrap = document.getElementById('signal-stacking-wrap');
+  if (!btn || !wrap) return;
+  function setEnabled(on, opts) {{
+    opts = opts || {{}};
+    btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+    wrap.classList.toggle('is-open', on);
+    wrap.setAttribute('aria-hidden', on ? 'false' : 'true');
+    if (!opts.silent) {{
+      try {{ localStorage.setItem(STORAGE_KEY, on ? '1' : '0'); }} catch (e) {{}}
+    }}
+  }}
+  let initial = false;
+  try {{ initial = localStorage.getItem(STORAGE_KEY) === '1'; }} catch (e) {{}}
+  setEnabled(initial, {{silent: true}});
+  btn.addEventListener('click', () => setEnabled(btn.getAttribute('aria-pressed') !== 'true'));
 }})();
 
 // v2.1: palette toggle collapsed from 4 buttons into 1 cycling button. Each
@@ -13110,6 +13857,30 @@ def main(demo: bool = False, watchlist_only: bool = False,
     # series + native prices, all in scope here), threaded into render_html.
     stress_factors = compute_stress_factors(prices_native, bench, nasdaq_b, meta, returns)
 
+    # v3.4 #2: record today's non-owned signal flags (real builds only) and load
+    # the rolling history for the Signal-stacking panel. Demo reads only.
+    _ss_open = set(returns[returns.status == "open"].index) \
+        if not returns.empty else set()
+    if not demo:
+        _bb_ideas = {o.get("ticker") for o in (bb_universe_obs or []) if o.get("ticker")}
+        _vs_pass = {r["ticker"] for r in (auto_value_rows or [])
+                    if r.get("passed") and r.get("ticker")}
+        _flagged = {
+            "BB": [t for t in _bb_ideas if t not in _ss_open],
+            "VS": [t for t in _vs_pass if t not in _ss_open],
+            "RE": [t for t in (analyst_candidates or []) if t not in _ss_open],
+            "RM": [m["ticker"] for m in (rating_moves or [])
+                   if _is_rm_upgrade(m) and m.get("ticker") not in _ss_open],
+        }
+        signal_history = record_signal_history(
+            _flagged, pd.Timestamp(datetime.now(timezone.utc).date()))
+        print(f"Signal stacking: recorded "
+              f"{sum(len(v) for v in _flagged.values())} flags across 4 sources")
+    else:
+        signal_history = (pd.read_parquet(SIGNAL_HISTORY)
+                          if SIGNAL_HISTORY.exists()
+                          else pd.DataFrame(columns=["date", "ticker", "source"]))
+
     html = render_html(returns, prices, meta, basket, bench_series, contrib, transactions,
                        signals, prices_native, returns_native, untracked=untracked,
                        watchlist=watchlist, news_items=news_items, analyst=analyst,
@@ -13131,7 +13902,8 @@ def main(demo: bool = False, watchlist_only: bool = False,
                        nasdaq_series=nasdaq_series,
                        value_rows=auto_value_rows,
                        auto_tickers=auto_tickers,
-                       stress_factors=stress_factors)
+                       stress_factors=stress_factors,
+                       signal_history=signal_history)
 
     out_path = DEMO_OUT_HTML if demo else OUT_HTML
     out_path.parent.mkdir(parents=True, exist_ok=True)
