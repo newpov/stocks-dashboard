@@ -272,6 +272,13 @@ A composed visualisation with several layers sharing one x-axis:
   benchmark**: the Δ badge, vs-SPY shading and alpha sparkline are unchanged —
   QQQ is fetched dividend-adjusted + FX-clean and rebased exactly like SPY, so the
   comparison is fair, and it is a display-only line.
+- **Industry lines (optional, v3.4):** tap **Industries** in the legend to overlay
+  the top **3 owned industries** as real equal-weight trajectory lines (built like
+  the basket, from each industry's held tickers) plus the top **2 non-owned
+  industries** as hollow-diamond **"12m" markers** from the Industry outlook. Owned
+  lines are since-inception, non-owned markers are a 12-month figure (clearly
+  tagged — different horizons on purpose). Off by default; toggling hides all five
+  and frees the legend.
 - **Vs-SPY area shading:** the area between the basket and SPY lines, painted
   green when basket is outperforming and red when underperforming. Crossover
   points split the shading at the exact moment the lead changes hands.
@@ -300,6 +307,15 @@ Beneath the main chart sit two inline sparklines:
 
 On narrow (mobile) screens the x-axis uses compact `Oct '24`-style labels and drops
 from 5 ticks to 4 so the dates never overlap.
+
+**Short-term view (v3.4).** A small **`All · 3M · 1M`** control switches the chart
+between the full since-inception view and a rebased short-term window. In 3M / 1M
+mode the basket and SPY are **rebased to the window start** (both begin at 0%, a
+proper growth-factor rebase — not naive subtraction), so recent performance fills
+the scale instead of being a wiggle on the long-term trend. The since-inception
+decorations (vs-SPY shading, sparklines, FX strip, fiscal-year stat) step aside in
+short-term mode and the Δ badge becomes the window's basket-vs-SPY gap. The choice
+is transient (resets to All on reload).
 
 ### Pre-hero context: unusual volume chips
 
@@ -523,6 +539,30 @@ scenarios are **narrative labels mapped onto the three factors** (e.g. "crypto
 mainstream" ≈ tech up + USD soft), not literal instrument betas; and the
 likelihood/recovery figures are historical rules of thumb. Treat it as a way to
 *explore* your basket's shape under stress, not to predict outcomes.
+
+### Signal stacking — recurrence memory (v3.4)
+
+Non-owned discovery names churn build-to-build — a stock the engines flag today
+may be gone tomorrow when things recompute. This toggled panel (notepad icon,
+next to the Doctor, default off) keeps a **monthly reference** of names that keep
+coming back. Four engines feed it — **Big Brain ideas, Value screen, Re-entry
+ideas, Rating-moves upgrades** — and each build appends that day's non-owned flags
+to a small committed history file (`data/signal_history.parquet`: `{date, ticker,
+source}`, tickers + dates only, pruned to 90 days — the same public-safe class as
+the analyst history).
+
+At render time it aggregates the current calendar month and ranks names by
+**distinct days seen** and **engine breadth**, with a **"hot this week"** flag when
+several of those days land in the last seven. The idea: a name flagged repeatedly,
+by more than one engine, is a stronger standing case than a one-off. Each row shows
+`ticker · name · price · Seen Nd · engine chips`, and clicking a ticker opens its
+full modal (if you've held it) or a lightweight analyst card (universe names).
+Deterministic, build-time, zero extra fetch.
+
+Those **lightweight analyst cards (v3.4)** also fix a dead end elsewhere: non-owned
+names in **Rating moves** (e.g. `FANG` = Diamondback Energy) used to click into
+nothing. They now open a compact card — price, mean target + implied upside, the
+target range, rating + coverage depth, and the move that flagged them.
 
 ### Decision-flow ordering
 
