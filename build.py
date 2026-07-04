@@ -989,6 +989,19 @@ NEWS_MAX_ITEMS = 12
 #   NEWS_WORKER_URL = "https://stocks-dashboard-news.example.workers.dev/news"
 NEWS_WORKER_URL = "https://stocks-dashboard-news.newpov.workers.dev/news"
 
+# --- v2.9.7-lite (v3.5): static assets ---------------------------------------
+# The page's CSS and (bulk of the) JS live as real files in assets/ so an
+# editor/linter can check them; they are read back and INLINED at build time,
+# so demo.html stays self-contained and docs/index.html structure is unchanged.
+_ASSET_DIR = Path(__file__).parent / "assets"
+
+
+def _read_asset(name: str) -> str:
+    """Read a static asset for build-time inlining. encoding= is mandatory:
+    Path.read_text() defaults to the locale codec on Windows (cp1252), which
+    cannot decode the arrow/Delta glyphs in the UI strings (v3.0 lesson)."""
+    return (_ASSET_DIR / name).read_text(encoding="utf-8")
+
 
 # --------------------------------------------------------------------------
 # Data layer
