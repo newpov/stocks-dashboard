@@ -14,6 +14,17 @@ than a barely-working prototype.
 
 ---
 
+## v3.4.1 — Signal-stacking breadth + topbar polish · 4 July 2026
+
+A small follow-up to v3.4 (all author-flagged): one relevance fix and two topbar fixes.
+
+- **Signal stacking now scores engine breadth, not just recurrence.** The panel felt unhelpful (often empty for stretches) because it only counted how many distinct *days* a name recurred — so a name flagged by three different engines on a single day showed nothing. It now qualifies a name on **either** 2+ engines agreeing (even same-day) **or** 2+ distinct days, and ranks by **engine breadth first, then persistence** (`SIGNAL_STACK_MIN_ENGINES = 2`). The empty-state and subtitle copy now explain the "multiple engines or repeat days" rule. `compute_signal_stacking` reworked; `tests/test_signal_stacking.py` extended.
+- **Doctor / Shockwave "as of" no longer hidden behind the topbar.** Those cards are full-width, so their right-aligned `as of …` (via `margin-left:auto`) sat directly beneath the absolute top-right topbar buttons. Dropped the auto-margin so it left-aligns and clears them.
+- **Signal-stacking button now highlights when its panel is open.** It was missing the `[aria-pressed="true"]` accent rule the Doctor/Shockwave buttons already carry; added it so the pressed state reads accent + ink like the others.
+- The version field now surfaces the patch segment (`_dashboard_version` captures `vX.Y.Z`), so the header reads **v3.4.1**. **418 tests.**
+
+---
+
 ## v3.4 — Signal memory, industry overlay & short-term view · 3 July 2026
 
 A fixes-and-relevance release (all author-flagged): three new ways to read the

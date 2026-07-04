@@ -11,6 +11,23 @@ def _page_src():
     return inspect.getsource(build.render_html)
 
 
+# --- v3.4.1: topbar/panel polish -------------------------------------------
+
+def test_signal_stacking_button_has_active_style():
+    # The pressed/active accent rule must exist (it was missing on launch, so the
+    # button never highlighted when the panel was open).
+    src = _page_src()
+    assert '.signal-stacking-btn[aria-pressed="true"]' in src
+
+
+def test_doctor_shockwave_asof_not_right_aligned():
+    # The full-width Doctor/Shockwave as-of must NOT be margin-left:auto, or the
+    # absolute top-right topbar covers it.
+    src = _page_src()
+    assert ".doctor-asof{{margin-left:auto" not in src
+    assert ".sw-asof{{margin-left:auto" not in src
+
+
 # --- #6: Losers / Bottom 10 sorted most-negative first -----------------------
 
 def test_holdings_sort_uses_shared_helper():

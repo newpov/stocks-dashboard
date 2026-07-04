@@ -23,5 +23,11 @@ def test_dashboard_version_fallback_when_missing_or_unparseable(tmp_path):
 
 
 def test_committed_changelog_top_is_v3():
-    # The real CHANGELOG should now lead with the v3.4 entry.
-    assert build._dashboard_version() == "3.4"
+    # The real CHANGELOG should now lead with the v3.4.1 entry.
+    assert build._dashboard_version() == "3.4.1"
+
+
+def test_dashboard_version_captures_patch_segment(tmp_path):
+    cl = tmp_path / "CHANGELOG.md"
+    cl.write_text("## v3.4.1 — patch\n## v3.4 — minor\n", encoding="utf-8")
+    assert build._dashboard_version(cl) == "3.4.1"
