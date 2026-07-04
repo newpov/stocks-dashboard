@@ -8732,6 +8732,8 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     else:
         build_health_html = ""
 
+    base_symbol_js = _json_for_script(BASE_SYMBOL)
+    base_ccy_js = _json_for_script(BASE_CCY)
     css_block = _read_asset("dashboard.css")
 
     return f"""<!DOCTYPE html>
@@ -9104,9 +9106,23 @@ const RM_ANALYST = {rm_analyst_json};
 const QUIZ_POOL = {quiz_pool_json};
 const LAST_LOOK = {last_look_json};
 
+// v3.5 build-config consts (generated; the static assets/dashboard.js
+// references these by name — keep names in sync with the asset file).
+const BASE_SYMBOL = {base_symbol_js};
+const BASE_CCY = {base_ccy_js};
+const NEWS_WORKER_URL = {news_worker_url_js};
+const MODAL_VB_W = {MODAL_VB_W};
+const MODAL_VB_H = {MODAL_VB_H};
+const MODAL_VB_PAD_L = {MODAL_VB_PAD_L};
+const MODAL_VB_PAD_T = {MODAL_VB_PAD_T};
+const MODAL_VB_PAD_R = {MODAL_VB_PAD_R};
+const MODAL_VB_PAD_B = {MODAL_VB_PAD_B};
+const SHOCKWAVE_LABEL_TOP = {SHOCKWAVE_LABEL_TOP};
+const SHOCKWAVE_PULSE_PCT = {SHOCKWAVE_PULSE_PCT};
+
 // ---- Helpers
 function fmtMoney(v, sym) {{
-  sym = sym || '{BASE_SYMBOL}';
+  sym = sym || BASE_SYMBOL;
   return sym + (v >= 1000 ? v.toLocaleString('en-GB', {{maximumFractionDigits: 2}}) : v.toFixed(2));
 }}
 function fmtPct(v, sign) {{
@@ -9826,7 +9842,7 @@ async function openModal(ticker) {{
     if (loadingEl) loadingEl.hidden = true;
   }}
   const tickerEl = modal.querySelector('.modal-ticker');
-  const ccyBadge = (d.currency && d.currency !== '{BASE_CCY}') ?
+  const ccyBadge = (d.currency && d.currency !== BASE_CCY) ?
     ` <span class="badge-ccy">${{d.currency}}</span>` : '';
   let weightBadge;
   if (d.status === 'open') {{
@@ -9866,7 +9882,7 @@ async function openModal(ticker) {{
   }}
   // FX attribution line — only for non-base-currency stocks
   const fxEl = modal.querySelector('#modal-fx');
-  if (d.currency && d.currency !== '{BASE_CCY}' && d.native_total !== null && d.fx_change !== null) {{
+  if (d.currency && d.currency !== BASE_CCY && d.native_total !== null && d.fx_change !== null) {{
     const stockB = fxEl.querySelector('#fx-stock');
     const fxB = fxEl.querySelector('#fx-fx');
     const totalB = fxEl.querySelector('#fx-total');
@@ -9874,7 +9890,7 @@ async function openModal(ticker) {{
     stockB.className = d.native_total >= 0 ? 'pos' : 'neg';
     fxB.textContent = fmtPct(d.fx_change, true);
     fxB.className = d.fx_change >= 0 ? 'pos' : 'neg';
-    totalB.textContent = fmtPct(d.total, true) + ' ({BASE_CCY})';
+    totalB.textContent = fmtPct(d.total, true) + ' (' + BASE_CCY + ')';
     totalB.className = d.total >= 0 ? 'pos' : 'neg';
     fxEl.removeAttribute('hidden');
   }} else {{
@@ -9904,7 +9920,7 @@ async function openModal(ticker) {{
   const isNum = (v) => v !== null && v !== undefined && !Number.isNaN(v);
   const sma = isNum(q.sma200_dist_pct)
     ? ((q.sma200_dist_pct >= 0 ? '+' : '') + q.sma200_dist_pct.toFixed(1) + '%') : '—';
-  const atr = isNum(q.atr14_gbp) ? ('{BASE_SYMBOL}' + q.atr14_gbp.toFixed(2)) : '—';
+  const atr = isNum(q.atr14_gbp) ? (BASE_SYMBOL + q.atr14_gbp.toFixed(2)) : '—';
   const atrMeta = isNum(q.atr14_pct) ? (q.atr14_pct.toFixed(1) + '% of price') : '';
   const rsi = isNum(q.rsi14) ? q.rsi14.toFixed(0) : '—';
   const rsiMeta = isNum(q.rsi14)
@@ -9933,7 +9949,7 @@ async function openModal(ticker) {{
              `Long-term trend ${{v >= 0 ? 'up' : 'down'}}; persistent moves below the SMA200 often signal sustained weakness.`;
     }}
     if (k === 'atr14_gbp') {{
-      return `Average True Range over 14 days = {BASE_SYMBOL}${{v.toFixed(2)}}. ` +
+      return `Average True Range over 14 days = ${{BASE_SYMBOL}}${{v.toFixed(2)}}. ` +
              `Typical daily price swing in absolute terms. A common stop-loss buffer is 2× ATR below entry for long positions.`;
     }}
     if (k === 'rsi14') {{
@@ -10030,12 +10046,8 @@ function closeModal() {{
 // geometry into `d.chart`, we just draw it. preserveAspectRatio="none" makes
 // the browser scale the viewBox to the modal's actual pixel size, so no
 // per-open recalc + no resize handler are needed.
-const MODAL_VB_W = {MODAL_VB_W};
-const MODAL_VB_H = {MODAL_VB_H};
-const MODAL_VB_PAD_L = {MODAL_VB_PAD_L};
-const MODAL_VB_PAD_T = {MODAL_VB_PAD_T};
-const MODAL_VB_INNER_W = MODAL_VB_W - MODAL_VB_PAD_L - {MODAL_VB_PAD_R};
-const MODAL_VB_INNER_H = MODAL_VB_H - MODAL_VB_PAD_T - {MODAL_VB_PAD_B};
+const MODAL_VB_INNER_W = MODAL_VB_W - MODAL_VB_PAD_L - MODAL_VB_PAD_R;
+const MODAL_VB_INNER_H = MODAL_VB_H - MODAL_VB_PAD_T - MODAL_VB_PAD_B;
 
 // T1: derive per-point viewBox coords from `n` + index. Mirrors _modal_polyline_d.
 function _modalX(i, n) {{
@@ -10807,7 +10819,7 @@ document.getElementById('hero-chart').addEventListener('click', (e) => {{
       else act='Upside scenario: '+best.t+' benefits most ('+fmt(best.m)+'). Defensive names lag.';
       action.innerHTML=act;
       var labeled={{}};
-      d.slice().sort(function(a,b){{return b.contrib-a.contrib;}}).slice(0,{SHOCKWAVE_LABEL_TOP}).forEach(function(x){{labeled[x.t]=1;}});
+      d.slice().sort(function(a,b){{return b.contrib-a.contrib;}}).slice(0,SHOCKWAVE_LABEL_TOP).forEach(function(x){{labeled[x.t]=1;}});
       d.forEach(function(x){{ if(x.bm>1.2 && x.proj<0 && x.m<-30) labeled[x.t]=1; }});
       var placed=[];
       function labelY(cx,cy,r){{
@@ -10829,7 +10841,7 @@ document.getElementById('hero-chart').addEventListener('click', (e) => {{
         +'<text x="58" y="302" text-anchor="end" font-size="10.5" fill="var(--text-dim)">-100%</text>'
         +d.map(function(x){{
           var cx=X(x.bm), cy=Y(x.proj), r=rad(x.f), c=col(x.m), lab=labeled[x.t], op=x.lc?0.3:(lab?1:0.5),
-              pulse=(x.m<{SHOCKWAVE_PULSE_PCT} && x.bm>1.2)?' pz':'';
+              pulse=(x.m<SHOCKWAVE_PULSE_PCT && x.bm>1.2)?' pz':'';
           var tx='';
           if(lab){{ var ly=labelY(cx,cy,r); tx='<text x="'+cx.toFixed(1)+'" y="'+ly.toFixed(1)+'" text-anchor="middle" font-size="10" fill="var(--text-dim)">'+x.t+'</text>'; }}
           return '<g class="dot" style="transform:translate('+cx.toFixed(1)+'px,'+cy.toFixed(1)+'px)"><circle class="'+pulse.trim()+'" r="'+r.toFixed(1)+'" fill="'+c+'" opacity="'+op+'"><title>'+x.t+': '+fmt(x.m)+(x.lc?' (low fit)':'')+'</title></circle></g>'+tx;
@@ -11533,7 +11545,7 @@ document.getElementById('hero-chart').addEventListener('click', (e) => {{
 // If NEWS_WORKER_URL is set, fetch fresh items on page load and swap them in.
 // On any failure (Worker down, network blip, CORS issue), the static fallback
 // stays untouched — silent graceful degradation.
-const NEWS_WORKER_URL = {news_worker_url_js};
+// (NEWS_WORKER_URL is declared in the v3.5 generated-const prelude above.)
 
 async function refreshNewsFromWorker() {{
   if (!NEWS_WORKER_URL) return;
