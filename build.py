@@ -51,7 +51,7 @@ def _dashboard_version(path=None) -> str:
         text = path.read_text(encoding="utf-8")
     except Exception:
         return ""
-    m = re.search(r"^##\s*v(\d+\.\d+)", text, re.M)
+    m = re.search(r"^##\s*v(\d+\.\d+(?:\.\d+)?)", text, re.M)
     return m.group(1) if m else ""
 
 # v2.4 weighting model. "equal" = each position is one unit (privacy-driven,
@@ -6142,7 +6142,8 @@ def _rm_rec_row(m: dict) -> str:
 
 
 # === v3.4 #2: Signal stacking (non-owned recurrence memory) ==================
-SIGNAL_STACK_MIN_DAYS = 2      # drop one-off appearances
+SIGNAL_STACK_MIN_DAYS = 2      # persistence: distinct days to qualify on recurrence
+SIGNAL_STACK_MIN_ENGINES = 2   # agreement: distinct engines to qualify on breadth (day-one useful)
 SIGNAL_STACK_CAP = 8           # rows shown
 SIGNAL_STACK_HOT_WINDOW = 7    # "hot this week" lookback (days)
 SIGNAL_STACK_HOT_MIN = 3       # distinct days in the window to flag hot
@@ -6205,12 +6206,16 @@ def _is_rm_upgrade(m: dict) -> bool:
 
 def compute_signal_stacking(history, as_of, price_lookup=None, name_lookup=None,
                             *, owned=None, min_days=SIGNAL_STACK_MIN_DAYS,
+                            min_engines=SIGNAL_STACK_MIN_ENGINES,
                             cap=SIGNAL_STACK_CAP, hot_window=SIGNAL_STACK_HOT_WINDOW,
                             hot_min=SIGNAL_STACK_HOT_MIN):
-    """Aggregate the rolling history into ranked 'recurring signal' rows for the
-    current calendar month of ``as_of``. ``price_lookup`` / ``name_lookup`` are
-    dicts {ticker: (price, symbol)} / {ticker: name}. Pure; never raises.
-    Returns a list of {ticker,name,price,ccy_symbol,days,engines,hot}."""
+    """Aggregate the rolling history into ranked 'signals stacking' rows for the
+    current calendar month of ``as_of``. A name qualifies when signals STACK —
+    either ``>= min_engines`` distinct engines flag it (agreement, available from
+    day one) OR it recurs on ``>= min_days`` distinct days (persistence, builds
+    over time). Ranked by engine breadth first, then days. ``price_lookup`` /
+    ``name_lookup`` are dicts {ticker: (price, symbol)} / {ticker: name}. Pure;
+    never raises. Returns a list of {ticker,name,price,ccy_symbol,days,engines,hot}."""
     if history is None or getattr(history, "empty", True):
         return []
     try:
@@ -6230,9 +6235,11 @@ def compute_signal_stacking(history, as_of, price_lookup=None, name_lookup=None,
             if tkr in owned_set:
                 continue
             days = int(g["date"].nunique())
-            if days < min_days:
-                continue
             engines = sorted(set(g["source"].astype(str).tolist()))
+            # Signals stack via AGREEMENT (>= min_engines distinct engines, day-one
+            # useful) OR PERSISTENCE (>= min_days distinct days, accrues over time).
+            if len(engines) < min_engines and days < min_days:
+                continue
             hot_days = int(g[g["date"] >= hot_cutoff]["date"].nunique())
             price, sym = None, "$"
             pv = price_lookup.get(tkr)
@@ -6245,7 +6252,7 @@ def compute_signal_stacking(history, as_of, price_lookup=None, name_lookup=None,
                 "price": price, "ccy_symbol": sym, "days": days,
                 "engines": engines, "hot": hot_days >= hot_min,
             })
-        rows.sort(key=lambda r: (-r["days"], -len(r["engines"]), r["ticker"]))
+        rows.sort(key=lambda r: (-len(r["engines"]), -r["days"], r["ticker"]))
         return rows[:cap]
     except Exception:
         return []
@@ -6256,8 +6263,9 @@ def render_signal_stacking(rows, as_of) -> str:
     non-owned names. All dynamic text is _esc-escaped."""
     as_of_e = _esc(str(as_of or ""))
     if not rows:
-        body = ('<p class="ss-empty muted">Building signal history &mdash; recurring '
-                'names appear as daily snapshots accumulate.</p>')
+        body = ('<p class="ss-empty muted">No stacked signals yet &mdash; names appear '
+                'when 2+ engines flag the same non-owned stock, or one flags it on 2+ '
+                'days this month.</p>')
     else:
         items = []
         for r in rows:
@@ -6285,7 +6293,7 @@ def render_signal_stacking(rows, as_of) -> str:
   <div class="signal-stacking-card">
     <div class="ss-head">
       <span class="ss-eyebrow">Signal stacking</span>
-      <span class="ss-sub muted">non-owned names flagged repeatedly this month</span>
+      <span class="ss-sub muted">non-owned names where signals stack up &mdash; multiple engines or repeat days</span>
       <span class="ss-asof">as of {as_of_e}</span>
     </div>
     {body}
@@ -8896,7 +8904,9 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
   .shockwave-card{{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:16px 18px}}
   .sw-head{{display:flex;align-items:center;gap:10px}}
   .sw-eyebrow{{font-size:.72rem;letter-spacing:.08em;text-transform:uppercase;color:var(--text-dim)}}
-  .sw-asof{{margin-left:auto;font-size:.72rem;color:var(--text-dim)}}
+  /* v3.4.1: NOT margin-left:auto — the absolute topbar (top-right) would hide a
+     right-aligned as-of on these full-width panels. Sits inline after the eyebrow. */
+  .sw-asof{{font-size:.72rem;color:var(--text-dim)}}
   .sw-chips{{display:flex;flex-wrap:wrap;gap:7px;margin:12px 0}}
   .sw-chip{{font-size:12px;padding:5px 9px;display:flex;align-items:center;gap:6px;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text);cursor:pointer}}
   .sw-chip:hover{{border-color:var(--text-dim)}}
@@ -8931,6 +8941,7 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
 
   /* v3.2 Doctor panel -- mirrors the pocket-lesson slide-open pattern. */
   .doctor-btn[aria-pressed="true"]{{background:var(--accent);color:var(--ink);border-color:var(--accent)}}
+  .signal-stacking-btn[aria-pressed="true"]{{background:var(--accent);color:var(--ink);border-color:var(--accent)}}
   .doctor-wrap{{max-height:0;overflow:hidden;opacity:0;margin:0;
     transition:max-height .3s ease,opacity .3s ease,margin .3s ease}}
   .doctor-wrap.is-open{{max-height:1200px;opacity:1;margin:10px 0 4px}}
@@ -8944,7 +8955,8 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
   .doctor-state.doc-ok{{background:rgba(52,211,153,.15);color:#34d399}}
   .doctor-state.doc-warn{{background:rgba(251,191,36,.15);color:#fbbf24}}
   .doctor-state.doc-bad{{background:rgba(248,113,113,.15);color:#f87171}}
-  .doctor-asof{{margin-left:auto;font-size:.72rem;color:var(--text-dim)}}
+  /* v3.4.1: inline (not right-aligned) so the absolute topbar doesn't cover it. */
+  .doctor-asof{{font-size:.72rem;color:var(--text-dim)}}
   .doctor-chips{{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0 0}}
   .doc-chip{{font-size:.72rem;padding:2px 8px;border-radius:999px;
     border:1px solid var(--border);color:var(--text-dim)}}

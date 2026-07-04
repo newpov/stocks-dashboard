@@ -84,12 +84,29 @@ def test_compute_hot_flag_boundary():
     assert out2[0]["hot"] is False
 
 
-def test_compute_ranks_by_days_then_engines():
-    h = _hist([("2026-07-01", "AAA", "BB"), ("2026-07-02", "AAA", "BB"),
-               ("2026-07-01", "BBB", "BB"), ("2026-07-02", "BBB", "VS"),
-               ("2026-07-03", "BBB", "RE")])
-    out = build.compute_signal_stacking(h, "2026-07-03", min_days=2)
-    assert [r["ticker"] for r in out] == ["BBB", "AAA"]  # BBB 3d > AAA 2d
+def test_compute_ranks_by_engines_then_days():
+    # CCC: 3 engines on a single day. DDD: 1 engine across 3 days.
+    # Breadth (agreement) outranks persistence.
+    h = _hist([("2026-07-03", "CCC", "BB"), ("2026-07-03", "CCC", "VS"),
+               ("2026-07-03", "CCC", "RE"),
+               ("2026-07-01", "DDD", "BB"), ("2026-07-02", "DDD", "BB"),
+               ("2026-07-03", "DDD", "BB")])
+    out = build.compute_signal_stacking(h, "2026-07-03")
+    assert [r["ticker"] for r in out] == ["CCC", "DDD"]   # 3 engines > 1 engine
+    assert out[0]["days"] == 1 and len(out[0]["engines"]) == 3
+
+
+def test_compute_qualifies_on_engine_breadth_same_day():
+    # Day-one usefulness: a name flagged by 2 engines on ONE day shows;
+    # a single-engine single-day name does not.
+    h = _hist([("2026-07-03", "AGREE", "BB"), ("2026-07-03", "AGREE", "VS"),
+               ("2026-07-03", "SOLO", "BB")])
+    out = build.compute_signal_stacking(h, "2026-07-03")
+    assert [r["ticker"] for r in out] == ["AGREE"]
+
+
+def test_min_engines_constant_and_default():
+    assert build.SIGNAL_STACK_MIN_ENGINES == 2
 
 
 def test_compute_excludes_owned_and_attaches_price_name():
@@ -134,7 +151,7 @@ def test_render_panel_has_ids_rows_and_chips():
 def test_render_empty_state():
     html = build.render_signal_stacking([], "03 Jul 2026")
     assert 'id="signal-stacking-wrap"' in html
-    assert "Building signal history" in html
+    assert "No stacked signals yet" in html
 
 
 def test_render_escapes_adversarial():
