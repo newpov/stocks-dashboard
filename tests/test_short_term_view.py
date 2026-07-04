@@ -48,13 +48,13 @@ def test_payload_short_empty_safe():
 # --- ST-T2 / ST-T3: control markup + short-mode JS ---------------------------
 
 def test_range_control_in_page_source():
-    src = inspect.getsource(build.render_html)
+    src = inspect.getsource(build.render_html) + build._read_asset("dashboard.css") + build._read_asset("dashboard.js")  # v3.5: page source includes the inlined assets
     assert 'data-range="3m"' in src and 'data-range="1m"' in src and 'data-range="all"' in src
     assert "hero-range" in src
 
 
 def test_short_mode_js_present():
-    src = inspect.getsource(build.render_html)
+    src = inspect.getsource(build.render_html) + build._read_asset("dashboard.css") + build._read_asset("dashboard.js")  # v3.5: page source includes the inlined assets
     assert "heroRange" in src
     assert "PORTFOLIO.short" in src
     assert "rebaseWindow" in src

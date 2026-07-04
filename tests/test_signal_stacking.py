@@ -167,14 +167,14 @@ def test_render_escapes_adversarial():
 # --- Task 4/5: wiring guards -------------------------------------------------
 
 def test_signal_stacking_computed_in_render_html():
-    src = inspect.getsource(build.render_html)
+    src = inspect.getsource(build.render_html) + build._read_asset("dashboard.css") + build._read_asset("dashboard.js")  # v3.5: page source includes the inlined assets
     assert "compute_signal_stacking(" in src
     assert "render_signal_stacking(" in src
     assert "signal_stacking_html" in src
 
 
 def test_signal_stacking_button_and_toggle_in_page_source():
-    src = inspect.getsource(build.render_html)
+    src = inspect.getsource(build.render_html) + build._read_asset("dashboard.css") + build._read_asset("dashboard.js")  # v3.5: page source includes the inlined assets
     assert 'id="signal-stacking-btn"' in src
     assert "{signal_stacking_html}" in src
     assert "setupSignalStacking" in src
@@ -213,5 +213,5 @@ def test_build_signal_modal_cards_empty_safe():
 
 
 def test_signal_cards_merged_into_rm_analyst_in_render_html():
-    src = inspect.getsource(build.render_html)
+    src = inspect.getsource(build.render_html) + build._read_asset("dashboard.css") + build._read_asset("dashboard.js")  # v3.5: page source includes the inlined assets
     assert "build_signal_modal_cards(" in src

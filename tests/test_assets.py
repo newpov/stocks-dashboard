@@ -57,3 +57,27 @@ class TestCssAsset:
         # the palette must live ONLY in the asset — no duplicated copy
         assert "--ink:#0b0e17" not in BUILD_SRC
         assert "{css_block}" in BUILD_SRC
+
+
+class TestJsAsset:
+    def test_js_file_exists_with_known_code(self):
+        js = (ASSETS / "dashboard.js").read_text(encoding="utf-8")
+        assert "function fmtMoney(v, sym)" in js       # first body function
+        assert "refreshNewsFromWorker();" in js         # last body statement
+        assert "sym = sym || BASE_SYMBOL;" in js        # Group C rewrite survived
+
+    def test_js_has_no_fstring_remnants(self):
+        _no_remnants((ASSETS / "dashboard.js").read_text(encoding="utf-8"))
+
+    def test_js_moved_out_of_build_py(self):
+        assert "function fmtMoney" not in BUILD_SRC
+        assert "{js_body}" in BUILD_SRC
+        # generated prelude stays in build.py
+        assert "const DATA = {data_json};" in BUILD_SRC
+
+    @pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+    def test_js_asset_is_valid_javascript(self):
+        r = subprocess.run(
+            ["node", "--check", str(ASSETS / "dashboard.js")],
+            capture_output=True, text=True)
+        assert r.returncode == 0, r.stderr

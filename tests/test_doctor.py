@@ -412,7 +412,7 @@ def test_doctor_button_and_panel_in_page_source():
     # The page f-string (returned by render_html) must contain the Doctor button
     # id, the panel placeholder, and the toggle IIFE. Assert against the source
     # so we don't need a full network build here.
-    src = inspect.getsource(build.render_html)
+    src = inspect.getsource(build.render_html) + build._read_asset("dashboard.css") + build._read_asset("dashboard.js")  # v3.5: page source includes the inlined assets
     assert 'id="doctor-btn"' in src
     assert "{doctor_html}" in src
     assert "setupDoctor" in src
@@ -458,7 +458,7 @@ def test_module_key_to_dom_id_map_covers_all_doctor_keys():
 
 
 def test_doctor_links_wired_in_page_source():
-    src = inspect.getsource(build.render_html)
+    src = inspect.getsource(build.render_html) + build._read_asset("dashboard.css") + build._read_asset("dashboard.js")  # v3.5: page source includes the inlined assets
     # modules carry a stable scroll id, and a handler targets the doctor links
     assert 'id="module-' in src
     assert "doc-link[data-module-target]" in src

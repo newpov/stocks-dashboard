@@ -108,7 +108,7 @@ def test_hero_legend_no_industries_when_empty():
 
 
 def test_industry_overlay_wired_in_render_html():
-    src = inspect.getsource(build.render_html)
+    src = inspect.getsource(build.render_html) + build._read_asset("dashboard.css") + build._read_asset("dashboard.js")  # v3.5: page source includes the inlined assets
     assert "build_industry_overlay_series(" in src
     assert '"industries"' in src
 
@@ -116,7 +116,7 @@ def test_industry_overlay_wired_in_render_html():
 # --- IO-T3: hero JS + toggle -------------------------------------------------
 
 def test_industry_overlay_js_and_toggle_present():
-    src = inspect.getsource(build.render_html)
+    src = inspect.getsource(build.render_html) + build._read_asset("dashboard.css") + build._read_asset("dashboard.js")  # v3.5: page source includes the inlined assets
     assert "showIndustries" in src
     assert "heroIndustries" in src
     assert 'data-series="industries"' in src
