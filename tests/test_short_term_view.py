@@ -59,3 +59,13 @@ def test_short_mode_js_present():
     assert "PORTFOLIO.short" in src
     assert "rebaseWindow" in src
 
+
+
+def test_short_mode_movers_map_daily_to_week():
+    # v3.5: 3M/1M plot daily points but weekly_movers is keyed by week-ending
+    # date — the click handler must map a daily date to its containing week
+    # (nearest key on/after the day, <7 days) instead of always missing.
+    js = build._read_asset("dashboard.js")
+    assert "let wkKey = dateKey;" in js
+    assert "dk - d0 < 7 * 86400000" in js
+    assert "Week ending ${wkKey}" in js

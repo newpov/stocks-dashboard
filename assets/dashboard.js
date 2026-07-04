@@ -1445,7 +1445,23 @@ document.getElementById('hero-chart').addEventListener('click', (e) => {
   const rect = e.target.closest && e.target.closest('.hero-week-click');
   if (!rect) return;
   const dateKey = rect.dataset.weekEnd;
-  const wk = AUX_DATA.weekly_movers && AUX_DATA.weekly_movers[dateKey];
+  const movers = AUX_DATA.weekly_movers || {};
+  let wkKey = dateKey;
+  let wk = movers[wkKey];
+  if (!wk) {
+    // v3.5: the 3M/1M views plot DAILY points but movers are keyed by
+    // week-ending date, so an exact lookup always missed there. Map the
+    // clicked day to its containing week: the nearest key on/after the
+    // day, within 7 days (the newest partial week has no key yet and
+    // falls through to the empty-state).
+    const d0 = Date.parse(dateKey);
+    let best = Infinity;
+    for (const k of Object.keys(movers)) {
+      const dk = Date.parse(k);
+      if (dk >= d0 && dk - d0 < 7 * 86400000 && dk < best) { best = dk; wkKey = k; }
+    }
+    if (best !== Infinity) wk = movers[wkKey];
+  }
   if (!wk) {
     openInfoModal(`Week ending ${dateKey}`,
       'no movers recorded for this week',
@@ -1472,7 +1488,7 @@ document.getElementById('hero-chart').addEventListener('click', (e) => {
     + `</div>`
     + `</div>`
   );
-  openInfoModal(`Week ending ${dateKey}`,
+  openInfoModal(`Week ending ${wkKey}`,
     'top movers across your held tickers',
     body);
 });

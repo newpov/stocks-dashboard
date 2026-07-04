@@ -41,7 +41,14 @@ deferred indefinitely rather than pretending it's imminent.
 - New `tests/test_assets.py` (extraction integrity: no f-string remnants,
   valid JS syntax, assets stay out of `build.py`); page-source tests now read
   the template plus the inlined assets. CI also rebuilds on `assets/**`
-  changes. **429 tests.**
+  changes. **430 tests.**
+- **Plus one behaviour fix (author-flagged in testing):** clicking the hero
+  chart in the **3M/1M views** always said "no movers recorded" — those views
+  plot *daily* points while the movers data is keyed by *week-ending* date, so
+  the exact lookup could never hit. The click handler now maps a daily date to
+  its containing week (nearest key on/after the day, within 7 days); the modal
+  title names the week actually shown. Fittingly, this was the first edit made
+  directly in the new `assets/dashboard.js`.
 
 ---
 
