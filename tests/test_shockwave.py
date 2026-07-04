@@ -174,7 +174,12 @@ def test_main_source_calls_compute_stress_factors():
 
 def test_shockwave_button_and_js_in_source():
     import inspect
+    # v3.5: CSS/JS are static assets inlined at build time — page source =
+    # render_html template + assets.
     src = inspect.getsource(build.render_html)
+    for p in (build._ASSET_DIR / "dashboard.css", build._ASSET_DIR / "dashboard.js"):
+        if p.is_file():
+            src += p.read_text(encoding="utf-8")
     assert 'id="shockwave-btn"' in src
     assert "setupShockwave" in src
     assert ".shockwave-wrap" in src

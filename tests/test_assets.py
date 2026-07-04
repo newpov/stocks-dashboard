@@ -39,3 +39,21 @@ class TestReadAsset:
 
     def test_asset_dir_is_repo_relative(self):
         assert build._ASSET_DIR == Path(build.__file__).parent / "assets"
+
+
+class TestCssAsset:
+    def test_css_file_exists_with_known_rule(self):
+        css = (ASSETS / "dashboard.css").read_text(encoding="utf-8")
+        assert "--ink:#0b0e17" in css              # sentinel: the :root palette
+        assert "var(--watch-cols-desktop)" in css  # param wiring (spec 4.3)
+        assert "var(--watch-cols-mobile)" in css
+
+    def test_css_has_no_fstring_remnants(self):
+        css = (ASSETS / "dashboard.css").read_text(encoding="utf-8")
+        _no_remnants(css)
+        assert "{{" not in css  # un-doubling left no doubled braces
+
+    def test_css_moved_out_of_build_py(self):
+        # the palette must live ONLY in the asset — no duplicated copy
+        assert "--ink:#0b0e17" not in BUILD_SRC
+        assert "{css_block}" in BUILD_SRC

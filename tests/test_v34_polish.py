@@ -8,7 +8,14 @@ import build
 
 
 def _page_src():
-    return inspect.getsource(build.render_html)
+    # v3.5: the page's CSS/JS live in assets/ and are inlined at build time,
+    # so "the page source" = render_html's template + the static assets.
+    src = inspect.getsource(build.render_html)
+    for name in ("dashboard.css", "dashboard.js"):
+        p = build._ASSET_DIR / name
+        if p.is_file():
+            src += p.read_text(encoding="utf-8")
+    return src
 
 
 # --- v3.4.1: topbar/panel polish -------------------------------------------
