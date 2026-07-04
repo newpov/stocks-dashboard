@@ -14,6 +14,37 @@ than a barely-working prototype.
 
 ---
 
+## v3.5 — Lintable CSS/JS assets (v2.9.7-lite) · 4 July 2026
+
+A maintainability release with **zero user-visible change** — and a deliberate
+de-scoping. The long-deferred v2.9.7 plan was a full structural split of
+`build.py` into `fetch`/`positions`/`render`/`cli` modules. On an honest
+risk/benefit review (proposed and implemented by Claude Fable 5), the full
+split scored poorly: most of its payoff for a single-author, agent-maintained
+codebase came from **making the embedded CSS/JS lintable**, while most of its
+risk came from moving imports and restructuring modules. So v3.5 ships the
+milder hybrid — "extract, don't restructure" — and the module split stays
+deferred indefinitely rather than pretending it's imminent.
+
+- **The page's CSS (~1.8k lines) and JS (~2.5k lines) are now real files** —
+  `assets/dashboard.css` + `assets/dashboard.js` — read back and **inlined at
+  build time**, so `demo.html` stays fully self-contained and the published
+  page structure is byte-identical. `build.py` shrinks ~14.0k → ~9.7k lines.
+- **A small generated prelude keeps the per-build values** (payload JSON,
+  `HEAVY_URL`, base-currency symbols, modal/shockwave geometry consts); the
+  static JS references them by name, so the asset files contain zero
+  build-specific content.
+- **The bug-class this kills is the one that kept biting:** brace-escaping and
+  encoding errors inside the giant template f-string previously surfaced only
+  in the browser. The JS asset is now guarded by `node --check` in the suite,
+  and asset reads mandate UTF-8 (the v3.0 cp1252 lesson).
+- New `tests/test_assets.py` (extraction integrity: no f-string remnants,
+  valid JS syntax, assets stay out of `build.py`); page-source tests now read
+  the template plus the inlined assets. CI also rebuilds on `assets/**`
+  changes. **429 tests.**
+
+---
+
 ## v3.4.1 — Signal-stacking breadth + topbar polish · 4 July 2026
 
 A small follow-up to v3.4 (all author-flagged): one relevance fix and two topbar fixes.

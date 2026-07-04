@@ -29,6 +29,7 @@ on:
       - 'watchlist.csv'
       - 'universe.csv'
       - 'predictions.csv'
+      - 'assets/**'
       - '.github/workflows/**'
   schedule:
     - cron: '0 22 * * *'

@@ -81,3 +81,14 @@ class TestJsAsset:
             ["node", "--check", str(ASSETS / "dashboard.js")],
             capture_output=True, text=True)
         assert r.returncode == 0, r.stderr
+
+
+class TestExtractionIntegrity:
+    def test_both_assets_utf8_decodable(self):
+        # explicit strict decode — a cp1252-mangled edit would raise here
+        for name in ("dashboard.css", "dashboard.js"):
+            (ASSETS / name).read_text(encoding="utf-8")
+
+    def test_build_py_fstring_shrunk(self):
+        # the whole point: build.py no longer carries the big blocks
+        assert len(BUILD_SRC.splitlines()) < 10_000
