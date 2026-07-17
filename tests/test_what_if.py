@@ -95,3 +95,11 @@ def test_payload_ffills_small_gaps():
 def test_payload_empty_inputs_safe():
     assert build.build_what_if_payload([], None, [], n_open=0) == \
         {"dates": [], "n_open": 0, "names": {}}
+
+
+def test_what_if_wired_in_render_html():
+    src = inspect.getsource(build.render_html)
+    assert "const WHATIF" in src
+    assert "whatif_json" in src
+    assert "build_what_if_pool(" in src
+    assert "build_what_if_payload(" in src

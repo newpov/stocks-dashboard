@@ -8660,6 +8660,17 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     has_nasdaq = bool(_portfolio_payload.get("nasdaq", {}).get("values"))
     hero_legend_html = _hero_legend_html(has_nasdaq, industries=_industry_overlay)
     portfolio_json = _json_for_script(_portfolio_payload, separators=(",", ":"))
+    # v3.6 what-if: hindsight overlay pool + series for selected watchlist names
+    _wi_owned = set(returns[returns.status == "open"].index) if not returns.empty else set()
+    _wi_pool = build_what_if_pool(_combined_watchlist, signal_history,
+                                  owned=_wi_owned, today=_ss_asof)
+    _wi_names = ({t: str(meta.loc[t, "name"]) for t in meta.index}
+                 if "name" in meta.columns else {})
+    what_if_payload = build_what_if_payload(
+        _wi_pool, prices, _portfolio_payload["short"]["dates"],
+        n_open=n_open, name_lookup=_wi_names)
+    whatif_json = _json_for_script(what_if_payload or {"dates": [], "n_open": 0, "names": {}},
+                                   separators=(",", ":"), ensure_ascii=False)
     # T11/T12/T14/T15: aux payload for click-to-expand drill-down modals.
     # Reuses diversification_data (computed below) for the pair list -- this
     # block depends on it so we compute it inline first, then pass it.
@@ -9170,6 +9181,7 @@ const AUX_DATA = {aux_json};
 // load; a Next-tip button rotates without reloading.
 const POCKET_LESSONS = {pocket_lessons_json};
 const SHOCKWAVE = {shockwave_json};
+const WHATIF = {whatif_json};
 const RM_ANALYST = {rm_analyst_json};
 
 // v2.1 Quiz: 50-question pool, 5 categories x 10 questions. Schema:
