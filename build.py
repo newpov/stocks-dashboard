@@ -6941,7 +6941,7 @@ def build_data_payload(returns: pd.DataFrame, prices: pd.DataFrame,
     return payload
 
 
-def _hero_legend_html(has_nasdaq: bool, industries=None) -> str:
+def _hero_legend_html(has_nasdaq: bool, industries=None, what_if: bool = False) -> str:
     """Hero-chart legend items. Nasdaq + Industries are optional toggle buttons
     rendered only when their data is present; basket + SPY are fixed reference
     labels (they drive the vs-SPY area, delta badge and alpha sparkline, so they
@@ -6971,6 +6971,17 @@ def _hero_legend_html(has_nasdaq: bool, industries=None) -> str:
              f'{" &#9671; 12m" if e.get("kind") == "outlook" else ""}</span>')
             for e in industries)
         items.append(f'<span class="hero-ind-legend" hidden>{chips}</span>')
+    if what_if:
+        items.append(
+            '<button type="button" class="leg leg-toggle leg-wi" data-series="whatif" '
+            'aria-pressed="false" title="Equal-weight line of your selected '
+            'watchlist names (3M/1M only)">'
+            '<span class="leg-swatch whatif"></span>What if</button>')
+        items.append(
+            '<button type="button" class="leg leg-toggle leg-wi" data-series="blended" '
+            'aria-pressed="false" title="Existing basket blended with your '
+            'selection (3M/1M only)">'
+            '<span class="leg-swatch blended"></span>Blended</button>')
     items.append('<div class="leg"><span class="leg-swatch fx"></span>GBP/USD</div>')
     return "\n        ".join(items)
 
@@ -8658,7 +8669,6 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
         transactions, prices, meta, returns, industry_groups)
     _portfolio_payload["industries"] = _industry_overlay
     has_nasdaq = bool(_portfolio_payload.get("nasdaq", {}).get("values"))
-    hero_legend_html = _hero_legend_html(has_nasdaq, industries=_industry_overlay)
     portfolio_json = _json_for_script(_portfolio_payload, separators=(",", ":"))
     # v3.6 what-if: hindsight overlay pool + series for selected watchlist names
     _wi_owned = set(returns[returns.status == "open"].index) if not returns.empty else set()
@@ -8671,6 +8681,9 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
         n_open=n_open, name_lookup=_wi_names)
     whatif_json = _json_for_script(what_if_payload or {"dates": [], "n_open": 0, "names": {}},
                                    separators=(",", ":"), ensure_ascii=False)
+    hero_legend_html = _hero_legend_html(
+        has_nasdaq, industries=_industry_overlay,
+        what_if=bool(what_if_payload and what_if_payload.get("names")))
     # T11/T12/T14/T15: aux payload for click-to-expand drill-down modals.
     # Reuses diversification_data (computed below) for the pair list -- this
     # block depends on it so we compute it inline first, then pass it.
@@ -8987,6 +9000,8 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
       <svg class="hero-chart-svg" id="hero-chart" preserveAspectRatio="none"></svg>
       <div class="hero-tip" id="hero-tip" hidden></div>
     </div>
+    <div id="whatif-chips" class="whatif-chips" hidden></div>
+    <div id="whatif-note" class="whatif-note" hidden>Hindsight view &mdash; what an equal-weight buy at window start would have returned. Not a forecast.</div>
     {alpha_sparkline_html}
     {dd_sparkline_html}
   </div>

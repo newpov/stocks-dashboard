@@ -103,3 +103,27 @@ def test_what_if_wired_in_render_html():
     assert "whatif_json" in src
     assert "build_what_if_pool(" in src
     assert "build_what_if_payload(" in src
+
+
+def test_hero_legend_has_what_if_toggles_default_off():
+    html = build._hero_legend_html(has_nasdaq=False, what_if=True)
+    assert 'data-series="whatif"' in html and 'data-series="blended"' in html
+    assert html.count('aria-pressed="false"') >= 2
+    assert "leg-wi" in html
+
+
+def test_hero_legend_omits_what_if_when_no_pool():
+    html = build._hero_legend_html(has_nasdaq=False, what_if=False)
+    assert "whatif" not in html
+
+
+def test_chip_row_and_subtitle_in_page():
+    src = inspect.getsource(build.render_html)
+    assert 'id="whatif-chips"' in src
+    assert "Hindsight view" in src and "Not a forecast" in src
+
+
+def test_css_gates_what_if_legend_to_short_mode():
+    css = build._read_asset("dashboard.css")
+    assert ".leg-wi{display:none" in css.replace(" ", "")
+    assert ".range-short" in css
