@@ -6975,6 +6975,48 @@ def _hero_legend_html(has_nasdaq: bool, industries=None) -> str:
     return "\n        ".join(items)
 
 
+# === v3.6 What-if: hindsight overlay of selected non-owned names ============
+WHATIF_POOL_MAX = 60    # payload cap; newest-flagged history names dropped first
+WHATIF_KEEP_DAYS = 90   # how long an unflagged name stays plottable
+
+
+def build_what_if_pool(watchlist_df, signal_history, owned,
+                       today, keep_days=WHATIF_KEEP_DAYS, cap=WHATIF_POOL_MAX):
+    """Selection pool: current combined watchlist (order kept) then names seen
+    in signal history within keep_days (newest last-flag first). Non-owned only.
+    Returns [{ticker, flagged_now, last_flagged, sources}]. Pure, never raises."""
+    owned = owned or set()
+    rows, seen = [], set()
+    hist_info = {}
+    if signal_history is not None and len(signal_history) > 0:
+        h = signal_history.copy()
+        h["date"] = pd.to_datetime(h["date"])
+        cutoff = pd.Timestamp(today) - pd.Timedelta(days=keep_days)
+        h = h[h["date"] >= cutoff]
+        for tkr, g in h.groupby("ticker"):
+            hist_info[str(tkr)] = {
+                "last": g["date"].max(),
+                "sources": sorted(set(str(s) for s in g["source"])),
+            }
+    if watchlist_df is not None and len(watchlist_df) > 0:
+        for tkr in watchlist_df["ticker"].astype(str):
+            if tkr in owned or tkr in seen:
+                continue
+            seen.add(tkr)
+            info = hist_info.get(tkr, {})
+            rows.append({"ticker": tkr, "flagged_now": True,
+                         "last_flagged": (info.get("last").strftime("%Y-%m-%d")
+                                          if info.get("last") is not None else ""),
+                         "sources": info.get("sources", [])})
+    extras = sorted((t for t in hist_info if t not in seen and t not in owned),
+                    key=lambda t: hist_info[t]["last"], reverse=True)
+    for tkr in extras:
+        rows.append({"ticker": tkr, "flagged_now": False,
+                     "last_flagged": hist_info[tkr]["last"].strftime("%Y-%m-%d"),
+                     "sources": hist_info[tkr]["sources"]})
+    return rows[:cap]
+
+
 SHORT_TERM_DAYS = 95   # daily slice horizon for the 1M/3M hero view (v3.4 #3)
 
 
