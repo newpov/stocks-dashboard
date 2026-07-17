@@ -317,6 +317,17 @@ decorations (vs-SPY shading, sparklines, FX strip, fiscal-year stat) step aside 
 short-term mode and the Δ badge becomes the window's basket-vs-SPY gap. The choice
 is transient (resets to All on reload).
 
+**"What if" overlay (v3.6).** In 3M / 1M mode two more legend toggles appear (both
+**off by default**): **What if** draws an equal-weight basket of the names you tick
+on the watchlist — a hindsight line of what buying them at the window start would
+have returned — and **Blended** shows how adding them would have moved the existing
+basket (`(N·r_basket + k·r_custom)/(N+k)`, exact under the equal-weight model). Pick
+names via the "what if" checkbox on each watchlist card; a chip row under the chart
+echoes the selection (persisted in `localStorage`). Names stay selectable for 90 days
+after they drop out of the Value+BB flags (dimmed "unflagged"), via the committed
+signal history. It is labelled plainly as a **hindsight view, not a forecast** — a
+backtest of names chosen because they already looked good.
+
 ### Pre-hero context: unusual volume chips
 
 When any open position trades on **&gt; 2&times; its 63-day average volume**
