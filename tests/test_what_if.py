@@ -161,6 +161,13 @@ def test_js_what_if_lines_gated_to_short_mode():
     assert "data-wi-remove" in js and "data-wi-add" in js
 
 
+def test_js_checkbox_click_does_not_open_card():
+    # the tick must stopPropagation so the enclosing .wl-card click (openModal)
+    # doesn't also fire.
+    js = build._read_asset("dashboard.js")
+    assert "wl-wi-pick" in js and "stopPropagation" in js
+
+
 def test_blend_math_reference():
     # 3-day fixture: basket cum [0,1,2]%, custom cum [0,10,20]%, N=9, k=1
     def daily(cum):

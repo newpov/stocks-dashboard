@@ -714,6 +714,11 @@ function whatIfSyncCheckboxes() {
     });
   });
   whatIfSyncCheckboxes();
+  // The what-if checkbox sits inside a .wl-card whose own click opens the stock
+  // modal — stop the tick from bubbling up so it doesn't also open the card.
+  document.querySelectorAll('.wl-wi-pick').forEach(lbl => {
+    lbl.addEventListener('click', (e) => e.stopPropagation());
+  });
   document.addEventListener('change', (e) => {
     const cb = e.target;
     if (!cb || typeof cb.getAttribute !== 'function' || cb.getAttribute('data-wi-ticker') == null) return;
