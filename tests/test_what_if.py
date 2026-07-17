@@ -127,3 +127,13 @@ def test_css_gates_what_if_legend_to_short_mode():
     css = build._read_asset("dashboard.css")
     assert ".leg-wi{display:none" in css.replace(" ", "")
     assert ".range-short" in css
+
+
+def test_watchlist_cards_carry_what_if_checkbox():
+    payload = {"AAA": {"name": "Aco", "currency": "USD", "ccy_symbol": "$",
+                       "latest": 100.0, "native_latest": 100.0, "total": -5.0,
+                       "prices": [100, 98, 95], "note": "", "wl_kind": "manual"}}
+    html = build.render_watchlist(payload, pd.DataFrame())
+    assert 'class="wl-wi-pick"' in html
+    assert 'data-wi-ticker="AAA"' in html
+    assert 'type="checkbox"' in html

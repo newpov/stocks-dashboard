@@ -4137,7 +4137,10 @@ def render_watchlist(watchlist_payload: dict, meta: pd.DataFrame) -> str:
             f'  <div class="wl-price"><span class="wl-latest">{latest_str}</span>{gbp_line}</div>'
             f'  <div class="wl-spark {cls}">{sparkline}</div>'
             f'  {verdict_html}{chips_html}{cite_html}'
-            f'  <div class="wl-foot"><span class="wl-period">12-month</span>{note_html}</div>'
+            f'  <div class="wl-foot">'
+            f'<label class="wl-wi-pick" title="Include in the what-if line">'
+            f'<input type="checkbox" data-wi-ticker="{_esc(tkr)}"> what if</label>'
+            f'<span class="wl-period">12-month</span>{note_html}</div>'
             f'</div>'
         )
     # v3.0 #4: arrow-paged so 6+ names don't spill into a 2nd row. Page size =
