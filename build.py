@@ -7017,6 +7017,37 @@ def build_what_if_pool(watchlist_df, signal_history, owned,
     return rows[:cap]
 
 
+def build_what_if_payload(pool, prices, short_dates, n_open, name_lookup=None):
+    """Per pool name: cumulative-return-% series over short_dates from the
+    GBP-converted daily prices frame. Requires a price at the first date and
+    >=80 percent coverage; small gaps ffilled. Pure, never raises."""
+    name_lookup = name_lookup or {}
+    out = {"dates": list(short_dates or []), "n_open": int(n_open or 0), "names": {}}
+    if not pool or prices is None or len(prices) == 0 or not short_dates:
+        return out
+    idx = pd.to_datetime(short_dates)
+    for p in pool:
+        tkr = p["ticker"]
+        if tkr not in prices.columns:
+            continue
+        s = prices[tkr].reindex(idx)
+        if s.notna().sum() < int(0.8 * len(idx)) or pd.isna(s.iloc[0]):
+            continue
+        s = s.ffill()
+        base = float(s.iloc[0])
+        if base <= 0:
+            continue
+        cum = [round((float(v) / base - 1.0) * 100.0, 4) for v in s]
+        out["names"][tkr] = {
+            "name": str(name_lookup.get(tkr, tkr)),
+            "cum": cum,
+            "flagged_now": bool(p.get("flagged_now")),
+            "last_flagged": p.get("last_flagged", ""),
+            "sources": list(p.get("sources", [])),
+        }
+    return out
+
+
 SHORT_TERM_DAYS = 95   # daily slice horizon for the 1M/3M hero view (v3.4 #3)
 
 
