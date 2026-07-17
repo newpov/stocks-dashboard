@@ -32,6 +32,62 @@ function rebaseWindow(vals) {
   if (base === 0) return vals.map(() => 0);
   return vals.map(v => ((1 + v / 100) / base - 1) * 100);
 }
+
+// v3.6 what-if: selection state (persisted) + equal-weight math mirroring the
+// Python builder. Lines render only in the 3M/1M window (short mode).
+let whatIfSel = [];
+try { whatIfSel = JSON.parse(localStorage.getItem('whatIfSelection') || '[]'); } catch (e) {}
+if (!Array.isArray(whatIfSel)) whatIfSel = [];
+let whatIfOn = false, whatIfBlendedOn = false;
+try {
+  whatIfOn = localStorage.getItem('whatIfOn') === '1';
+  whatIfBlendedOn = localStorage.getItem('whatIfBlendedOn') === '1';
+} catch (e) {}
+function whatIfData() { return (typeof WHATIF !== 'undefined' && WHATIF) ? WHATIF : {dates: [], n_open: 0, names: {}}; }
+function whatIfMembers() {
+  // selected tickers whose series fully covers the payload window
+  const wi = whatIfData(), n = (wi.dates || []).length;
+  return whatIfSel.filter(t => {
+    const d = wi.names && wi.names[t];
+    return d && d.cum && d.cum.length === n && n > 0;
+  });
+}
+function compoundToCum(daily) {
+  let g = 1; const out = [];
+  for (const r of daily) { g *= (1 + r); out.push((g - 1) * 100); }
+  if (out.length) { const b = 1 + out[0] / 100; return out.map(v => ((1 + v / 100) / b - 1) * 100); }
+  return out;
+}
+function computeWhatIfSeries(i0) {
+  const wi = whatIfData(), members = whatIfMembers();
+  if (!members.length) return null;
+  const n = wi.dates.length;
+  const daily = [];
+  for (let i = i0; i < n; i++) {
+    let g = 0;
+    for (const t of members) {
+      const c = wi.names[t].cum;
+      const gPrev = 1 + (i > i0 ? c[i - 1] : c[i0]) / 100;
+      g += (1 + c[i] / 100) / gPrev - 1;          // per-member daily return
+    }
+    daily.push(g / members.length);                // equal-weight mean
+  }
+  return compoundToCum(daily);
+}
+function computeBlendedSeries(i0, basketWinCum) {
+  // (N*r_basket + k*r_custom)/(N+k) per day, then compound + rebase. Daily
+  // returns are invariant to rebasing, so basketWinCum may be rebased or raw.
+  const custom = computeWhatIfSeries(i0);
+  if (!custom || !basketWinCum || !basketWinCum.length) return null;
+  const N = whatIfData().n_open || 1, k = whatIfMembers().length;
+  const daily = [];
+  for (let i = 0; i < custom.length; i++) {
+    const rb = i === 0 ? 0 : (1 + basketWinCum[i] / 100) / (1 + basketWinCum[i - 1] / 100) - 1;
+    const rc = i === 0 ? 0 : (1 + custom[i] / 100) / (1 + custom[i - 1] / 100) - 1;
+    daily.push((N * rb + k * rc) / (N + k));
+  }
+  return compoundToCum(daily);
+}
 function renderHeroChart() {
   const svg = document.getElementById('hero-chart');
   const wrap = svg.parentElement;
@@ -52,6 +108,8 @@ function renderHeroChart() {
   let ind = showIndustries ? indRaw : [];
   // v3.4 #3: short-term window — rebase basket+SPY to the window start and drop
   // the since-inception extras (FX/Nasdaq/industries self-skip on empty arrays).
+  // v3.6: what-if + blended lines are computed here too (short mode only).
+  let wiSeries = null, blSeries = null;
   if (!isAll) {
     const days = heroRange === '1m' ? 30 : 90;
     const st = PORTFOLIO.short || {dates:[], basket:[], spy:[]};
@@ -65,6 +123,16 @@ function renderHeroChart() {
     b = {dates: wd, values: rebaseWindow(st.basket.slice(i0))};
     s = {dates: wd, values: rebaseWindow(st.spy.slice(i0))};
     fx = {dates:[], values:[]}; nz = {dates:[], values:[]}; ind = [];
+    // v3.6: what-if custom basket + blended line, aligned to the same window.
+    // Requires WHATIF.dates === PORTFOLIO.short.dates (both from the short slice).
+    if ((whatIfOn || whatIfBlendedOn) && whatIfData().dates.length === st.dates.length) {
+      const wi = computeWhatIfSeries(i0);
+      if (wi && whatIfOn) wiSeries = {dates: wd, values: wi};
+      if (wi && whatIfBlendedOn) {
+        const bl = computeBlendedSeries(i0, b.values);
+        if (bl) blSeries = {dates: wd, values: bl};
+      }
+    }
   }
   // Only OWNED industry lines (real trajectories) drive the y-scale. Non-owned
   // 12m endpoints are clamped into the plot area instead, so a large or glitchy
@@ -73,8 +141,12 @@ function renderHeroChart() {
   ind.forEach(e => { if (e.series) indVals.push(...e.series.values); });
   if (!b.values.length) { svg.innerHTML = '<text x="50%" y="50%" fill="#6b7185" font-family="Geist Mono" font-size="12" text-anchor="middle">No basket data</text>'; return; }
 
-  // Combined min/max across both series
+  // Combined min/max across both series. v3.6: the what-if + blended lines are
+  // real trajectories the user chose to see, so (unlike non-owned industry
+  // markers) they DO drive the y-scale.
   const allVals = [...b.values, ...s.values, ...nz.values, ...indVals, 0];
+  if (wiSeries) allVals.push(...wiSeries.values);
+  if (blSeries) allVals.push(...blSeries.values);
   const vmin = Math.min(...allVals);
   const vmax = Math.max(...allVals);
   const span = (vmax - vmin) || 1;
@@ -150,6 +222,8 @@ function renderHeroChart() {
   const spyEnd = spy.vals.length ? spy.vals[spy.vals.length - 1] : 0;
   const basketColor = '#f59e0b';
   const spyColor = '#6b7185';
+  const whatifColor = '#2dd4bf';    // teal — distinct from the amber basket
+  const blendedColor = '#c084fc';   // purple — basket blended with the selection
   const greenFill = 'rgba(52,211,153,0.22)';   // outperforming SPY
   const redFill = 'rgba(248,113,113,0.22)';    // underperforming SPY
   const lossWashFill = 'rgba(248,113,113,0.09)'; // subtle below-zero wash
@@ -365,6 +439,18 @@ function renderHeroChart() {
       }
     });
   }
+  // v3.6: what-if (dashed) + blended (dotted) lines, drawn under the basket.
+  let wiPts = null, blPts = null;
+  if (wiSeries) {
+    wiPts = buildPoints(wiSeries);
+    const pl = wiPts.xs.map((x, i) => `${x.toFixed(1)},${wiPts.ys[i].toFixed(1)}`).join(' ');
+    html += `<polyline points="${pl}" fill="none" stroke="${whatifColor}" stroke-width="2" stroke-dasharray="7 5" stroke-linejoin="round"/>`;
+  }
+  if (blSeries) {
+    blPts = buildPoints(blSeries);
+    const pl = blPts.xs.map((x, i) => `${x.toFixed(1)},${blPts.ys[i].toFixed(1)}`).join(' ');
+    html += `<polyline points="${pl}" fill="none" stroke="${blendedColor}" stroke-width="1.8" stroke-dasharray="2 4" stroke-linejoin="round"/>`;
+  }
   // Basket line
   html += `<polyline points="${basketPL}" fill="none" stroke="${basketColor}" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"/>`;
   // v2.7: last-completed fiscal-year return (top-left, on top of the line).
@@ -385,6 +471,15 @@ function renderHeroChart() {
   }
   if (nasdaq.ys.length) {
     html += `<text x="${(padL + innerW + 6).toFixed(1)}" y="${(nasdaq.ys[nasdaq.ys.length-1] + 4).toFixed(1)}" fill="${nasdaqColor}" font-size="11" font-family="Geist Mono, monospace">${nasdaqEnd >= 0 ? '+' : ''}${nasdaqEnd.toFixed(1)}%</text>`;
+  }
+  // v3.6: what-if + blended end labels (window Δ)
+  if (wiPts && wiPts.ys.length) {
+    const ev = wiSeries.values[wiSeries.values.length - 1];
+    html += `<text x="${(padL + innerW + 6).toFixed(1)}" y="${(wiPts.ys[wiPts.ys.length-1] + 4).toFixed(1)}" fill="${whatifColor}" font-size="11" font-family="Geist Mono, monospace" font-weight="500">${ev >= 0 ? '+' : ''}${ev.toFixed(1)}%</text>`;
+  }
+  if (blPts && blPts.ys.length) {
+    const ev = blSeries.values[blSeries.values.length - 1];
+    html += `<text x="${(padL + innerW + 6).toFixed(1)}" y="${(blPts.ys[blPts.ys.length-1] + 4).toFixed(1)}" fill="${blendedColor}" font-size="11" font-family="Geist Mono, monospace">${ev >= 0 ? '+' : ''}${ev.toFixed(1)}%</text>`;
   }
 
   // FX bar band — weekly GBP/USD rate, centered on the baseline (first value).
@@ -557,9 +652,94 @@ window.addEventListener('resize', renderHeroChart);
     if (wrap) {
       wrap.classList.toggle('range-short', r !== 'all');
       wrap.classList.add('range-anim');
-      setTimeout(() => { renderHeroChart(); wrap.classList.remove('range-anim'); }, 120);
-    } else { renderHeroChart(); }
+      setTimeout(() => { renderHeroChart(); wrap.classList.remove('range-anim'); renderWhatIfChips(); }, 120);
+    } else { renderHeroChart(); renderWhatIfChips(); }
   }));
+})();
+
+// v3.6 what-if: legend toggles + watchlist-checkbox sync + chip echo. Chips show
+// only in short mode when a line is on; unflagged/aged names render dimmed/dead.
+function renderWhatIfChips() {
+  const box = document.getElementById('whatif-chips');
+  const note = document.getElementById('whatif-note');
+  if (!box) return;
+  const wi = whatIfData();
+  const show = (whatIfOn || whatIfBlendedOn) && heroRange !== 'all';
+  box.hidden = !show;
+  if (note) note.hidden = !show;
+  if (!show) { box.innerHTML = ''; return; }
+  const frag = [];
+  for (const t of whatIfSel) {
+    const d = wi.names[t];
+    let cls = 'whatif-chip', label = t;
+    if (!d) { cls += ' dead'; label = t + ' · no longer tracked'; }
+    else if (!d.flagged_now) {
+      cls += ' unflagged';
+      let days = null;
+      if (d.last_flagged) { const dt = Date.parse(d.last_flagged); if (!isNaN(dt)) days = Math.round((Date.now() - dt) / 86400000); }
+      label = t + (days !== null ? ' · unflagged ' + days + 'd ago' : ' · unflagged');
+    }
+    frag.push('<button type="button" class="' + cls + '" data-wi-remove="' + t + '">' + label + '<span class="x">×</span></button>');
+  }
+  const addable = Object.keys(wi.names || {}).filter(t => whatIfSel.indexOf(t) < 0);
+  if (addable.length) frag.push('<button type="button" class="whatif-add" id="whatif-add">+ add</button>');
+  box.innerHTML = frag.join('');
+  const addBtn = document.getElementById('whatif-add');
+  if (addBtn) addBtn.addEventListener('click', () => {
+    const existing = box.querySelector('.whatif-pick');
+    if (existing) { existing.remove(); return; }
+    const pick = document.createElement('div');
+    pick.className = 'whatif-pick';
+    pick.innerHTML = addable.map(t => '<button type="button" class="whatif-add" data-wi-add="' + t + '">' + t + '</button>').join('');
+    box.appendChild(pick);
+  });
+}
+function whatIfPersistSel() { try { localStorage.setItem('whatIfSelection', JSON.stringify(whatIfSel)); } catch (e) {} }
+function whatIfSyncCheckboxes() {
+  document.querySelectorAll('[data-wi-ticker]').forEach(cb => {
+    cb.checked = whatIfSel.indexOf(cb.getAttribute('data-wi-ticker')) >= 0;
+  });
+}
+(function setupWhatIf() {
+  document.querySelectorAll('.hero-legend .leg-toggle.leg-wi').forEach(btn => {
+    const series = btn.dataset.series;   // 'whatif' | 'blended'
+    const get = () => series === 'blended' ? whatIfBlendedOn : whatIfOn;
+    btn.setAttribute('aria-pressed', get() ? 'true' : 'false');
+    btn.addEventListener('click', () => {
+      if (series === 'blended') whatIfBlendedOn = !whatIfBlendedOn; else whatIfOn = !whatIfOn;
+      try { localStorage.setItem(series === 'blended' ? 'whatIfBlendedOn' : 'whatIfOn', get() ? '1' : '0'); } catch (e) {}
+      btn.setAttribute('aria-pressed', get() ? 'true' : 'false');
+      renderHeroChart();
+      renderWhatIfChips();
+    });
+  });
+  whatIfSyncCheckboxes();
+  document.addEventListener('change', (e) => {
+    const cb = e.target;
+    if (!cb || typeof cb.getAttribute !== 'function' || cb.getAttribute('data-wi-ticker') == null) return;
+    const t = cb.getAttribute('data-wi-ticker');
+    const i = whatIfSel.indexOf(t);
+    if (cb.checked && i < 0) whatIfSel.push(t);
+    else if (!cb.checked && i >= 0) whatIfSel.splice(i, 1);
+    whatIfPersistSel();
+    renderHeroChart();
+    renderWhatIfChips();
+  });
+  const box = document.getElementById('whatif-chips');
+  if (box) box.addEventListener('click', (e) => {
+    const rm = e.target.closest ? e.target.closest('[data-wi-remove]') : null;
+    const ad = e.target.closest ? e.target.closest('[data-wi-add]') : null;
+    if (rm) {
+      const t = rm.getAttribute('data-wi-remove');
+      const i = whatIfSel.indexOf(t); if (i >= 0) whatIfSel.splice(i, 1);
+      whatIfPersistSel(); whatIfSyncCheckboxes(); renderHeroChart(); renderWhatIfChips();
+    } else if (ad) {
+      const t = ad.getAttribute('data-wi-add');
+      if (whatIfSel.indexOf(t) < 0) whatIfSel.push(t);
+      whatIfPersistSel(); whatIfSyncCheckboxes(); renderHeroChart(); renderWhatIfChips();
+    }
+  });
+  renderWhatIfChips();
 })();
 
 // ---- Stagger animations

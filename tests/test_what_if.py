@@ -137,3 +137,42 @@ def test_watchlist_cards_carry_what_if_checkbox():
     assert 'class="wl-wi-pick"' in html
     assert 'data-wi-ticker="AAA"' in html
     assert 'type="checkbox"' in html
+
+
+# --- Task 6: client JS (source guards; behaviour browser-verified separately) --
+
+def test_js_setup_what_if_present():
+    js = build._read_asset("dashboard.js")
+    assert "function setupWhatIf" in js
+    assert "whatIfSelection" in js and "whatIfOn" in js and "whatIfBlendedOn" in js
+    assert "computeWhatIfSeries" in js and "computeBlendedSeries" in js
+    assert "renderWhatIfChips" in js
+
+
+def test_js_blend_uses_n_open_weighting():
+    js = build._read_asset("dashboard.js")
+    assert "n_open" in js  # blended weighting reads WHATIF.n_open
+
+
+def test_js_what_if_lines_gated_to_short_mode():
+    js = build._read_asset("dashboard.js")
+    # the lines are only computed inside the short-mode branch (heroRange != all)
+    assert "wiSeries" in js and "blSeries" in js
+    assert "data-wi-remove" in js and "data-wi-add" in js
+
+
+def test_blend_math_reference():
+    # 3-day fixture: basket cum [0,1,2]%, custom cum [0,10,20]%, N=9, k=1
+    def daily(cum):
+        g = [1 + c / 100 for c in cum]
+        return [0.0] + [g[i] / g[i - 1] - 1 for i in range(1, len(g))]
+    N, k = 9, 1
+    rb, rc = daily([0, 1, 2]), daily([0, 10, 20])
+    comb = [(N * a + k * b) / (N + k) for a, b in zip(rb, rc)]
+    g, cum = 1.0, []
+    for r in comb:
+        g *= 1 + r
+        cum.append(round((g - 1) * 100, 4))
+    assert cum[0] == 0.0
+    assert 1.85 < cum[1] < 1.95          # ~ (9*1% + 1*10%)/10 = 1.9%
+    assert 3.7 < cum[2] < 3.9

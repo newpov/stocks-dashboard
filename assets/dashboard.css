@@ -1779,8 +1779,8 @@
 /* v3.6 what-if overlay */
 .leg-wi{display:none}
 .range-short .leg-wi{display:inline-flex}
-.leg-swatch.whatif{background:var(--accent)}
-.leg-swatch.blended{background:#7f77dd}
+.leg-swatch.whatif{background:#2dd4bf}
+.leg-swatch.blended{background:#c084fc}
 .whatif-chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
 .whatif-chip{font-size:.72rem;padding:2px 9px;border-radius:999px;border:1px solid var(--accent);color:var(--accent);background:transparent;cursor:pointer}
 .whatif-chip.unflagged{border-style:dashed;border-color:var(--text-dim);color:var(--text-dim)}
