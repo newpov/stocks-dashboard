@@ -14,6 +14,18 @@ than a barely-working prototype.
 
 ---
 
+## v3.6 — "What if" hero overlay · 17 July 2026
+
+A hindsight what-if tool built into the hero chart. Tick names on the watchlist and see what an equal-weight basket of them would have returned over the visible short-term window — and how it would have moved the existing basket. Deterministic, build-time, zero extra fetch; equal-weight and returns-only like everything else.
+
+- **What-if + blended lines (3M/1M only)** — two new hero legend toggles, both **off by default**, rendered only in the short-term window (the inverse of the All-only Nasdaq/industry overlays). **What if** (teal, dashed) is the equal-weight custom basket of the selected names, rebased to the window start. **Blended** (purple, dotted) is the existing basket combined with the selection — `(N·r_basket + k·r_custom)/(N+k)` per day, exact under the equal-weight model — answering "how would adding these have moved my basket". Both drive the y-scale and carry window-Δ end labels. `build_what_if_pool` / `build_what_if_payload`; client math (`computeWhatIfSeries` / `computeBlendedSeries`) mirrors the Python and is cross-checked by a reference test.
+- **Selection via the watchlist** — each watchlist card gains a "what if" checkbox; a compact chip row under the hero echoes the active set with ×-remove and a **+ add** picker. Selection persists in `localStorage` (`whatIfSelection`), so it survives daily rebuilds.
+- **90-day durability** — the payload pool is the current watchlist ∪ every non-owned name seen in `signal_history.parquet` within 90 days (cap 60). A name that drops out of the Value+BB flags stays plottable, its chip dimmed to "unflagged Nd ago"; after 90 days it ages out and the chip reads "no longer tracked" and is excluded from the math (never silently vanishes).
+- **Honesty framing** — a subtitle states it plainly: *"Hindsight view — what an equal-weight buy at window start would have returned. Not a forecast."* This is a backtest of names picked because they already looked good, not a prediction.
+- Built via subagent-driven TDD (engine tasks) + inline hero-JS wiring on branch `v3.6-whatif`. `tests/test_what_if.py` (18 tests); **448 tests** total. *(Browser-verified: window alignment WHATIF.dates === PORTFOLIO.short.dates, both lines render with finite math, dead-chip exclusion, localStorage persistence. Discovered the basket line is hardcoded amber `#f59e0b`, so what-if uses teal `#2dd4bf` / blended purple `#c084fc` to stay distinct rather than the mock's amber.)* Spec/plan in gitignored `temp/` (`what-if-spec.md`, `what-if-plan.md`).
+
+---
+
 ## v3.5 — Lintable CSS/JS assets (v2.9.7-lite) · 4 July 2026
 
 A maintainability release with **zero user-visible change** — and a deliberate

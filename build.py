@@ -4137,7 +4137,10 @@ def render_watchlist(watchlist_payload: dict, meta: pd.DataFrame) -> str:
             f'  <div class="wl-price"><span class="wl-latest">{latest_str}</span>{gbp_line}</div>'
             f'  <div class="wl-spark {cls}">{sparkline}</div>'
             f'  {verdict_html}{chips_html}{cite_html}'
-            f'  <div class="wl-foot"><span class="wl-period">12-month</span>{note_html}</div>'
+            f'  <div class="wl-foot">'
+            f'<label class="wl-wi-pick" title="Include in the what-if line">'
+            f'<input type="checkbox" data-wi-ticker="{_esc(tkr)}"> what if</label>'
+            f'<span class="wl-period">12-month</span>{note_html}</div>'
             f'</div>'
         )
     # v3.0 #4: arrow-paged so 6+ names don't spill into a 2nd row. Page size =
@@ -6941,7 +6944,7 @@ def build_data_payload(returns: pd.DataFrame, prices: pd.DataFrame,
     return payload
 
 
-def _hero_legend_html(has_nasdaq: bool, industries=None) -> str:
+def _hero_legend_html(has_nasdaq: bool, industries=None, what_if: bool = False) -> str:
     """Hero-chart legend items. Nasdaq + Industries are optional toggle buttons
     rendered only when their data is present; basket + SPY are fixed reference
     labels (they drive the vs-SPY area, delta badge and alpha sparkline, so they
@@ -6971,8 +6974,92 @@ def _hero_legend_html(has_nasdaq: bool, industries=None) -> str:
              f'{" &#9671; 12m" if e.get("kind") == "outlook" else ""}</span>')
             for e in industries)
         items.append(f'<span class="hero-ind-legend" hidden>{chips}</span>')
+    if what_if:
+        items.append(
+            '<button type="button" class="leg leg-toggle leg-wi" data-series="whatif" '
+            'aria-pressed="false" title="Equal-weight line of your selected '
+            'watchlist names (3M/1M only)">'
+            '<span class="leg-swatch whatif"></span>What if</button>')
+        items.append(
+            '<button type="button" class="leg leg-toggle leg-wi" data-series="blended" '
+            'aria-pressed="false" title="Existing basket blended with your '
+            'selection (3M/1M only)">'
+            '<span class="leg-swatch blended"></span>Blended</button>')
     items.append('<div class="leg"><span class="leg-swatch fx"></span>GBP/USD</div>')
     return "\n        ".join(items)
+
+
+# === v3.6 What-if: hindsight overlay of selected non-owned names ============
+WHATIF_POOL_MAX = 60    # payload cap; newest-flagged history names dropped first
+WHATIF_KEEP_DAYS = 90   # how long an unflagged name stays plottable
+
+
+def build_what_if_pool(watchlist_df, signal_history, owned,
+                       today, keep_days=WHATIF_KEEP_DAYS, cap=WHATIF_POOL_MAX):
+    """Selection pool: current combined watchlist (order kept) then names seen
+    in signal history within keep_days (newest last-flag first). Non-owned only.
+    Returns [{ticker, flagged_now, last_flagged, sources}]. Pure, never raises."""
+    owned = owned or set()
+    rows, seen = [], set()
+    hist_info = {}
+    if signal_history is not None and len(signal_history) > 0:
+        h = signal_history.copy()
+        h["date"] = pd.to_datetime(h["date"])
+        cutoff = pd.Timestamp(today) - pd.Timedelta(days=keep_days)
+        h = h[h["date"] >= cutoff]
+        for tkr, g in h.groupby("ticker"):
+            hist_info[str(tkr)] = {
+                "last": g["date"].max(),
+                "sources": sorted(set(str(s) for s in g["source"])),
+            }
+    if watchlist_df is not None and len(watchlist_df) > 0:
+        for tkr in watchlist_df["ticker"].astype(str):
+            if tkr in owned or tkr in seen:
+                continue
+            seen.add(tkr)
+            info = hist_info.get(tkr, {})
+            rows.append({"ticker": tkr, "flagged_now": True,
+                         "last_flagged": (info.get("last").strftime("%Y-%m-%d")
+                                          if info.get("last") is not None else ""),
+                         "sources": info.get("sources", [])})
+    extras = sorted((t for t in hist_info if t not in seen and t not in owned),
+                    key=lambda t: hist_info[t]["last"], reverse=True)
+    for tkr in extras:
+        rows.append({"ticker": tkr, "flagged_now": False,
+                     "last_flagged": hist_info[tkr]["last"].strftime("%Y-%m-%d"),
+                     "sources": hist_info[tkr]["sources"]})
+    return rows[:cap]
+
+
+def build_what_if_payload(pool, prices, short_dates, n_open, name_lookup=None):
+    """Per pool name: cumulative-return-% series over short_dates from the
+    GBP-converted daily prices frame. Requires a price at the first date and
+    >=80 percent coverage; small gaps ffilled. Pure, never raises."""
+    name_lookup = name_lookup or {}
+    out = {"dates": list(short_dates or []), "n_open": int(n_open or 0), "names": {}}
+    if not pool or prices is None or len(prices) == 0 or not short_dates:
+        return out
+    idx = pd.to_datetime(short_dates)
+    for p in pool:
+        tkr = p["ticker"]
+        if tkr not in prices.columns:
+            continue
+        s = prices[tkr].reindex(idx)
+        if s.notna().sum() < int(0.8 * len(idx)) or pd.isna(s.iloc[0]):
+            continue
+        s = s.ffill()
+        base = float(s.iloc[0])
+        if base <= 0:
+            continue
+        cum = [round((float(v) / base - 1.0) * 100.0, 4) for v in s]
+        out["names"][tkr] = {
+            "name": str(name_lookup.get(tkr, tkr)),
+            "cum": cum,
+            "flagged_now": bool(p.get("flagged_now")),
+            "last_flagged": p.get("last_flagged", ""),
+            "sources": list(p.get("sources", [])),
+        }
+    return out
 
 
 SHORT_TERM_DAYS = 95   # daily slice horizon for the 1M/3M hero view (v3.4 #3)
@@ -8585,8 +8672,21 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
         transactions, prices, meta, returns, industry_groups)
     _portfolio_payload["industries"] = _industry_overlay
     has_nasdaq = bool(_portfolio_payload.get("nasdaq", {}).get("values"))
-    hero_legend_html = _hero_legend_html(has_nasdaq, industries=_industry_overlay)
     portfolio_json = _json_for_script(_portfolio_payload, separators=(",", ":"))
+    # v3.6 what-if: hindsight overlay pool + series for selected watchlist names
+    _wi_owned = set(returns[returns.status == "open"].index) if not returns.empty else set()
+    _wi_pool = build_what_if_pool(_combined_watchlist, signal_history,
+                                  owned=_wi_owned, today=_ss_asof)
+    _wi_names = ({t: str(meta.loc[t, "name"]) for t in meta.index}
+                 if "name" in meta.columns else {})
+    what_if_payload = build_what_if_payload(
+        _wi_pool, prices, _portfolio_payload["short"]["dates"],
+        n_open=n_open, name_lookup=_wi_names)
+    whatif_json = _json_for_script(what_if_payload or {"dates": [], "n_open": 0, "names": {}},
+                                   separators=(",", ":"), ensure_ascii=False)
+    hero_legend_html = _hero_legend_html(
+        has_nasdaq, industries=_industry_overlay,
+        what_if=bool(what_if_payload and what_if_payload.get("names")))
     # T11/T12/T14/T15: aux payload for click-to-expand drill-down modals.
     # Reuses diversification_data (computed below) for the pair list -- this
     # block depends on it so we compute it inline first, then pass it.
@@ -8903,6 +9003,8 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
       <svg class="hero-chart-svg" id="hero-chart" preserveAspectRatio="none"></svg>
       <div class="hero-tip" id="hero-tip" hidden></div>
     </div>
+    <div id="whatif-chips" class="whatif-chips" hidden></div>
+    <div id="whatif-note" class="whatif-note" hidden>Hindsight view &mdash; what an equal-weight buy at window start would have returned. Not a forecast.</div>
     {alpha_sparkline_html}
     {dd_sparkline_html}
   </div>
@@ -9097,6 +9199,7 @@ const AUX_DATA = {aux_json};
 // load; a Next-tip button rotates without reloading.
 const POCKET_LESSONS = {pocket_lessons_json};
 const SHOCKWAVE = {shockwave_json};
+const WHATIF = {whatif_json};
 const RM_ANALYST = {rm_analyst_json};
 
 // v2.1 Quiz: 50-question pool, 5 categories x 10 questions. Schema:
