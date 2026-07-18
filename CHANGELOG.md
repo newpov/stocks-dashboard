@@ -14,6 +14,17 @@ than a barely-working prototype.
 
 ---
 
+## v3.6.1 — What-if polish + more Market-expectations topics · 18 July 2026
+
+A small follow-up to v3.6 (all author-flagged).
+
+- **What-if checkbox no longer opens the stock card.** The "what if" tick sits inside a watchlist card whose own click opens the modal, so ticking it also opened the card. The tick now stops the click bubbling — it only toggles the selection.
+- **More Kalshi topics in Market expectations.** Added Brent crude, natural gas, weekly jobless claims, and the 30-year mortgage rate to `predictions.csv` (the "Oil and energy" / "Econ Weekly" groups were previously uncovered — we only had recession, Fed, CPI, GDP, and unemployment). Energy markets are live now; the weekly-econ ones populate when Kalshi re-lists them.
+- **Prediction fetch now retries.** `_pred_http_get_json` makes up to `PRED_HTTP_ATTEMPTS = 3` attempts with a short backoff. Previously a single transient per-theme failure silently dropped that market from the pool — which is exactly why the new energy themes intermittently failed to appear (the docs build live-fetches every build, so a flaky call = a missing theme). The retry makes new and existing themes surface reliably.
+- The header version reads from the CHANGELOG's top heading, so this entry also lifts the displayed version to **v3.6.1** (matching the tag). `tests/test_predictions.py` gains retry tests.
+
+---
+
 ## v3.6 — "What if" hero overlay · 17 July 2026
 
 A hindsight what-if tool built into the hero chart. Tick names on the watchlist and see what an equal-weight basket of them would have returned over the visible short-term window — and how it would have moved the existing basket. Deterministic, build-time, zero extra fetch; equal-weight and returns-only like everything else.

@@ -283,3 +283,42 @@ def test_filter_horizon_non_exempt_far_still_dropped():
     out = build.filter_predictions_horizon(rows, max_days=90, now=_NOW,
                                            exempt_themes={"Something else"})
     assert out == []
+
+
+# --- v3.6.1: transient-failure retry in the predictions HTTP helper ----------
+
+def test_pred_http_retries_then_succeeds(monkeypatch):
+    calls = {"n": 0}
+
+    class _Resp:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): return b'{"ok": true}'
+
+    def _fake_urlopen(req, timeout=0):
+        calls["n"] += 1
+        if calls["n"] < 3:                       # fail twice, succeed on the 3rd
+            raise OSError("transient")
+        return _Resp()
+
+    import urllib.request
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
+    monkeypatch.setattr(build.time, "sleep", lambda *_: None)   # no real backoff wait
+    out = build._pred_http_get_json("http://x", attempts=3)
+    assert out == {"ok": True}
+    assert calls["n"] == 3                        # retried until success
+
+
+def test_pred_http_gives_up_after_attempts(monkeypatch):
+    calls = {"n": 0}
+
+    def _always_fail(req, timeout=0):
+        calls["n"] += 1
+        raise OSError("down")
+
+    import urllib.request
+    monkeypatch.setattr(urllib.request, "urlopen", _always_fail)
+    monkeypatch.setattr(build.time, "sleep", lambda *_: None)
+    out = build._pred_http_get_json("http://x", attempts=3)
+    assert out is None
+    assert calls["n"] == 3                        # exactly `attempts` tries, then None

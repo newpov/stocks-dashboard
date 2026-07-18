@@ -1519,16 +1519,28 @@ def load_prediction_themes() -> list[dict]:
     return out
 
 
-def _pred_http_get_json(url: str, timeout: int = 12):
-    """Stdlib GET -> parsed JSON, or None on any error (best-effort)."""
+PRED_HTTP_ATTEMPTS = 3   # v3.6.1: retry transient per-theme fetch failures so a
+                         # single flaky call (common in CI) doesn't silently drop
+                         # a theme from the Market-expectations pool.
+
+
+def _pred_http_get_json(url: str, timeout: int = 12, attempts: int = PRED_HTTP_ATTEMPTS):
+    """Stdlib GET -> parsed JSON, or None after `attempts` failures (best-effort).
+    Retries with a short linear backoff to survive transient network/API blips."""
     import urllib.request
-    try:
-        req = urllib.request.Request(url, headers={"User-Agent": "stocks-dashboard/1.0"})
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except Exception as e:
-        print(f"WARN predictions GET failed ({url}): {e}", file=sys.stderr)
-        return None
+    last_err = None
+    for i in range(max(1, attempts)):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "stocks-dashboard/1.0"})
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except Exception as e:
+            last_err = e
+            if i < attempts - 1:
+                time.sleep(0.6 * (i + 1))
+    print(f"WARN predictions GET failed after {attempts} tries ({url}): {last_err}",
+          file=sys.stderr)
+    return None
 
 
 def _parse_kalshi_market(m: dict, theme: str, series_ticker: str | None = None) -> dict | None:
