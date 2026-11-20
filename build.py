@@ -7017,6 +7017,422 @@ def _hero_legend_html(has_nasdaq: bool, industries=None, what_if: bool = False) 
     return "\n        ".join(items)
 
 
+# === v3.7 AI build-out: is the AI infrastructure spend self-funded, and how much of the basket rides on it ===
+# Cohort statements (capex, operating cash flow, debt) come from yfinance and are
+# upserted into a committed history file, because yfinance only exposes 5-7
+# quarters. The basket side reuses the page's own per-holding payload (industry,
+# returns, contribution) -- no extra fetch. Equal-weight, returns-only; the $ figures
+# are public company financials, never the author's money.
+AI_COHORT = ("MSFT", "GOOGL", "AMZN", "META", "ORCL", "CRWV")   # biggest AI capex spenders + leading neocloud
+AI_EXTRA_SPENDERS = ("GOOG", "NBIS")          # other share class / smaller neocloud, counted as spenders when held
+AI_GROUPS = (                                 # first match wins; "spend" matches by ticker, the rest by industry
+    {"key": "spend", "label": "Spenders", "why": "the AI spenders above: they buy the build-out", "industries": ()},
+    {"key": "chips", "label": "Chips", "why": "Semiconductors, semiconductor equipment",
+     "industries": ("Semiconductors", "Semiconductor Equipment & Materials")},
+    {"key": "hw", "label": "Data-centre hardware",
+     "why": "Computer hardware, communication equipment, electronic components",
+     "industries": ("Computer Hardware", "Communication Equipment", "Electronic Components")},
+    {"key": "power", "label": "Power & sites",
+     "why": "Independent power, electrical equipment, industrial machinery, data-centre REITs",
+     "industries": ("Utilities - Independent Power Producers", "Electrical Equipment & Parts",
+                    "Specialty Industrial Machinery", "REIT - Specialty")},
+)
+AI_EXCLUDE = {"QBTS": "quantum computing", "EOSE": "grid-scale batteries", "IRM": "mostly records storage"}
+AI_QUARTERS_SHOWN = 8          # trend length cap (history grows past yfinance's 5-7 quarters over time)
+AI_MIN_COMPANIES = 3           # fewer companies with 4+ quarters -> honest empty state
+AI_CAPEX_HISTORY = ROOT / "data" / "ai_capex_history.parquet"
+AI_HISTORY_COLS = ["ticker", "quarter_end", "capex", "ocf", "debt"]
+_AI_NUM_WORDS = {3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight"}
+
+
+def _ai_empty_history() -> pd.DataFrame:
+    return pd.DataFrame(columns=AI_HISTORY_COLS)
+
+
+def fetch_ai_capex_statements(tickers=AI_COHORT) -> pd.DataFrame:
+    """Quarterly capex (as positive spend), operating cash flow and total debt per
+    cohort company, in $. A failing ticker is skipped with an ASCII warning."""
+    rows = []
+    for t in tickers:
+        try:
+            tk = yf.Ticker(t)
+            cf, bs = tk.quarterly_cashflow, tk.quarterly_balance_sheet
+            if cf is None or "Capital Expenditure" not in cf.index or "Operating Cash Flow" not in cf.index:
+                raise KeyError("capex / operating cash flow not reported")
+            cap, ocf = cf.loc["Capital Expenditure"], cf.loc["Operating Cash Flow"]
+            debt = bs.loc["Total Debt"] if (bs is not None and "Total Debt" in bs.index) else pd.Series(dtype=float)
+            for qe in cf.columns:
+                c, o = cap.get(qe), ocf.get(qe)
+                if c is None or o is None or pd.isna(c) or pd.isna(o):
+                    continue
+                d = debt.get(qe) if len(debt) else None
+                rows.append({"ticker": t, "quarter_end": pd.Timestamp(qe).normalize(),
+                             "capex": abs(float(c)), "ocf": float(o),
+                             "debt": float(d) if d is not None and not pd.isna(d) else float("nan")})
+        except Exception as e:
+            msg = f"WARN AI capex: {t} skipped ({type(e).__name__}: {e})"
+            print(msg.encode("ascii", "replace").decode("ascii"), file=sys.stderr)
+    return pd.DataFrame(rows, columns=AI_HISTORY_COLS) if rows else _ai_empty_history()
+
+
+def merge_ai_capex_history(history, fresh) -> pd.DataFrame:
+    """Upsert fresh statements into the stored history; a restated quarter wins."""
+    parts = [df[AI_HISTORY_COLS] for df in (history, fresh) if df is not None and not df.empty]
+    if not parts:
+        return _ai_empty_history()
+    m = pd.concat(parts, ignore_index=True)
+    m["quarter_end"] = pd.to_datetime(m["quarter_end"])
+    m = m.drop_duplicates(subset=["ticker", "quarter_end"], keep="last")
+    return m.sort_values(["ticker", "quarter_end"]).reset_index(drop=True)
+
+
+def load_ai_capex_history(path=None) -> pd.DataFrame:
+    p = Path(path) if path else AI_CAPEX_HISTORY
+    if not p.exists():
+        return _ai_empty_history()
+    try:
+        df = pd.read_parquet(p)
+        if any(c not in df.columns for c in AI_HISTORY_COLS):
+            return _ai_empty_history()
+        df["quarter_end"] = pd.to_datetime(df["quarter_end"])
+        return df[AI_HISTORY_COLS].reset_index(drop=True)
+    except Exception as e:
+        print(f"WARN couldn't read AI capex history: {e}", file=sys.stderr)
+        return _ai_empty_history()
+
+
+def save_ai_capex_history(df: pd.DataFrame, path=None) -> None:
+    p = Path(path) if path else AI_CAPEX_HISTORY
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        df[AI_HISTORY_COLS].to_parquet(p, index=False)
+    except Exception as e:
+        print(f"WARN couldn't write AI capex history: {e}", file=sys.stderr)
+
+
+def _ai_qlabel(ts) -> str:
+    ts = pd.Timestamp(ts)
+    return f"Q{(ts.month - 1) // 3 + 1} '{ts.strftime('%y')}"
+
+
+def compute_ai_cohort(history, n_quarters: int = AI_QUARTERS_SHOWN,
+                      min_companies: int = AI_MIN_COMPANIES, cohort=AI_COHORT):
+    """Pure. Aggregate the cohort by each company's k-th latest reported quarter
+    (fiscal calendars differ, e.g. Oracle's quarter ends a month earlier). Only
+    companies with 4+ quarters (needed for trailing-year figures) are counted;
+    a total that would need a missing value is None rather than a partial sum."""
+    if history is None or len(history) == 0:
+        return None
+    h = history.copy()
+    h["quarter_end"] = pd.to_datetime(h["quarter_end"])
+    per = {}
+    for t in cohort:
+        rows = h[(h["ticker"] == t) & h["capex"].notna() & h["ocf"].notna()]
+        rows = rows.sort_values("quarter_end", ascending=False).reset_index(drop=True)
+        if len(rows) >= 4:
+            per[t] = rows
+    if len(per) < min_companies:
+        return None
+    n = min(n_quarters, min(len(r) for r in per.values()))
+
+    def bn(v):
+        return round(float(v) / 1e9, 1)
+
+    quarters = []
+    for k in range(n - 1, -1, -1):                       # oldest -> newest
+        cap = sum(float(r["capex"].iloc[k]) for r in per.values())
+        ocf = sum(float(r["ocf"].iloc[k]) for r in per.values())
+        debts = [r["debt"].iloc[k] for r in per.values()]
+        ends = [r["quarter_end"].iloc[k] for r in per.values()]
+        labels = [_ai_qlabel(e) for e in ends]
+        newest = _ai_qlabel(max(ends))
+        label = max(set(labels), key=lambda lb: (labels.count(lb), lb == newest))
+        quarters.append({
+            "label": label, "end": max(ends).strftime("%Y-%m-%d"),
+            "capex": bn(cap), "ocf": bn(ocf),
+            "ratio": round(cap / ocf * 100) if ocf > 0 else None,
+            "debt": None if any(pd.isna(d) for d in debts) else bn(sum(float(d) for d in debts)),
+        })
+    companies = []
+    for t, r in per.items():
+        c4, o4 = float(r["capex"].iloc[:4].sum()), float(r["ocf"].iloc[:4].sum())
+        d0 = r["debt"].iloc[0]
+        d1 = r["debt"].iloc[4] if len(r) > 4 else float("nan")
+        companies.append({"ticker": t, "capex_ttm": bn(c4),
+                          "ratio_ttm": round(c4 / o4 * 100) if o4 > 0 else None,
+                          "debt": None if pd.isna(d0) else bn(d0),
+                          "debt_1y": None if pd.isna(d1) else bn(d1)})
+    companies.sort(key=lambda c: -(c["ratio_ttm"] if c["ratio_ttm"] is not None else -1e9))
+    cap_t = sum(float(r["capex"].iloc[:4].sum()) for r in per.values())
+    ocf_t = sum(float(r["ocf"].iloc[:4].sum()) for r in per.values())
+    d_now = [c["debt"] for c in companies]
+    d_1y = [c["debt_1y"] for c in companies]
+    totals = {"capex_ttm": bn(cap_t), "ocf_ttm": bn(ocf_t),
+              "ratio_ttm": round(cap_t / ocf_t * 100) if ocf_t > 0 else None,
+              "debt": None if any(v is None for v in d_now) else round(sum(d_now), 1),
+              "debt_1y": None if any(v is None for v in d_1y) else round(sum(d_1y), 1)}
+    return {"quarters": quarters, "companies": companies, "totals": totals,
+            "n_companies": len(per), "missing": [t for t in cohort if t not in per],
+            "asof": max(r["quarter_end"].iloc[0] for r in per.values()).strftime("%Y-%m-%d")}
+
+
+def classify_ai_exposure(data: dict) -> dict:
+    """Pure. Which OPEN holdings ride the AI build-out, by the page's own industry
+    labels (spenders by ticker), and what share of the open positions' combined
+    return they account for. The share is None whenever the sign would make a
+    percentage meaningless (open total <= 0, or the AI part outside 0-100%)."""
+    data = data or {}
+    spenders = set(AI_COHORT) | set(AI_EXTRA_SPENDERS)
+    open_t = [t for t, d in data.items() if isinstance(d, dict) and d.get("status") == "open"]
+    members = {g["key"]: [] for g in AI_GROUPS}
+    excluded = []
+    for t in open_t:
+        if t in AI_EXCLUDE:
+            excluded.append((t, AI_EXCLUDE[t]))
+            continue
+        if t in spenders:
+            members["spend"].append(t)
+            continue
+        ind = str(data[t].get("industry") or "").strip()
+        for g in AI_GROUPS[1:]:
+            if ind in g["industries"]:
+                members[g["key"]].append(t)
+                break
+
+    def num(v):
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return None
+        return f if f == f else None
+
+    def tot(t):
+        return num(data[t].get("total")) or 0.0
+
+    def con(t):
+        return num(data[t].get("contribution")) or 0.0
+
+    def mean_m1(ts):
+        vals = [v for v in (num(data[t].get("m1")) for t in ts) if v is not None]
+        return sum(vals) / len(vals) if vals else None
+
+    ai = [t for g in AI_GROUPS for t in members[g["key"]]]
+    rest = [t for t in open_t if t not in ai]
+    c_ai, c_rest = sum(con(t) for t in ai), sum(con(t) for t in rest)
+    c_open = c_ai + c_rest
+    share = c_ai / c_open * 100 if c_open > 0 else None
+    if share is not None and not (0 <= share <= 100):
+        share = None
+    groups = []
+    for g in AI_GROUPS:
+        ts = sorted(members[g["key"]], key=lambda t: -tot(t))
+        groups.append({"key": g["key"], "label": g["label"], "why": g["why"], "tickers": ts, "n": len(ts),
+                       "avg_total": (sum(tot(t) for t in ts) / len(ts)) if ts else None,
+                       "contrib_share": (sum(con(t) for t in ts) / c_open * 100) if (ts and c_open > 0) else None})
+    return {"groups": groups, "ai_tickers": ai, "n_ai": len(ai), "n_open": len(open_t),
+            "share_positions": (len(ai) / len(open_t) * 100) if open_t else 0.0,
+            "contrib_ai": c_ai, "contrib_rest": c_rest, "contrib_share": share,
+            "m1_ai": mean_m1(ai), "m1_rest": mean_m1(rest),
+            "excluded": sorted(excluded),
+            "returns": {t: tot(t) for t in ai},
+            "names": {t: str(data[t].get("name") or t) for t in ai},
+            "industries": {t: str(data[t].get("industry") or "") for t in ai}}
+
+
+def _ai_pct(v) -> str:
+    if v is None:
+        return "n/a"
+    s = f"{v:+.0f}%" if abs(v) >= 100 else f"{v:+.1f}%"
+    return s.replace("-", "&minus;")
+
+
+def _ai_pts(v) -> str:
+    return f"{v:+.1f}".replace("-", "&minus;")
+
+
+def _ai_exposure_sentence(e: dict) -> str:
+    if not e["n_open"]:
+        return "There are no open positions to compare."
+    s = (f'<b>{e["n_ai"]} of your {e["n_open"]} open names</b> ({e["share_positions"]:.0f}%) '
+         f'ride the AI build-out')
+    if e["contrib_share"] is not None:
+        return s + (f', and they account for <b>{e["contrib_share"]:.0f}%</b> of your open '
+                    f'positions&rsquo; combined return.')
+    return s + (f' &mdash; they added {_ai_pts(e["contrib_ai"])} pts of return, '
+                f'your other names {_ai_pts(e["contrib_rest"])} pts.')
+
+
+def _ai_chart_svg(quarters: list) -> str:
+    W, H, pb, pt = 380, 210, 28, 22
+    top = max(max(q["capex"], q["ocf"]) for q in quarters) * 1.12 or 1.0
+
+    def y(v):
+        return H - pb - (v / top) * (H - pb - pt)
+
+    step = 200 if top > 600 else 100 if top > 200 else 50 if top > 80 else 10
+    out = [f'<svg class="aib-chart" id="aib-chart" viewBox="0 0 {W} {H}" role="img" '
+           f'aria-label="Quarterly capex versus operating cash flow for the AI-spender cohort">']
+    v = 0
+    while v <= top:
+        out.append(f'<line class="g" x1="34" x2="{W}" y1="{y(v):.1f}" y2="{y(v):.1f}"/>'
+                   f'<text class="ax" x="30" y="{y(v) + 4:.1f}" text-anchor="end">{v}</text>')
+        v += step
+    gw = (W - 40) / len(quarters)
+    for i, q in enumerate(quarters):
+        x0, bw = 40 + i * gw + gw * 0.16, gw * 0.32
+        over = q["ratio"] is not None and q["ratio"] > 100
+        out.append(f'<rect class="c" x="{x0:.1f}" y="{y(q["capex"]):.1f}" width="{bw:.1f}" '
+                   f'height="{y(0) - y(q["capex"]):.1f}" rx="2"/>')
+        out.append(f'<rect class="o" x="{x0 + bw + 3:.1f}" y="{y(q["ocf"]):.1f}" width="{bw:.1f}" '
+                   f'height="{y(0) - y(q["ocf"]):.1f}" rx="2"/>')
+        out.append(f'<text class="ql" x="{x0 + bw:.1f}" y="{H - 9}" text-anchor="middle">{_esc(q["label"])}</text>')
+        if q["ratio"] is not None:
+            out.append(f'<text class="rl{" over" if over else ""}" x="{x0 + bw:.1f}" '
+                       f'y="{min(y(q["capex"]), y(q["ocf"])) - 6:.1f}" text-anchor="middle">{q["ratio"]}%</text>')
+        tip = [q["label"], f'Capex ${q["capex"]:.1f}bn', f'Cash flow ${q["ocf"]:.1f}bn']
+        if q["ratio"] is not None:
+            tip.append(f'{q["ratio"]}% of cash flow')
+        if q["debt"] is not None:
+            tip.append(f'Debt ${q["debt"]:.0f}bn')
+        cx = min(82, max(18, (40 + (i + 0.5) * gw) / W * 100))
+        out.append(f'<rect class="aib-hit" x="{40 + i * gw:.1f}" y="0" width="{gw:.1f}" height="{H}" '
+                   f'data-x="{cx:.0f}" data-tip="{_esc("|".join(tip))}"><title>{_esc(" - ".join(tip))}</title></rect>')
+    out.append("</svg>")
+    return "".join(out)
+
+
+def render_ai_buildout(cohort, exposure) -> str:
+    """Pure HTML for the AI build-out module (escaped). Chips and held cohort rows
+    use the page's generic `.ticker-clickable[data-ticker]` modal handler."""
+    e = exposure or classify_ai_exposure({})
+    head = ('<div class="aib-head"><h3>AI build-out</h3><span class="aib-sub">who&rsquo;s spending '
+            '&middot; how it&rsquo;s funded &middot; your exposure</span></div>')
+    if cohort is None:
+        body = ('<p class="aib-empty">Spending data for the AI cohort arrives after the next live build '
+                '(pulled from company filings and kept in a history file). ')
+        if e["n_open"]:
+            body += _ai_exposure_sentence(e)
+        return f'<section class="aib-section">{head}{body}</p></section>'
+
+    q, t = cohort["quarters"], cohort["totals"]
+    last, first = q[-1], q[0]
+    over = last["ratio"] is not None and last["ratio"] > 100
+    mult = (t["debt"] / t["debt_1y"]) if (t["debt"] and t["debt_1y"]) else None
+    word = _AI_NUM_WORDS.get(cohort["n_companies"], str(cohort["n_companies"]))
+
+    def ratio_txt(r):
+        return "n/a" if r is None else f"{r}%"
+
+    # --- tiles ---
+    spark = "".join(
+        f'<i class="{"over" if (d["ratio"] or 0) > 100 else ""}" '
+        f'style="height:{max(3, round((d["ratio"] or 0) / 130 * 22))}px"></i>' for d in q)
+    pill = '<span class="aib-pill">debt-funded</span>' if over else ''
+    sub1 = f'{ratio_txt(first["ratio"])} in {_esc(first["label"])}'
+    if mult:
+        sub1 += f' &middot; debt {mult:.1f}&times; to ${t["debt"]:.0f}bn'
+    tile1 = (f'<button type="button" class="aib-tile" aria-expanded="false" aria-controls="aib-detail">'
+             f'<span class="aib-lbl">AI capex vs cash flow{pill}</span>'
+             f'<span class="aib-val"><span class="{"aib-warn" if over else ""}">{ratio_txt(last["ratio"])}</span>'
+             f'<small>in {_esc(last["label"])}</small></span>'
+             f'<span class="aib-spark" aria-hidden="true">{spark}</span><span class="aib-tsub">{sub1}</span></button>')
+    if e["contrib_share"] is not None:
+        sub2 = f'{e["contrib_share"]:.0f}% of your open positions&rsquo; combined return'
+    elif e["n_open"]:
+        sub2 = f'{_ai_pts(e["contrib_ai"])} pts of return vs {_ai_pts(e["contrib_rest"])} pts for the rest'
+    else:
+        sub2 = "no open positions"
+    tile2 = (f'<button type="button" class="aib-tile" aria-expanded="false" aria-controls="aib-detail">'
+             f'<span class="aib-lbl">Your AI-cycle exposure</span>'
+             f'<span class="aib-val">{e["n_ai"]}<small>of {e["n_open"]} names</small></span>'
+             f'<span class="aib-tsub">{sub2}</span></button>')
+    m1a, m1r = e["m1_ai"], e["m1_rest"]
+    cls3 = "" if m1a is None else ("aib-pos" if m1a >= 0 else "aib-neg")
+    tile3 = (f'<button type="button" class="aib-tile" aria-expanded="false" aria-controls="aib-detail">'
+             f'<span class="aib-lbl">AI names &middot; past month</span>'
+             f'<span class="aib-val"><span class="{cls3}">{_ai_pct(m1a)}</span><small>equal-weight</small></span>'
+             f'<span class="aib-tsub">vs {_ai_pct(m1r)} for your other names</span></button>')
+
+    # --- detail ---
+    if over:
+        headline = (f'The {word} biggest AI spenders now invest <em>more cash than their businesses make</em>'
+                    + (' &mdash; and borrow the difference.' if mult and mult > 1 else '.'))
+    else:
+        headline = (f'The {word} biggest AI spenders now put <em>{ratio_txt(last["ratio"])} of their operating '
+                    f'cash flow</em> into capex.')
+    dsub = (f'Capex was {ratio_txt(last["ratio"])} of operating cash flow in {_esc(last["label"])} '
+            f'({ratio_txt(t["ratio_ttm"])} over the past four quarters), versus {ratio_txt(first["ratio"])} '
+            f'in {_esc(first["label"])}.')
+    if t["debt"] is not None and t["debt_1y"] is not None:
+        dsub += f' Combined debt went from ${t["debt_1y"]:.0f}bn to ${t["debt"]:.0f}bn in a year.'
+    if cohort["missing"]:
+        dsub += (f' {cohort["n_companies"]} of {len(AI_COHORT)} companies have enough reported quarters '
+                 f'(missing: {_esc(", ".join(cohort["missing"]))}).')
+
+    held = set(e["ai_tickers"])
+    rows = []
+    for c in cohort["companies"]:
+        ch = (c["debt"] / c["debt_1y"] - 1) if (c["debt"] is not None and c["debt_1y"]) else None
+        ch_cls = "" if ch is None else ("aib-neg" if ch > 0.5 else "aib-pos" if ch < 0 else "")
+        ch_txt = "&ndash;" if ch is None else f"{ch * 100:+.0f}%".replace("-", "&minus;")
+        tk = _esc(c["ticker"])
+        tr = (f'<tr class="aib-held ticker-clickable" data-ticker="{tk}" title="Open {tk} detail">'
+              if c["ticker"] in held else '<tr>')
+        you = '<span class="aib-you">you hold</span>' if c["ticker"] in held else ''
+        rows.append(f'{tr}<td class="aib-tk">{tk}{you}</td><td>${c["capex_ttm"]:.0f}bn</td>'
+                    f'<td class="{"aib-warn" if (c["ratio_ttm"] or 0) > 100 else ""}">{ratio_txt(c["ratio_ttm"])}</td>'
+                    f'<td>{"&ndash;" if c["debt"] is None else "$" + format(c["debt"], ".0f") + "bn"}</td>'
+                    f'<td class="{ch_cls}">{ch_txt}</td></tr>')
+    tot_ch = "&ndash;" if not mult else f"{(mult - 1) * 100:+.0f}%".replace("-", "&minus;")
+    rows.append(f'<tr class="aib-tot"><td>All {word}</td><td>${t["capex_ttm"]:.0f}bn</td>'
+                f'<td class="{"aib-warn" if (t["ratio_ttm"] or 0) > 100 else ""}">{ratio_txt(t["ratio_ttm"])}</td>'
+                f'<td>{"&ndash;" if t["debt"] is None else "$" + format(t["debt"], ".0f") + "bn"}</td>'
+                f'<td class="{"aib-neg" if mult and mult > 1.5 else ""}">{tot_ch}</td></tr>')
+    table = ('<table><thead><tr><th>Company</th><th>Capex</th><th>vs cash</th><th>Debt</th><th>1y</th></tr></thead>'
+             f'<tbody id="aib-cohort">{"".join(rows)}</tbody></table>')
+
+    groups = []
+    for g in e["groups"]:
+        if not g["n"]:
+            continue
+        chips = "".join(
+            f'<button type="button" class="aib-chip ticker-clickable{" sp" if g["key"] == "spend" else ""}" '
+            f'data-ticker="{_esc(tk)}" title="{_esc(e["names"].get(tk, tk))} &middot; {_esc(e["industries"].get(tk, ""))}">'
+            f'{_esc(tk)} <span class="{"aib-pos" if e["returns"].get(tk, 0) >= 0 else "aib-neg"}">'
+            f'{_ai_pct(e["returns"].get(tk, 0))}</span></button>' for tk in g["tickers"])
+        share = f' &middot; {g["contrib_share"]:.0f}% of open return' if g["contrib_share"] is not None else ''
+        avg = g["avg_total"] or 0.0
+        groups.append(f'<div class="aib-group"><div class="aib-g-head"><span class="aib-g-name">{_esc(g["label"])} '
+                      f'&middot; {g["n"]}</span><span class="aib-g-stat">avg <span class="{"aib-pos" if avg >= 0 else "aib-neg"}">'
+                      f'{_ai_pct(avg)}</span>{share}</span></div><p class="aib-g-why">{_esc(g["why"])}</p>'
+                      f'<div class="aib-chips">{chips}</div></div>')
+    excl = ""
+    if e["excluded"]:
+        excl = ('<p class="aib-excl">Not counted, though their industry matches: '
+                + ", ".join(f'{_esc(tk)} ({_esc(why)})' for tk, why in e["excluded"]) + '.</p>')
+    asof_txt = pd.Timestamp(cohort["asof"]).strftime("%d %b %Y")
+    fine = (f'Company statements to {_esc(asof_txt)}: quarterly, so the cohort figures move after '
+            'earnings, not daily. Source: company filings via Yahoo Finance; quarters aligned by each '
+            "company&rsquo;s latest report (fiscal calendars differ). Your names and returns come from this page; "
+            'AI-cycle membership follows its industry labels. Not investment advice.')
+
+    detail = (f'<div class="aib-detail" id="aib-detail" hidden>'
+              f'<button type="button" class="aib-close" id="aib-close" aria-label="Close detail">&times;</button>'
+              f'<p class="aib-headline">{headline}</p><p class="aib-dsub">{dsub}</p>'
+              f'<div class="aib-grid"><div class="aib-card"><h4>Capex vs operating cash flow &middot; per quarter, $bn</h4>'
+              f'<div class="aib-chartwrap">{_ai_chart_svg(q)}<div class="aib-tip" id="aib-tip" hidden></div></div>'
+              f'<div class="aib-legend"><span><i class="c"></i>Capex</span><span><i class="o"></i>Operating cash flow</span>'
+              f'<span class="aib-hint">hover or tap a quarter</span></div></div>'
+              f'<div class="aib-card"><h4>The {word} spenders &middot; trailing four quarters</h4>'
+              f'<div class="aib-tbl">{table}</div></div></div>'
+              f'<div class="aib-card aib-you-card"><h4>Your AI-cycle names</h4><p class="aib-you-sum">'
+              f'{_ai_exposure_sentence(e)} Suppliers&rsquo; sales <em>are</em> the spenders&rsquo; capex, so a '
+              f'pullback would reach them first.</p><div class="aib-groups" id="aib-groups">{"".join(groups)}</div>{excl}</div>'
+              f'<p class="aib-fine">{fine}</p></div>')
+    return (f'<section class="aib-section">{head}<div class="aib-tiles">{tile1}{tile2}{tile3}</div>'
+            f'{detail}</section>')
+
+
 # === v3.6 What-if: hindsight overlay of selected non-owned names ============
 WHATIF_POOL_MAX = 60    # payload cap; newest-flagged history names dropped first
 WHATIF_KEEP_DAYS = 90   # how long an unflagged name stays plottable
@@ -8012,7 +8428,8 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
                 value_rows: "list[dict] | None" = None,
                 auto_tickers: "list[str] | None" = None,
                 stress_factors: "list[dict] | None" = None,
-                signal_history: "pd.DataFrame | None" = None) -> str:
+                signal_history: "pd.DataFrame | None" = None,
+                ai_capex_history: "pd.DataFrame | None" = None) -> str:
     weekly = prices.resample("W-FRI").last().ffill()
     defs_html = render_svg_defs()
     # v3.1 #1: per-module "as of" dates. Price/return-derived modules (detractors,
@@ -8745,11 +9162,16 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     rating_moves_html = render_rating_moves(rating_moves or [], prior_analyst_exists,
                                             baseline_date=rating_baseline_date,
                                             baseline_seeded=rating_baseline_seeded)
+    # v3.7 AI build-out: cohort capex/cash-flow/debt + the basket's AI-cycle exposure,
+    # placed after the Outlook+News pair and before Market expectations (author's call).
+    ai_buildout_html = render_ai_buildout(compute_ai_cohort(ai_capex_history),
+                                          classify_ai_exposure(data_dict))
     _module_defs = [
         ("bigbrain", "Big Brain says", bigbrain_html),
         ("value_screen", "Value screen", value_html),
         ("outlook", "Industry outlook", industry_html),
         ("news", "News", news_html),
+        ("ai_buildout", "AI build-out", ai_buildout_html),
         ("predictions", "Market expectations", market_expectations_html),
         ("holdings", "Holdings", holdings_html),
         ("analyst", "Re-entry ideas", analyst_html),
@@ -9656,6 +10078,18 @@ def main(demo: bool = False, watchlist_only: bool = False,
         print(f"Market expectations: {len(prediction_rows)} markets "
               f"({'live' if not demo else 'cached'})")
 
+    # v3.7 AI build-out: cohort statements upserted into a committed history (live
+    # build only; the demo reads the stored history, like predictions read their cache).
+    ai_capex_history = load_ai_capex_history()
+    if not demo:
+        _ai_fresh = fetch_ai_capex_statements()
+        if not _ai_fresh.empty:
+            ai_capex_history = merge_ai_capex_history(ai_capex_history, _ai_fresh)
+            save_ai_capex_history(ai_capex_history)
+    print(f"AI build-out: {ai_capex_history['ticker'].nunique() if not ai_capex_history.empty else 0} "
+          f"cohort companies, {len(ai_capex_history)} quarter rows "
+          f"({'live' if not demo else 'stored'})")
+
     # v2.2 Big Brain: universe discovery lane (shortlist + deepen)
     bb_universe_obs = []
     auto_value_rows = None          # v3.0 #5: value_rows shared with render_html
@@ -9764,7 +10198,8 @@ def main(demo: bool = False, watchlist_only: bool = False,
                        value_rows=auto_value_rows,
                        auto_tickers=auto_tickers,
                        stress_factors=stress_factors,
-                       signal_history=signal_history)
+                       signal_history=signal_history,
+                       ai_capex_history=ai_capex_history)
 
     out_path = DEMO_OUT_HTML if demo else OUT_HTML
     out_path.parent.mkdir(parents=True, exist_ok=True)

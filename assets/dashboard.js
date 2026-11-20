@@ -2750,3 +2750,37 @@ function safeUrl(u) {
 }
 
 refreshNewsFromWorker();
+
+// v3.7 AI build-out: any tile toggles the detail panel; quarter bars show a tooltip.
+// Names and held cohort rows open the stock modal via the generic
+// .ticker-clickable[data-ticker] handler, so nothing modal-specific lives here.
+(function setupAiBuildout() {
+  const detail = document.getElementById('aib-detail');
+  if (!detail) return;
+  const tiles = document.querySelectorAll('.aib-tile');
+  const setOpen = (open) => {
+    detail.hidden = !open;
+    tiles.forEach(t => t.setAttribute('aria-expanded', open ? 'true' : 'false'));
+  };
+  tiles.forEach(t => t.addEventListener('click', () => setOpen(detail.hidden)));
+  const close = document.getElementById('aib-close');
+  if (close) close.addEventListener('click', () => setOpen(false));
+  const tip = document.getElementById('aib-tip');
+  const chart = document.getElementById('aib-chart');
+  if (!tip || !chart) return;
+  chart.querySelectorAll('.aib-hit').forEach(r => {
+    const show = () => {
+      tip.textContent = '';
+      (r.dataset.tip || '').split('|').forEach((line, i) => {
+        const el = document.createElement(i ? 'div' : 'b');
+        el.textContent = line;
+        tip.appendChild(el);
+      });
+      tip.style.left = (r.dataset.x || 50) + '%';
+      tip.hidden = false;
+    };
+    r.addEventListener('mouseenter', show);
+    r.addEventListener('click', show);
+    r.addEventListener('mouseleave', () => { tip.hidden = true; });
+  });
+})();

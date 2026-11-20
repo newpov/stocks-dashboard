@@ -14,6 +14,19 @@ than a barely-working prototype.
 
 ---
 
+## v3.7 — "AI build-out" module · 20 November 2026
+
+A topic-specific module asking two questions: is the AI infrastructure build-out still self-funded, and how much of the basket rides on it? Shaped over three prototype rounds; the author chose a standalone stack module placed after Industry outlook · News and before Market expectations (it drags, hides and persists like any module).
+
+- **Cohort spending vs cash flow.** For Microsoft, Alphabet, Amazon, Meta, Oracle and CoreWeave, quarterly capex as a share of operating cash flow, plus combined debt. Above 100% the spenders invest more cash than their businesses make, and the gap is borrowed. At launch: **63% → 120%** over five quarters, combined debt **$404bn → $808bn** in a year.
+- **Your AI-cycle exposure.** Open positions grouped by the page's own industry labels (Spenders, Chips, Data-centre hardware, Power & sites), with a short exclusion list for names whose industry matches but whose business mostly isn't AI. Reports how many names that is and what share of the open positions' combined equal-weight return they account for (worded in points instead whenever the sign would make a percentage meaningless).
+- **AI names · past month** — the AI-cycle names' equal-weight 1-month return against the rest of the basket: the one part that moves daily, since the statements move quarterly.
+- Three tiles stay visible; tapping one opens the detail (quarterly chart with tooltips, cohort table, every AI-cycle name as a chip that opens its stock card through the existing modal handler).
+- **Data.** Statements come from yfinance on the live build only. Because yfinance exposes just 5–7 quarters, each build upserts them into a new `data/ai_capex_history.parquet` (public company data), so the trend grows over time. A failing company is skipped with a warning; no data at all shows an honest empty state. Quarters are aligned by each company's latest report (fiscal calendars differ).
+- **Tests.** `tests/test_ai_buildout.py` (22, no network). The v3.5 asset guard now checks its real intent — no single string literal in `build.py` big enough to be a re-embedded CSS/JS block — instead of a total line count that also tripped on ordinary feature code.
+
+---
+
 ## v3.6.2 — Kalshi feed restored, chart fix, new title · 20 November 2026
 
 A maintenance patch (all author-flagged).
