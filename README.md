@@ -29,9 +29,9 @@ minutes of setup.
 
 ## Demo
 
-<!-- Walkthrough video: upload temp/walkthrough.webm by dragging it into this file's editor on
-     github.com, then replace this comment with the github.com/user-attachments/... link it inserts
-     (on its own line, so GitHub renders an inline player). -->
+**A 70-second tour**, shown on the sample portfolio:
+
+https://github.com/user-attachments/assets/92b0ee03-ea56-4baa-a94e-351abc094ea9
 
 Want to see what the dashboard looks like without forking or running anything?
 Grab **[`demo.html`](demo.html)** from this repo and double-click it to open
