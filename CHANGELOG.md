@@ -14,6 +14,25 @@ than a barely-working prototype.
 
 ---
 
+## v3.8 — "Neon Coast" skin · 20 November 2026
+
+A fifth stop on the palette button: an 80s neon-coast sunset look.
+
+### Added
+- **Neon Coast palette.** Deep purple background with a sunset glow, hot-pink
+  accent, cyan gains and orange-red losses (three distinct hues, so up/down
+  never read as the accent). On desktop a striped sun sets behind the hero
+  card next to a palm silhouette; the title switches to a condensed poster
+  typeface (Anton, fetched only when this palette is chosen) and the hero's
+  basket line gets a soft neon glow. Pure CSS decoration; phones skip the
+  sun and palm.
+- **"New skin" card for a week.** A small card (bottom-right; full-width on
+  phones) announces Neon Coast with a **Try it** button. It disappears on its
+  own after 27 November 2026 (checked in the browser, no rebuild needed), and
+  stays gone once dismissed, tried, or reached with the palette dot.
+- The hero's basket-line colour now comes from the palette (`--hero-basket`),
+  so a skin can recolour it; every other palette keeps the original amber.
+
 ## v3.7.1 — 2026-11-20
 
 Small fixes to the mobile layout, Market expectations and Shockwave.

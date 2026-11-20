@@ -220,7 +220,9 @@ function renderHeroChart() {
 
   const basketEnd = basket.vals[basket.vals.length - 1];
   const spyEnd = spy.vals.length ? spy.vals[spy.vals.length - 1] : 0;
-  const basketColor = '#f59e0b';
+  // v3.8: from the palette (--hero-basket), so a skin can recolour the line;
+  // every palette except Neon Coast keeps the original amber.
+  const basketColor = getComputedStyle(document.body).getPropertyValue('--hero-basket').trim() || '#f59e0b';
   const spyColor = '#6b7185';
   const whatifColor = '#2dd4bf';    // teal — distinct from the amber basket
   const blendedColor = '#c084fc';   // purple — basket blended with the selection
@@ -452,7 +454,7 @@ function renderHeroChart() {
     html += `<polyline points="${pl}" fill="none" stroke="${blendedColor}" stroke-width="1.8" stroke-dasharray="2 4" stroke-linejoin="round"/>`;
   }
   // Basket line
-  html += `<polyline points="${basketPL}" fill="none" stroke="${basketColor}" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"/>`;
+  html += `<polyline class="hero-basket-line" points="${basketPL}" fill="none" stroke="${basketColor}" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"/>`;
   // v2.7: last-completed fiscal-year return (top-left, on top of the line).
   if (isAll) html += fyStatHtml;   // v3.4 #3: since-inception only
 
@@ -1999,19 +2001,33 @@ document.getElementById('hero-chart').addEventListener('click', (e) => {
 // still apply correctly.
 (function setupPalette() {
   const PALETTE_KEY = 'stocks-dashboard-palette';
-  const ORDER = ['default', 'softdark', 'light', 'bloomberg'];
-  const LABELS = {default: 'Default', softdark: 'Soft Dark', light: 'Light', bloomberg: 'Amber'};
+  const ORDER = ['default', 'softdark', 'light', 'bloomberg', 'neon'];
+  const LABELS = {default: 'Default', softdark: 'Soft Dark', light: 'Light', bloomberg: 'Amber', neon: 'Neon Coast'};
+  // v3.8: Neon Coast's poster type (Anton) is fetched only when the skin is
+  // applied, so visitors on the other palettes never download it.
+  function loadNeonFont() {
+    if (document.getElementById('neon-font')) return;
+    const l = document.createElement('link');
+    l.id = 'neon-font'; l.rel = 'stylesheet';
+    l.href = 'https://fonts.googleapis.com/css2?family=Anton&display=swap';
+    document.head.appendChild(l);
+  }
   const btn = document.getElementById('palette-cycle-btn');
   if (!btn) return;
   function apply(name) {
-    document.body.classList.remove('palette-softdark','palette-light','palette-bloomberg');
+    document.body.classList.remove('palette-softdark','palette-light','palette-bloomberg','palette-neon');
     if (name && name !== 'default') document.body.classList.add('palette-' + name);
+    if (name === 'neon') loadNeonFont();
+    // the hero bakes its line colour into SVG attributes -> redraw on switch
+    if (typeof renderHeroChart === 'function') { try { renderHeroChart(); } catch (e) { /* hero absent */ } }
     // v2.1: button is icon-only; the human-readable name now lives in the
     // data-tooltip attribute (which drives the CSS hover tooltip).
     btn.dataset.tooltip = LABELS[name] || 'Default';
     btn.dataset.palette = name;
     try { localStorage.setItem(PALETTE_KEY, name); } catch (e) { /* private mode */ }
+    document.dispatchEvent(new CustomEvent('palettechange', {detail: name}));
   }
+  window.applyPalette = apply;   // v3.8: used by the Neon Coast promo card
   const saved = (() => { try { return localStorage.getItem(PALETTE_KEY); } catch (e) { return null; } })();
   apply(ORDER.includes(saved) ? saved : 'default');
   btn.addEventListener('click', () => {
@@ -2019,6 +2035,48 @@ document.getElementById('hero-chart').addEventListener('click', (e) => {
     const next = ORDER[(ORDER.indexOf(current) + 1) % ORDER.length];
     apply(next);
   });
+})();
+
+// v3.8: one-week "new skin" card announcing Neon Coast. Built with
+// createElement/textContent (no innerHTML). Expiry is checked in the browser,
+// so the card disappears on its own after NEON_PROMO_UNTIL without a rebuild.
+// Hidden once dismissed (x or Try it, remembered in localStorage) and while
+// Neon Coast is already the active palette.
+(function setupNeonPromo() {
+  const NEON_PROMO_UNTIL = '2026-11-27T23:59:59Z';
+  const KEY = 'neonPromoDismissed';
+  if (Date.now() > Date.parse(NEON_PROMO_UNTIL)) return;
+  let dismissed = false;
+  try { dismissed = localStorage.getItem(KEY) === '1'; } catch (e) { /* private mode */ }
+  if (dismissed || typeof window.applyPalette !== 'function') return;
+  if (document.body.classList.contains('palette-neon')) return;
+
+  const card = document.createElement('aside');
+  card.className = 'neon-promo';
+  card.setAttribute('role', 'status');
+  card.setAttribute('aria-label', 'New skin available');
+  const sw = document.createElement('span'); sw.className = 'neon-promo-swatch'; sw.setAttribute('aria-hidden', 'true');
+  const txt = document.createElement('div'); txt.className = 'neon-promo-text';
+  const eb = document.createElement('div'); eb.className = 'neon-promo-eyebrow'; eb.textContent = 'New skin';
+  const ttl = document.createElement('div'); ttl.className = 'neon-promo-title'; ttl.textContent = 'Neon Coast';
+  const sub = document.createElement('div'); sub.className = 'neon-promo-sub';
+  sub.textContent = 'An 80s sunset look. Switch any time with the palette dot.';
+  txt.append(eb, ttl, sub);
+  const tryBtn = document.createElement('button'); tryBtn.type = 'button';
+  tryBtn.className = 'neon-promo-try'; tryBtn.textContent = 'Try it';
+  const close = document.createElement('button'); close.type = 'button';
+  close.className = 'neon-promo-close'; close.setAttribute('aria-label', 'Dismiss'); close.textContent = '×';
+  card.append(sw, txt, tryBtn, close);
+
+  function hide() {
+    try { localStorage.setItem(KEY, '1'); } catch (e) { /* private mode */ }
+    card.remove();
+  }
+  tryBtn.addEventListener('click', () => { window.applyPalette('neon'); hide(); });
+  close.addEventListener('click', hide);
+  // cycling onto Neon Coast with the palette dot counts as trying it
+  document.addEventListener('palettechange', (e) => { if (e.detail === 'neon') hide(); });
+  document.body.appendChild(card);
 })();
 
 // v2.1 Quiz feature. Opens via topbar Quiz button -> presents one question
