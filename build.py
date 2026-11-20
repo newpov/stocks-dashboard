@@ -1587,19 +1587,29 @@ def _kalshi_expiry(m: dict) -> str:
 
 def _kalshi_pick_active(markets: list[dict], theme: str,
                         series_ticker: str | None = None) -> dict | None:
-    """Among a series' markets, pick the soonest market whose expiry is in the
-    future (the currently-relevant one), parse it, return the record."""
+    """Among a series' markets, take the soonest future expiry (the currently
+    relevant event), then -- since ladder series (Brent > $X, Fed above Y%) list
+    many strikes on that one expiry -- the strike closest to 50/50, preferring
+    strikes liquid enough to clear the Kalshi volume floor. Picking the first
+    strike surfaced uninformative extremes like "Brent > $98.99 · 0.5%"."""
     now = pd.Timestamp.now(tz="UTC")
-    best, best_ts = None, None
+    dated = []
     for m in markets:
         ts = pd.to_datetime(_kalshi_expiry(m) or None, utc=True, errors="coerce")
         if ts is None or ts != ts or ts < now:
             continue
-        if best_ts is None or ts < best_ts:
-            best, best_ts = m, ts
-    if best is None:
+        dated.append((ts, m))
+    if not dated:
         return None
-    return _parse_kalshi_market(best, theme, series_ticker)
+    soonest = min(ts for ts, _ in dated).normalize()
+    recs = [r for ts, m in dated if ts.normalize() == soonest
+            for r in [_parse_kalshi_market(m, theme, series_ticker)] if r]
+    if not recs:
+        return None
+    floor = PRED_VOLUME_FLOORS.get("kalshi", PRED_VOLUME_FLOOR)
+    liquid = [r for r in recs if (r.get("volume") or 0) >= floor]
+    return min(liquid or recs,
+               key=lambda r: (abs(r["probability"] - 50), -(r.get("volume") or 0)))
 
 
 def fetch_kalshi(themes: list[dict]) -> list[dict]:
@@ -7721,6 +7731,10 @@ SHOCKWAVE_R2_FLOOR  = 0.20
 SHOCKWAVE_PULSE_PCT = -25.0
 SHOCKWAVE_LABEL_TOP = 7
 SHOCKWAVE_FX_CCY    = "USD"
+# A daily move beyond +/-60% is treated as a bad price row, not data: a single
+# pence/pounds unit glitch on a .L ticker (2374.7 -> 24.1 -> 1915) yields a
+# -99% and a +7800% day that alone dominate the OLS fit (v3.7.1, NCLP.L).
+SHOCKWAVE_MAX_DAILY_MOVE = 0.60
 
 # Narrative scenarios mapped onto the 3 factors (an approximation, not literal
 # instrument betas). Negative + positive; likelihood + historical recovery.
@@ -7765,6 +7779,7 @@ def compute_stress_factors(prices_native, spy, qqq, meta, returns) -> list[dict]
         if qqq_r is not None:
             cols["qqq"] = qqq_r
         j = pd.concat(cols, axis=1).dropna()
+        j = j[j["y"].abs() <= SHOCKWAVE_MAX_DAILY_MOVE]   # drop bad price rows
         if len(j) < SHOCKWAVE_MIN_OBS:
             out.append(rec); continue
         y = j["y"].to_numpy()

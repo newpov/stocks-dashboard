@@ -93,6 +93,42 @@ def test_kalshi_current_schema_without_expiration_time():
     assert rec["end_date"].startswith(iso(20)[:10])
 
 
+def _ladder(prices_vols, exp_days=10):
+    from datetime import datetime, timedelta, timezone
+    exp = (datetime.now(timezone.utc) + timedelta(days=exp_days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return [{"title": t, "yes_bid_dollars": str(p), "yes_ask_dollars": str(p),
+             "volume_fp": str(v), "event_ticker": "KXBRENTW-X",
+             "expected_expiration_time": exp, "close_time": exp}
+            for t, p, v in prices_vols]
+
+
+def test_kalshi_ladder_picks_strike_nearest_even_odds():
+    # Ladder series (Brent > $X, Fed above Y%) list many strikes on one expiry.
+    # Taking the first one surfaced extremes like "Brent > $98.99 · 0.5%", which
+    # say nothing; the informative strike is the one closest to 50/50.
+    markets = _ladder([("> $98.99", 0.005, 5000), ("> $80", 0.42, 5000),
+                       ("> $70", 0.97, 5000), ("> $75", 0.71, 5000)])
+    rec = build._kalshi_pick_active(markets, "Brent", "KXBRENTW")
+    assert rec["question"] == "> $80"
+
+
+def test_kalshi_ladder_prefers_liquid_strike_over_thin_coin_flip():
+    # A 50% strike nobody trades would then be dropped by the volume floor and
+    # the whole theme would vanish -- prefer strikes that clear the floor.
+    floor = build.PRED_VOLUME_FLOORS.get("kalshi", build.PRED_VOLUME_FLOOR)
+    markets = _ladder([("> $85", 0.50, floor / 10), ("> $80", 0.30, floor * 5),
+                       ("> $90", 0.02, floor * 5)])
+    rec = build._kalshi_pick_active(markets, "Brent", "KXBRENTW")
+    assert rec["question"] == "> $80"
+
+
+def test_kalshi_ladder_still_uses_soonest_expiry_only():
+    near = _ladder([("near-extreme", 0.03, 5000)], exp_days=5)
+    far = _ladder([("far-even", 0.50, 5000)], exp_days=40)
+    rec = build._kalshi_pick_active(far + near, "Brent", "KXBRENTW")
+    assert rec["question"] == "near-extreme"   # the current market, not a later one
+
+
 def test_kalshi_expiry_falls_back_to_latest_then_close():
     m_latest = {"latest_expiration_time": "2030-01-08T00:00:00Z", "close_time": "2030-01-01T00:00:00Z"}
     m_close = {"close_time": "2030-01-01T00:00:00Z"}

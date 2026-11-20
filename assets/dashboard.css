@@ -564,7 +564,7 @@
   .uv-up .uv-move{color:var(--up)}
   .uv-down .uv-move{color:var(--down)}
   .uv-vol{color:var(--text-dim);font-size:9.5px}
-  .hero-legend{display:flex;gap:18px;font-family:var(--font-mono);font-size:11.5px;align-items:center}
+  .hero-legend{display:flex;flex-wrap:wrap;gap:6px 18px;font-family:var(--font-mono);font-size:11.5px;align-items:center;min-width:0;max-width:100%}
   .leg{display:flex;align-items:center;gap:6px;color:var(--text-2)}
   .leg-swatch{width:14px;height:3px;border-radius:1px}
   .leg-swatch.basket{background:var(--accent)}
@@ -1417,6 +1417,14 @@
     .wl-grid{grid-template-columns:repeat(var(--watch-cols-mobile),minmax(0,1fr));gap:8px}
   }
 
+  /* v3.7.1: on a 3-column phone grid a wide move (e.g. +123.4%) pushed past the
+     card edge and widened the whole page by ~12px. Tighter padding + a smaller
+     figure keep it inside; overflow:hidden is the last-resort guard. */
+  @media (max-width:460px){
+    .wl-card{padding:10px;min-width:0;overflow:hidden}
+    .wl-pct{font-size:12.5px}
+  }
+
   .untracked{margin:32px 0 8px;padding:18px 20px;border:1px solid var(--border);
     border-radius:12px;background:var(--surface);}
   .untracked-head h3{margin:0 0 4px;font-family:var(--font-display);font-size:18px;
@@ -1736,6 +1744,9 @@
     body{overflow-x:hidden}
     .container{padding:0 14px}
     .table-scroll{margin:0 -14px;padding:0;border-radius:0;border-left:none;border-right:none;width:auto}
+    /* v3.7.1: the full-bleed scroller's edge + the container's end padding made
+       Chrome widen the layout viewport by ~12px; clip (not hidden) keeps sticky. */
+    .container{overflow-x:clip}
     #ret-table{min-width:520px}
     #ret-table td.t-signal{min-width:110px;padding:8px 10px}
     .sig-detail{display:none}
