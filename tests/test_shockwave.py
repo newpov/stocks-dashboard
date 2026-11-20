@@ -189,3 +189,31 @@ def test_estimate_move_floors_at_total_loss():
     # A position can't lose more than 100%; the linear model must not overshoot.
     f = {"b_mkt": 2.5, "b_tech": 0.5, "ccy": "GBP"}
     assert build.estimate_move(f, {"spy": -45, "tech": -15, "usd": 0}, "GBP") == -100.0
+
+
+def test_compute_stress_factors_ignores_unit_glitch_day():
+    # v3.7.1: NCLP.L's feed had ONE row quoted in pounds instead of pence
+    # (2374.7 -> 24.1 -> 1915). That makes a -99% day and a +7800% day, which
+    # alone dragged the fit to b_mkt -13 / b_tech +52 and put the name at -100%
+    # in every Shockwave scenario. Impossible daily moves must not enter the fit.
+    rng = np.random.default_rng(1)
+    n = 250
+    spy_r = rng.normal(0, 0.01, n)
+    tech_r = rng.normal(0, 0.01, n)
+    name_r = 1.3 * spy_r + 0.7 * tech_r + rng.normal(0, 0.002, n)
+    px = _price_series(name_r)
+    px.iloc[120] = px.iloc[120] / 100.0          # the pence/pounds glitch row
+    prices = pd.DataFrame({"AAA": px})
+    out = build.compute_stress_factors(
+        prices, _price_series(spy_r), _price_series(spy_r + tech_r),
+        _meta_df([("AAA", "ETF", "GBp")]),
+        pd.DataFrame([{"status": "open", "total_pct": 5.0, "weight": 1.0}], index=["AAA"]))
+    f = out[0]
+    assert f["b_mkt"] == pytest.approx(1.3, abs=0.1)
+    assert f["b_tech"] == pytest.approx(0.7, abs=0.1)
+    assert f["low_conf"] is False
+
+
+def test_compute_stress_factors_keeps_large_but_plausible_days():
+    # The guard only drops impossible moves; a genuine +30% day stays in.
+    assert 0.3 < build.SHOCKWAVE_MAX_DAILY_MOVE < 1.0

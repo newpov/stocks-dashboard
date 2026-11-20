@@ -14,6 +14,27 @@ than a barely-working prototype.
 
 ---
 
+## v3.7.1 — 2026-11-20
+
+Small fixes to the mobile layout, Market expectations and Shockwave.
+
+### Fixed
+- **Phone layout no longer wider than the screen.** On a 390px phone the hero
+  chart's legend didn't wrap (the right edge was cut off), and the full-bleed
+  table scroller plus the page padding made Chrome widen the layout by ~12px.
+  The legend now wraps, the page clips that edge, and the narrow 3-column
+  watchlist cards keep a large move (e.g. +123%) inside the card.
+- **Market expectations shows the informative Kalshi strike.** Ladder series
+  (Brent above $X, Fed above Y%) list many strikes on one expiry; the panel
+  took the first one and often showed an extreme like "Brent > $98.99 · 0.5%".
+  It now takes the strike closest to 50/50 among those liquid enough to clear
+  the volume floor, still on the soonest expiry.
+- **Shockwave no longer shows a name at −100% in every scenario.** One price
+  row quoted in pounds instead of pence (NCLP.L: 2374.7 → 24.1 → 1915) created
+  a −99% day and a +7,800% day that dominated the factor fit (market beta −13,
+  tech +52). Daily moves beyond ±60% are now treated as bad price rows and left
+  out of the fit (NCLP.L: 0.27 / 1.68).
+
 ## v3.7 — "AI build-out" module · 20 November 2026
 
 A topic-specific module asking two questions: is the AI infrastructure build-out still self-funded, and how much of the basket rides on it? Shaped over three prototype rounds; the author chose a standalone stack module placed after Industry outlook · News and before Market expectations (it drags, hides and persists like any module).
