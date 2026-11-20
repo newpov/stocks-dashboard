@@ -220,7 +220,9 @@ function renderHeroChart() {
 
   const basketEnd = basket.vals[basket.vals.length - 1];
   const spyEnd = spy.vals.length ? spy.vals[spy.vals.length - 1] : 0;
-  const basketColor = '#f59e0b';
+  // v3.8: from the palette (--hero-basket), so a skin can recolour the line;
+  // every palette except Neon Coast keeps the original amber.
+  const basketColor = getComputedStyle(document.body).getPropertyValue('--hero-basket').trim() || '#f59e0b';
   const spyColor = '#6b7185';
   const whatifColor = '#2dd4bf';    // teal — distinct from the amber basket
   const blendedColor = '#c084fc';   // purple — basket blended with the selection
@@ -452,7 +454,7 @@ function renderHeroChart() {
     html += `<polyline points="${pl}" fill="none" stroke="${blendedColor}" stroke-width="1.8" stroke-dasharray="2 4" stroke-linejoin="round"/>`;
   }
   // Basket line
-  html += `<polyline points="${basketPL}" fill="none" stroke="${basketColor}" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"/>`;
+  html += `<polyline class="hero-basket-line" points="${basketPL}" fill="none" stroke="${basketColor}" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"/>`;
   // v2.7: last-completed fiscal-year return (top-left, on top of the line).
   if (isAll) html += fyStatHtml;   // v3.4 #3: since-inception only
 
@@ -1999,13 +2001,25 @@ document.getElementById('hero-chart').addEventListener('click', (e) => {
 // still apply correctly.
 (function setupPalette() {
   const PALETTE_KEY = 'stocks-dashboard-palette';
-  const ORDER = ['default', 'softdark', 'light', 'bloomberg'];
-  const LABELS = {default: 'Default', softdark: 'Soft Dark', light: 'Light', bloomberg: 'Amber'};
+  const ORDER = ['default', 'softdark', 'light', 'bloomberg', 'neon'];
+  const LABELS = {default: 'Default', softdark: 'Soft Dark', light: 'Light', bloomberg: 'Amber', neon: 'Neon Coast'};
+  // v3.8: Neon Coast's poster type (Anton) is fetched only when the skin is
+  // applied, so visitors on the other palettes never download it.
+  function loadNeonFont() {
+    if (document.getElementById('neon-font')) return;
+    const l = document.createElement('link');
+    l.id = 'neon-font'; l.rel = 'stylesheet';
+    l.href = 'https://fonts.googleapis.com/css2?family=Anton&display=swap';
+    document.head.appendChild(l);
+  }
   const btn = document.getElementById('palette-cycle-btn');
   if (!btn) return;
   function apply(name) {
-    document.body.classList.remove('palette-softdark','palette-light','palette-bloomberg');
+    document.body.classList.remove('palette-softdark','palette-light','palette-bloomberg','palette-neon');
     if (name && name !== 'default') document.body.classList.add('palette-' + name);
+    if (name === 'neon') loadNeonFont();
+    // the hero bakes its line colour into SVG attributes -> redraw on switch
+    if (typeof renderHeroChart === 'function') { try { renderHeroChart(); } catch (e) { /* hero absent */ } }
     // v2.1: button is icon-only; the human-readable name now lives in the
     // data-tooltip attribute (which drives the CSS hover tooltip).
     btn.dataset.tooltip = LABELS[name] || 'Default';

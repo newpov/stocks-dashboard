@@ -9377,7 +9377,7 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     </svg>
   </button>
   <!-- v2.1: 4 palette buttons collapsed to a single cycling button. Click
-       advances Default -> Soft Dark -> Light -> Amber -> Default. The icon
+       advances Default -> Soft Dark -> Light -> Amber -> Neon Coast -> Default. The icon
        is a filled circle in var(--accent) so the active palette is visible
        at a glance; data-tooltip carries the palette name (updated by JS). -->
   <button class="layout-toggle icon-btn palette-cycle-btn" id="palette-cycle-btn" type="button"

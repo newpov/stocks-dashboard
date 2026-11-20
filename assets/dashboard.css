@@ -3,6 +3,7 @@
     --ink:#0b0e17; --ink-soft:#11151f; --surface:#161b27; --surface-2:#1d2330;
     --border:#232a3d; --text:#ece8e0; --text-2:#b4b9c4; --text-dim:#6b7185;
     --up:#34d399; --down:#f87171; --accent:#f59e0b;
+    --hero-basket:#f59e0b;   /* hero basket line; read by renderHeroChart */
     --font-display:"Instrument Serif",Georgia,serif;
     --font-ui:"Geist",system-ui,-apple-system,sans-serif;
     --font-mono:"Geist Mono","JetBrains Mono","SF Mono",Consolas,monospace;
@@ -24,6 +25,16 @@
     --ink:#000000; --ink-soft:#0a0a0a; --surface:#111111; --surface-2:#1a1a1a;
     --border:#2a2a2a; --text:#ffb800; --text-2:#cc9300; --text-dim:#806000;
     --up:#00ff66; --down:#ff3030; --accent:#ffb800;
+  }
+  /* Palette D -- Neon Coast (v3.8): 80s neon-coast sunset. Gains cyan, losses
+     orange-red, accent hot pink -- three distinct hues so up/down never read as
+     the accent. Display type switches to Anton (loaded on demand by the JS). */
+  body.palette-neon{
+    --ink:#140a24; --ink-soft:#1b0f30; --surface:#22133a; --surface-2:#2c1a48;
+    --border:#3f2866; --text:#fdf2ff; --text-2:#dccaf0; --text-dim:#a48cc6;
+    --up:#22d3ee; --down:#ff7a45; --accent:#ff3fa4;
+    --hero-basket:#ff3fa4;
+    --font-display:"Anton",Impact,"Arial Narrow",sans-serif;
   }
   /* Palette toggle pill cluster (top-right of header) */
   /* Demo-mode banner: rendered above everything on public builds (log.xlsx
@@ -1879,3 +1890,47 @@
   .aib-headline{font-size:21px}
 }
 @media (prefers-reduced-motion:reduce){.aib-tile{transition:none}}
+
+  /* ---- Neon Coast skin (v3.8): decoration only, all scoped to body.palette-neon.
+     Sunset sky behind the page, a striped sun + palm silhouette in the header,
+     condensed poster type for the title, and a soft neon glow on the hero. */
+  body.palette-neon{
+    background-image:
+      radial-gradient(ellipse 900px 420px at 82% -6%,rgba(255,122,69,0.22),transparent 62%),
+      radial-gradient(ellipse 1100px 520px at 60% -10%,rgba(255,63,164,0.20),transparent 65%),
+      linear-gradient(180deg,#2a0f48 0px,#1a0c30 420px,#140a24 760px);
+  }
+  body.palette-neon header{position:relative;isolation:isolate}
+  body.palette-neon header::before,
+  body.palette-neon header::after{content:"";position:absolute;pointer-events:none;z-index:-1}
+  body.palette-neon header::before{        /* striped synth sun */
+    right:6%;top:62px;width:180px;height:180px;border-radius:50%;
+    background:linear-gradient(180deg,#ffd166 0%,#ff9a3c 45%,#ff3fa4 100%);
+    -webkit-mask-image:linear-gradient(180deg,#000 34%,transparent 34%,transparent 38%,#000 38%,#000 46%,transparent 46%,transparent 51%,#000 51%,#000 58%,transparent 58%,transparent 64%,#000 64%,#000 70%,transparent 70%);
+    mask-image:linear-gradient(180deg,#000 34%,transparent 34%,transparent 38%,#000 38%,#000 46%,transparent 46%,transparent 51%,#000 51%,#000 58%,transparent 58%,transparent 64%,#000 64%,#000 70%,transparent 70%);
+    opacity:0.55;filter:drop-shadow(0 0 24px rgba(255,63,164,0.55));
+  }
+  body.palette-neon header::after{         /* palm silhouette */
+    right:calc(6% + 128px);top:58px;width:118px;height:186px;
+    background:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 140 220'%3E%3Cg fill='%23120822'%3E%3Cpath d='M66 220C70 170 76 120 70 74l7-1c7 46 1 98-3 147z'/%3E%3Cpath d='M73 76C52 52 26 50 4 64c24-6 46-2 69 12z'/%3E%3Cpath d='M73 76C60 44 38 30 14 30c22 8 42 22 59 46z'/%3E%3Cpath d='M73 76C78 44 96 24 122 20c-22 12-38 30-49 56z'/%3E%3Cpath d='M73 76C98 56 122 56 138 70c-22-6-44-4-65 6z'/%3E%3Cpath d='M73 76C70 50 74 22 88 4c-6 22-8 46-15 72z'/%3E%3Cpath d='M73 76C92 78 112 92 120 112c-14-14-30-24-47-36z'/%3E%3Cpath d='M73 76C54 80 36 96 30 116c12-16 26-28 43-40z'/%3E%3C/g%3E%3C/svg%3E") no-repeat center bottom/contain;opacity:0.9;
+  }
+  body.palette-neon h1{
+    text-transform:uppercase;letter-spacing:0.01em;line-height:1.04;
+    font-size:clamp(34px,5.6vw,58px);
+  }
+  body.palette-neon h1 em{
+    font-style:normal;
+    background:linear-gradient(90deg,#ff3fa4 0%,#ff9a3c 100%);
+    -webkit-background-clip:text;background-clip:text;color:transparent;
+    filter:drop-shadow(0 0 14px rgba(255,63,164,0.45));
+  }
+  body.palette-neon .hero-chart-wrap{
+    border-color:rgba(255,63,164,0.35);
+    box-shadow:0 0 0 1px rgba(255,63,164,0.06),0 0 34px rgba(255,63,164,0.10);
+  }
+  body.palette-neon .hero-basket-line{filter:drop-shadow(0 0 4px rgba(255,63,164,0.85))}
+  @media (max-width:700px){
+    /* phones: the title wraps across the full width, leaving no free corner */
+    body.palette-neon header::before,
+    body.palette-neon header::after{display:none}
+  }
