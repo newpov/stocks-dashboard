@@ -609,7 +609,25 @@ function renderHeroChart() {
 }
 
 renderHeroChart();
-window.addEventListener('resize', renderHeroChart);
+// The hero bakes its pixel size into the viewBox at draw time and uses
+// preserveAspectRatio="none", so any box change without a redraw stretches the
+// whole chart (axis text included). Window 'resize' alone missed Chrome Android's
+// "Desktop site" mode (980px layout, no usable resize event), leaving it stretched.
+// Watch the chart's own container instead; redraw only when its size really changes.
+(function() {
+  const wrap = document.getElementById('hero-chart').parentElement;
+  let lastW = wrap.clientWidth, lastH = wrap.clientHeight, raf = 0;
+  const redrawIfChanged = () => {
+    raf = 0;
+    const w = wrap.clientWidth, h = wrap.clientHeight;
+    if (w === lastW && h === lastH) return;
+    lastW = w; lastH = h;
+    renderHeroChart();
+  };
+  const schedule = () => { if (!raf) raf = requestAnimationFrame(redrawIfChanged); };
+  if (typeof ResizeObserver === 'function') new ResizeObserver(schedule).observe(wrap);
+  window.addEventListener('resize', schedule);
+})();
 // v3.0 #3: Nasdaq overlay legend toggle (default off, persisted in localStorage).
 (function() {
   const btn = document.querySelector('.hero-legend .leg-toggle[data-series="nasdaq"]');

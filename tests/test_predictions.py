@@ -54,16 +54,51 @@ def test_parse_kalshi_no_price_returns_none():
 
 
 def test_kalshi_pick_active_market():
+    # Expiries are relative to today: the picker compares against the real clock,
+    # so fixed dates silently went stale once "next" (Sep 2026) slipped into the past.
+    from datetime import datetime, timedelta, timezone
+    iso = lambda d: (datetime.now(timezone.utc) + timedelta(days=d)).strftime("%Y-%m-%dT%H:%M:%SZ")
     markets = [
         {"title": "old", "yes_bid_dollars": "0.5", "yes_ask_dollars": "0.5",
-         "expiration_time": "2026-01-01T00:00:00Z", "volume_fp": "9999",
+         "expiration_time": iso(-30), "volume_fp": "9999",
          "event_ticker": "E1"},
+        {"title": "later", "yes_bid_dollars": "0.7", "yes_ask_dollars": "0.7",
+         "expiration_time": iso(90), "volume_fp": "9999",
+         "event_ticker": "E3"},
         {"title": "next", "yes_bid_dollars": "0.6", "yes_ask_dollars": "0.6",
-         "expiration_time": "2026-09-01T00:00:00Z", "volume_fp": "9999",
+         "expiration_time": iso(30), "volume_fp": "9999",
          "event_ticker": "E2"},
     ]
     rec = build._kalshi_pick_active(markets, "Fed")
     assert rec["question"] == "next"   # nearest FUTURE expiry; "old" is in the past
+
+
+def test_kalshi_current_schema_without_expiration_time():
+    # Kalshi dropped `expiration_time` (by Nov 2026). Markets now carry
+    # `expected_expiration_time` (the real resolution date) and
+    # `latest_expiration_time` (a +7d safety deadline). With only the old key
+    # read, every market looked undated and the whole Kalshi feed went silent.
+    from datetime import datetime, timedelta, timezone
+    iso = lambda d: (datetime.now(timezone.utc) + timedelta(days=d)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    def mk(title, exp_days):
+        return {"title": title, "yes_bid_dollars": "0.6", "yes_ask_dollars": "0.6",
+                "volume_fp": "9999", "event_ticker": "E",
+                "close_time": iso(exp_days), "expected_expiration_time": iso(exp_days),
+                "latest_expiration_time": iso(exp_days + 7)}
+    markets = [mk("old", -3), mk("later", 60), mk("next", 20)]
+    rec = build._kalshi_pick_active(markets, "Fed", "KXFED")
+    assert rec is not None, "current-schema markets must not all be skipped"
+    assert rec["question"] == "next"
+    # end_date feeds the 150-day horizon filter, so it must be populated too.
+    assert rec["end_date"].startswith(iso(20)[:10])
+
+
+def test_kalshi_expiry_falls_back_to_latest_then_close():
+    m_latest = {"latest_expiration_time": "2030-01-08T00:00:00Z", "close_time": "2030-01-01T00:00:00Z"}
+    m_close = {"close_time": "2030-01-01T00:00:00Z"}
+    assert build._kalshi_expiry(m_latest).startswith("2030-01-08")
+    assert build._kalshi_expiry(m_close).startswith("2030-01-01")
+    assert build._kalshi_expiry({}) == ""
 
 
 def test_fetch_predictions_routes_and_filters(monkeypatch):

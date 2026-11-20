@@ -14,6 +14,17 @@ than a barely-working prototype.
 
 ---
 
+## v3.6.2 — Kalshi feed restored, chart fix, new title · 20 November 2026
+
+A maintenance patch (all author-flagged).
+
+- **Kalshi markets are back in Market expectations.** Kalshi dropped the `expiration_time` field from its API; markets now carry `expected_expiration_time` (the real resolution date) and `latest_expiration_time` (a +7-day safety deadline). Reading only the old field made every Kalshi market look undated, so all were skipped and the panel silently fell back to Polymarket only (8 markets, 0 from Kalshi). A new `_kalshi_expiry()` reads the current fields, falling back to the legacy key and `close_time`; it also feeds the 150-day horizon filter. Against the live APIs the panel goes from 8 to 18 markets (10 Kalshi + 8 Polymarket).
+- **Hero chart no longer stretches in Chrome's "Desktop site" mode on a phone.** The chart sizes its drawing to its container when drawn and stretches to fill it, and only redrew on a window `resize` event, which that mode doesn't usefully send after switching to its 980px layout. The chart now watches its own container (`ResizeObserver`) and redraws whenever its size really changes; the window event stays as a fallback.
+- **New hero title:** "The basket and *the world ahead*" (was "The basket since &lt;first-buy month&gt;"). The first-buy date still shows in the line above it.
+- **Tests:** `tests/test_predictions.py` covers the current Kalshi market shape and the expiry fallbacks; the picker test now uses dates relative to today (its fixed "upcoming" date had slipped into the past).
+
+---
+
 ## v3.6.1 — What-if polish + more Market-expectations topics · 18 July 2026
 
 A small follow-up to v3.6 (all author-flagged).
