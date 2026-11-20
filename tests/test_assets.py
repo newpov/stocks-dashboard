@@ -89,6 +89,22 @@ class TestExtractionIntegrity:
         for name in ("dashboard.css", "dashboard.js"):
             (ASSETS / name).read_text(encoding="utf-8")
 
-    def test_build_py_fstring_shrunk(self):
-        # the whole point: build.py no longer carries the big blocks
-        assert len(BUILD_SRC.splitlines()) < 10_000
+    def test_build_py_carries_no_big_embedded_block(self):
+        # The point of v3.5: the ~1.8k-line CSS and ~2.5k-line JS no longer live in
+        # build.py's page f-string. Guard that directly -- the largest single string
+        # literal stays well under either block -- rather than a total line count,
+        # which (v3.7) also tripped on ordinary feature code. The page skeleton
+        # template is ~390 lines today.
+        import io
+        import tokenize
+        spans, starts = [], []
+        fs_start = getattr(tokenize, "FSTRING_START", None)   # 3.12+ splits f-strings
+        fs_end = getattr(tokenize, "FSTRING_END", None)
+        for tok in tokenize.generate_tokens(io.StringIO(BUILD_SRC).readline):
+            if tok.type == tokenize.STRING:
+                spans.append(tok.end[0] - tok.start[0] + 1)
+            elif fs_start is not None and tok.type == fs_start:
+                starts.append(tok.start[0])
+            elif fs_end is not None and tok.type == fs_end and starts:
+                spans.append(tok.end[0] - starts.pop() + 1)
+        assert max(spans) < 800

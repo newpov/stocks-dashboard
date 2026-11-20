@@ -29,6 +29,10 @@ minutes of setup.
 
 ## Demo
 
+<!-- Walkthrough video: upload temp/walkthrough.webm by dragging it into this file's editor on
+     github.com, then replace this comment with the github.com/user-attachments/... link it inserts
+     (on its own line, so GitHub renders an inline player). -->
+
 Want to see what the dashboard looks like without forking or running anything?
 Grab **[`demo.html`](demo.html)** from this repo and double-click it to open
 in any browser — it's a **single self-contained file** (~850 KB) built from
@@ -173,6 +177,12 @@ then context, then details, then actions:
 │ card → info modal with     │                                       │
 │ every ticker in industry.  │                                       │
 └────────────────────────────┴───────────────────────────────────────┘
+
+┌─ AI build-out ────────────────────────────────────────────────────────┐
+│ Is the AI infrastructure spend self-funded? Cohort capex as % of      │
+│ operating cash flow + debt (MSFT·GOOGL·AMZN·META·ORCL·CRWV), and how  │
+│ many of your open names ride the cycle. Tiles → detail on tap.        │
+└───────────────────────────────────────────────────────────────────────┘
 
 ┌─ Market expectations ─────────────────────────────────────────────────┐
 │ Prediction-market odds (Kalshi + Polymarket) for near-term macro      │
@@ -457,6 +467,34 @@ watch name.
 
 ![Watchlist with auto-surfaced Value + BB cards (shaded, badged) ahead of manually tracked names, each with an entry verdict, trigger chips and a news cite](docs/assets/demo-watchlist-auto.jpeg)
 
+### AI build-out — who's spending, how it's funded, your exposure (v3.7)
+
+A topic-specific module, placed after Industry outlook · News and before Market
+expectations (drag/hide it like any module). It answers two questions:
+
+- **Is the AI build-out still self-funded?** For the biggest AI capex spenders
+  (Microsoft, Alphabet, Amazon, Meta, Oracle, CoreWeave) it sums quarterly capex
+  and operating cash flow. Above 100%, they invest more cash than their businesses
+  generate and the gap is funded by borrowing — so combined debt is shown too.
+- **How much of the basket rides on it?** Open positions are grouped by the page's
+  own industry labels — *Spenders*, *Chips*, *Data-centre hardware*, *Power &
+  sites* — with a short exclusion list for names whose industry matches but whose
+  business mostly isn't AI. It reports how many names that is and what share of
+  the open positions' combined (equal-weight) return they account for.
+
+Three tiles stay visible — capex vs cash flow (with a mini trend), your AI-cycle
+exposure, and the AI names' past-month return against the rest of the basket (the
+one part that moves daily). Tapping a tile opens the detail: a quarterly chart,
+the cohort table, and every AI-cycle name as a chip that opens its stock card.
+
+The statements come from yfinance and move **quarterly**, after earnings. Because
+yfinance only exposes 5–7 quarters, each live build upserts them into
+`data/ai_capex_history.parquet`, so the trend grows over time. Quarters are aligned
+by each company's latest report (fiscal calendars differ). Company figures are
+public financials in $; nothing about the basket is shown in money terms.
+
+![AI build-out module: three tiles, then the detail panel with the quarterly capex vs cash-flow chart, the six spenders and your AI-cycle names](docs/assets/ai-buildout.gif)
+
 ### Market expectations — prediction-market sentiment (v2.3)
 
 A forward-looking *sentiment* layer the rest of the page lacks: implied
@@ -587,28 +625,30 @@ just under the hero stats (when something changed since you last looked):
    a 52-week low that clear the six quality/value filters (discovery-only).
 3. **Outlook + News**: "what should I read about today" — new stocks and the
    market backdrop.
-4. **Market expectations**: "what is the crowd pricing" — prediction-market
+4. **AI build-out**: "is the AI spending boom self-funded, and how much of my
+   basket rides on it" — cohort capex vs cash flow + debt, and my AI-cycle names.
+5. **Market expectations**: "what is the crowd pricing" — prediction-market
    (Kalshi + Polymarket) implied odds for macro events, with since-last-build
    deltas.
-5. **Main table**: detailed per-stock view with sorting + filtering.
-6. **Re-entry ideas**: "of stocks I've held before, where do analysts see
+6. **Main table**: detailed per-stock view with sorting + filtering.
+7. **Re-entry ideas**: "of stocks I've held before, where do analysts see
    most upside" — buy candidates.
-7. **Watchlist**: "names I track but don't hold — should I get in" — each with an
+8. **Watchlist**: "names I track but don't hold — should I get in" — each with an
    entry read (verdict + trigger chips + news cite). Edit `watchlist.csv`.
-8. **Rating moves** (paired under Re-entry): "did analyst views shift" — split
+9. **Rating moves** (paired under Re-entry): "did analyst views shift" — split
    into **Price targets** (upsides first, then cuts) and **Recommendations**
    (upgrades green ↑ first, downgrades red ↓), each row carrying the other's
    context, vs a stable weekly baseline.
-9. **Exit strategy**: "of my current losers, which should I cut" — sell
+10. **Exit strategy**: "of my current losers, which should I cut" — sell
    candidates, with concrete 2× ATR suggested stops.
-10. **Basket diversification**: portfolio-level lens — pairwise correlations,
+11. **Basket diversification**: portfolio-level lens — pairwise correlations,
     most-correlated pairs (concentration risk), and best diversifiers.
-11. **Signal map** (paired under diversification): a beeswarm of holdings along
+12. **Signal map** (paired under diversification): a beeswarm of holdings along
     the bearish↔bullish signal axis, coloured by return — a fast read of what
     the tape says about your book.
-12. **Industry attribution**: "which of my sector bets are paying off" —
+13. **Industry attribution**: "which of my sector bets are paying off" —
     equal-weight return contribution by industry.
-13. **Regrets / Lucky escapes**: retrospective — did I sell too early or
+14. **Regrets / Lucky escapes**: retrospective — did I sell too early or
     exit just in time.
 
 This ordering matches how the author actually reviews the portfolio: lead with
@@ -899,7 +939,8 @@ stocks-dashboard/
 │   ├── bb_universe_ohlcv_cache.parquet ← Big Brain universe-shortlist OHLCV
 │   ├── bigbrain_log.csv               ← Big Brain flag history (memory notes)
 │   ├── predictions_cache.parquet      ← Market-expectations snapshot
-│   └── prior_predictions_cache.parquet ← prior snapshot for since-last-build Δ
+│   ├── prior_predictions_cache.parquet ← prior snapshot for since-last-build Δ
+│   └── ai_capex_history.parquet       ← AI build-out cohort statements, upserted each live build
 │
 ├── docs/
 │   ├── index.html                     ← generated dashboard (~1.5 MB)
