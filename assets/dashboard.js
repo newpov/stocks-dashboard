@@ -1713,8 +1713,25 @@ document.getElementById('hero-chart').addEventListener('click', (e) => {
     document.body.classList.toggle('force-desktop', forced);
     btn.classList.toggle('active', forced);
     btn.setAttribute('aria-pressed', forced ? 'true' : 'false');
-    btn.textContent = forced ? 'Mobile view' : 'Desktop view';
+    // v3.8.1: icon button -- the label lives in the tooltip + accessible name.
+    // (Writing textContent here wiped the SVG and crammed the words into the
+    // 36px box.) CSS swaps the monitor icon for a phone while forced.
+    btn.dataset.tooltip = forced ? 'Mobile view' : 'Desktop view';
+    btn.setAttribute('aria-label', forced ? 'Back to mobile view' : 'Force desktop view');
+    placeTopbar();
   }
+  // v3.8.1: forced mode pins the topbar (position:fixed, top-right of the
+  // screen). On the demo the sticky DEMO MODE banner (z-index 60) sat on top
+  // of it, so the way back to mobile view couldn't be tapped. Drop the
+  // topbar just below the banner; the banner's height varies with width.
+  function placeTopbar() {
+    const bar = document.querySelector('.topbar');
+    const banner = document.querySelector('.demo-banner');
+    if (!bar) return;
+    const forced = document.body.classList.contains('force-desktop');
+    bar.style.top = (forced && banner) ? (banner.getBoundingClientRect().height + 10) + 'px' : '';
+  }
+  window.addEventListener('resize', placeTopbar);
   let saved = false;
   try { saved = localStorage.getItem(KEY) === '1'; } catch (e) {}
   apply(saved);

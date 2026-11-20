@@ -9344,10 +9344,14 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
   </button>
   <button class="layout-toggle icon-btn desktop-mode-btn" id="desktop-mode-btn" type="button" aria-pressed="false"
           aria-label="Force desktop view" data-tooltip="Desktop view">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <svg class="ic-desktop" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
       <rect x="2" y="3" width="20" height="14" rx="2"/>
       <line x1="8" y1="21" x2="16" y2="21"/>
       <line x1="12" y1="17" x2="12" y2="21"/>
+    </svg>
+    <svg class="ic-mobile" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <rect x="6" y="2" width="12" height="20" rx="2"/>
+      <line x1="11" y1="18" x2="13" y2="18"/>
     </svg>
   </button>
   <!-- v1.9 Pocket Lesson: quick toggle for the educational tip card.

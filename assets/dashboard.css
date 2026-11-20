@@ -117,15 +117,25 @@
      into when they tap this button. Wikipedia / Reddit use the same pattern. */
   .desktop-mode-btn{display:none}
   @media (max-width:900px){
-    .desktop-mode-btn{display:inline-block}
+    .desktop-mode-btn{display:inline-flex}
   }
   body.force-desktop{min-width:1100px}
-  body.force-desktop .desktop-mode-btn{display:inline-block !important}
+  body.force-desktop .desktop-mode-btn{display:inline-flex !important}
+  /* v3.8.1: show what a tap switches TO -- monitor normally, phone while forced */
+  .desktop-mode-btn .ic-mobile{display:none}
+  .desktop-mode-btn.active .ic-desktop{display:none}
+  .desktop-mode-btn.active .ic-mobile{display:block}
   /* v2.1: when force-desktop pushes the page wider than the viewport, the
      topbar (position:absolute right:28px) lands off-screen because right is
      measured from the now-1100px container's edge. Switch to position:fixed
      so the controls stay at top-right of the VIEWPORT regardless of scroll. */
-  body.force-desktop .topbar{position:fixed;top:18px;right:28px}
+  /* v3.8.1: ...but on a phone a forced 1100px page widens the LAYOUT viewport
+     to ~1100px and fixed elements anchor to that, so right:28px put the topbar
+     ~700px off-screen (no way back to mobile view without scrolling sideways).
+     Anchor it left, where the screen starts; the header makes room below it.
+     JS (placeTopbar) drops it under the demo banner when one is present. */
+  body.force-desktop .topbar{position:fixed;top:18px;left:12px;right:auto}
+  body.force-desktop header{padding-top:64px}
   /* Pulse halo around the Edit-layout button while the discovery hint is up.
      box-shadow keeps it paint-only — the button's layout box never grows so
      nothing nearby reflows. */

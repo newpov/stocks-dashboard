@@ -14,6 +14,20 @@ than a barely-working prototype.
 
 ---
 
+## v3.8.1 — 2026-11-20
+
+### Fixed
+- **"Desktop view" button on phones.** The button became icon-only in v2.1,
+  but its script still wrote the words "Desktop view" into it on every load,
+  wiping the icon and cramming clipped text into the small box. It now keeps
+  the icon (a monitor; a phone while desktop view is on, showing what a tap
+  switches to) with the label in its tooltip and accessible name.
+- **Getting back from desktop view on a phone.** With desktop view forced, the
+  phone lays the page out ~1,100px wide and the pinned toolbar anchored to
+  that width, landing ~700px off-screen to the right; on the demo it was also
+  under the DEMO MODE banner. The toolbar now pins to the left edge, below the
+  banner, so the way back is always on screen.
+
 ## v3.8 — "Neon Coast" skin · 20 November 2026
 
 A fifth stop on the palette button: an 80s neon-coast sunset look.
