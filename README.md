@@ -29,6 +29,10 @@ minutes of setup.
 
 ## Demo
 
+<!-- Walkthrough video: upload temp/walkthrough.webm by dragging it into this file's editor on
+     github.com, then replace this comment with the github.com/user-attachments/... link it inserts
+     (on its own line, so GitHub renders an inline player). -->
+
 Want to see what the dashboard looks like without forking or running anything?
 Grab **[`demo.html`](demo.html)** from this repo and double-click it to open
 in any browser — it's a **single self-contained file** (~850 KB) built from
@@ -488,6 +492,8 @@ yfinance only exposes 5–7 quarters, each live build upserts them into
 `data/ai_capex_history.parquet`, so the trend grows over time. Quarters are aligned
 by each company's latest report (fiscal calendars differ). Company figures are
 public financials in $; nothing about the basket is shown in money terms.
+
+![AI build-out module: three tiles, then the detail panel with the quarterly capex vs cash-flow chart, the six spenders and your AI-cycle names](docs/assets/ai-buildout.gif)
 
 ### Market expectations — prediction-market sentiment (v2.3)
 
