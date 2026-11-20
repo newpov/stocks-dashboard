@@ -2025,7 +2025,9 @@ document.getElementById('hero-chart').addEventListener('click', (e) => {
     btn.dataset.tooltip = LABELS[name] || 'Default';
     btn.dataset.palette = name;
     try { localStorage.setItem(PALETTE_KEY, name); } catch (e) { /* private mode */ }
+    document.dispatchEvent(new CustomEvent('palettechange', {detail: name}));
   }
+  window.applyPalette = apply;   // v3.8: used by the Neon Coast promo card
   const saved = (() => { try { return localStorage.getItem(PALETTE_KEY); } catch (e) { return null; } })();
   apply(ORDER.includes(saved) ? saved : 'default');
   btn.addEventListener('click', () => {
@@ -2033,6 +2035,48 @@ document.getElementById('hero-chart').addEventListener('click', (e) => {
     const next = ORDER[(ORDER.indexOf(current) + 1) % ORDER.length];
     apply(next);
   });
+})();
+
+// v3.8: one-week "new skin" card announcing Neon Coast. Built with
+// createElement/textContent (no innerHTML). Expiry is checked in the browser,
+// so the card disappears on its own after NEON_PROMO_UNTIL without a rebuild.
+// Hidden once dismissed (x or Try it, remembered in localStorage) and while
+// Neon Coast is already the active palette.
+(function setupNeonPromo() {
+  const NEON_PROMO_UNTIL = '2026-11-27T23:59:59Z';
+  const KEY = 'neonPromoDismissed';
+  if (Date.now() > Date.parse(NEON_PROMO_UNTIL)) return;
+  let dismissed = false;
+  try { dismissed = localStorage.getItem(KEY) === '1'; } catch (e) { /* private mode */ }
+  if (dismissed || typeof window.applyPalette !== 'function') return;
+  if (document.body.classList.contains('palette-neon')) return;
+
+  const card = document.createElement('aside');
+  card.className = 'neon-promo';
+  card.setAttribute('role', 'status');
+  card.setAttribute('aria-label', 'New skin available');
+  const sw = document.createElement('span'); sw.className = 'neon-promo-swatch'; sw.setAttribute('aria-hidden', 'true');
+  const txt = document.createElement('div'); txt.className = 'neon-promo-text';
+  const eb = document.createElement('div'); eb.className = 'neon-promo-eyebrow'; eb.textContent = 'New skin';
+  const ttl = document.createElement('div'); ttl.className = 'neon-promo-title'; ttl.textContent = 'Neon Coast';
+  const sub = document.createElement('div'); sub.className = 'neon-promo-sub';
+  sub.textContent = 'An 80s sunset look. Switch any time with the palette dot.';
+  txt.append(eb, ttl, sub);
+  const tryBtn = document.createElement('button'); tryBtn.type = 'button';
+  tryBtn.className = 'neon-promo-try'; tryBtn.textContent = 'Try it';
+  const close = document.createElement('button'); close.type = 'button';
+  close.className = 'neon-promo-close'; close.setAttribute('aria-label', 'Dismiss'); close.textContent = '×';
+  card.append(sw, txt, tryBtn, close);
+
+  function hide() {
+    try { localStorage.setItem(KEY, '1'); } catch (e) { /* private mode */ }
+    card.remove();
+  }
+  tryBtn.addEventListener('click', () => { window.applyPalette('neon'); hide(); });
+  close.addEventListener('click', hide);
+  // cycling onto Neon Coast with the palette dot counts as trying it
+  document.addEventListener('palettechange', (e) => { if (e.detail === 'neon') hide(); });
+  document.body.appendChild(card);
 })();
 
 // v2.1 Quiz feature. Opens via topbar Quiz button -> presents one question

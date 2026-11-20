@@ -1934,3 +1934,33 @@
     body.palette-neon header::before,
     body.palette-neon header::after{display:none}
   }
+
+  /* v3.8: one-week "new skin" card (built by setupNeonPromo). Styled in the
+     skin's own colours whatever palette is active, so it previews the look. */
+  .neon-promo{
+    position:fixed;right:18px;bottom:18px;z-index:30;max-width:340px;
+    display:flex;align-items:center;gap:12px;padding:12px 12px 12px 14px;
+    background:linear-gradient(135deg,#2a0f48 0%,#1b0f30 100%);
+    border:1px solid rgba(255,63,164,0.55);border-radius:12px;color:#fdf2ff;
+    box-shadow:0 10px 28px rgba(0,0,0,0.45),0 0 26px rgba(255,63,164,0.18);
+    font-family:var(--font-ui);animation:neon-promo-in 0.35s ease-out;
+  }
+  @keyframes neon-promo-in{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+  @media (prefers-reduced-motion:reduce){.neon-promo{animation:none}}
+  .neon-promo-swatch{flex:none;width:34px;height:34px;border-radius:50%;
+    background:linear-gradient(180deg,#ffd166 0%,#ff9a3c 40%,#ff3fa4 70%,#22d3ee 100%);
+    box-shadow:0 0 14px rgba(255,63,164,0.55)}
+  .neon-promo-text{flex:1;min-width:0}
+  .neon-promo-eyebrow{font-family:var(--font-mono);font-size:9.5px;letter-spacing:0.18em;
+    text-transform:uppercase;color:#22d3ee}
+  .neon-promo-title{font-size:15px;font-weight:600;line-height:1.2;color:#fff}
+  .neon-promo-sub{font-size:11.5px;color:#dccaf0;line-height:1.35;margin-top:2px}
+  .neon-promo-try{flex:none;border:0;border-radius:8px;padding:8px 12px;cursor:pointer;
+    background:#ff3fa4;color:#140a24;font-family:var(--font-mono);font-size:11px;font-weight:600;
+    letter-spacing:0.04em}
+  .neon-promo-try:hover{background:#ff6bb8}
+  .neon-promo-close{flex:none;align-self:flex-start;border:0;background:none;color:#a48cc6;
+    font-size:18px;line-height:1;cursor:pointer;padding:0 2px}
+  .neon-promo-close:hover{color:#fff}
+  .neon-promo button:focus-visible{outline:2px solid #22d3ee;outline-offset:2px}
+  @media (max-width:600px){.neon-promo{left:12px;right:12px;bottom:12px;max-width:none}}

@@ -26,6 +26,10 @@ A fifth stop on the palette button: an 80s neon-coast sunset look.
   typeface (Anton, fetched only when this palette is chosen) and the hero's
   basket line gets a soft neon glow. Pure CSS decoration; phones skip the
   sun and palm.
+- **"New skin" card for a week.** A small card (bottom-right; full-width on
+  phones) announces Neon Coast with a **Try it** button. It disappears on its
+  own after 27 November 2026 (checked in the browser, no rebuild needed), and
+  stays gone once dismissed, tried, or reached with the palette dot.
 - The hero's basket-line colour now comes from the palette (`--hero-basket`),
   so a skin can recolour it; every other palette keeps the original amber.
 

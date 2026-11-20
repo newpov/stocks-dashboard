@@ -53,3 +53,21 @@ def test_skin_is_original_not_a_copy():
     for text in (CSS, JS):
         for banned in ("GTA", "Grand Theft", "Pricedown", "Rockstar", "Vice City"):
             assert banned.lower() not in text.lower(), banned
+
+
+def test_neon_promo_runs_one_week_and_is_dismissible():
+    # A "new skin" card announces the palette for a week after release, then
+    # disappears on its own -- judged in the browser, so no rebuild is needed.
+    m = re.search(r"const NEON_PROMO_UNTIL = '(\d{4}-\d{2}-\d{2})T23:59:59Z';", JS)
+    assert m
+    from datetime import date
+    assert (date.fromisoformat(m.group(1)) - date(2026, 11, 20)).days == 7
+    assert "neonPromoDismissed" in JS            # x / Try it remember the choice
+    assert "window.applyPalette" in JS           # Try it switches the palette
+    assert ".neon-promo" in CSS
+
+
+def test_neon_promo_text_is_set_safely():
+    block = JS[JS.index("function setupNeonPromo"):]
+    block = block[:block.index("})();")]
+    assert "innerHTML" not in block
