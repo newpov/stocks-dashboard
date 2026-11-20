@@ -1564,9 +1564,25 @@ def _parse_kalshi_market(m: dict, theme: str, series_ticker: str | None = None) 
         "probability": prob,
         "volume": _pred_num(m.get("volume_fp")) if m.get("volume_fp") is not None
                   else (_pred_num(m.get("volume")) or 0.0),
-        "end_date": str(m.get("expiration_time") or ""),
+        "end_date": _kalshi_expiry(m),
         "url": f"https://kalshi.com/markets/{series}" if series else None,
     }
+
+
+def _kalshi_expiry(m: dict) -> str:
+    """A Kalshi market's resolution timestamp (ISO string, "" if none).
+
+    Kalshi dropped `expiration_time` (by Nov 2026); reading only that key made
+    every market look undated, so the picker skipped them all and the whole
+    Kalshi feed went silent. Prefer `expected_expiration_time` (the real
+    resolution date, == close_time), then `latest_expiration_time` (a +7d
+    safety deadline), the legacy key in case it returns, then `close_time`."""
+    for k in ("expected_expiration_time", "latest_expiration_time",
+              "expiration_time", "close_time"):
+        v = m.get(k)
+        if v:
+            return str(v)
+    return ""
 
 
 def _kalshi_pick_active(markets: list[dict], theme: str,
@@ -1576,7 +1592,7 @@ def _kalshi_pick_active(markets: list[dict], theme: str,
     now = pd.Timestamp.now(tz="UTC")
     best, best_ts = None, None
     for m in markets:
-        ts = pd.to_datetime(m.get("expiration_time"), utc=True, errors="coerce")
+        ts = pd.to_datetime(_kalshi_expiry(m) or None, utc=True, errors="coerce")
         if ts is None or ts != ts or ts < now:
             continue
         if best_ts is None or ts < best_ts:
@@ -8795,10 +8811,9 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
         hero_eyebrow = (f'{n_open} open <span class="dot">&middot;</span> {n_closed} closed '
                         f'<span class="dot">&middot;</span> first buy {first_purchase_str} '
                         f'<span class="dot">&middot;</span> in {BASE_CCY}')
-        # Dynamic so a fork shows its own first-buy month (e.g. "Dec '25"),
-        # not the author's hardcoded start. (v2.5 #7)
-        _since_label = first_purchase.strftime("%b") + " &rsquo;" + first_purchase.strftime("%y")
-        hero_h1 = f'The basket since <em>{_since_label}</em>'
+        # v3.6.2: forward-looking title (was "The basket since <first-buy month>");
+        # the start date still shows in the eyebrow above ("first buy ...").
+        hero_h1 = 'The basket and <em>the world ahead</em>'
 
     # SortableJS: either reference the vendored file (normal docs/index.html
     # build, served alongside docs/vendor/) or inline the whole library
