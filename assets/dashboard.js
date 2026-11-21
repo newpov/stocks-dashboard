@@ -1434,7 +1434,10 @@ document.querySelectorAll('.ticker-clickable[data-ticker]').forEach(el => {
     // v3.4 #5: non-owned names (no DATA payload) but with an analyst snapshot
     // open a lightweight card instead of the (chartless) full modal no-op.
     if (!DATA[t] && typeof RM_ANALYST !== 'undefined' && RM_ANALYST[t]) { openAnalystInfo(t); return; }
-    openModal(t);
+    // v3.10: names with no DATA payload (Bear watch, outlook rows) used to hit
+    // openModal() and silently do nothing; the universe-aware opener shows
+    // the full modal when DATA exists, else a "universe only" info card.
+    _safeOpenTicker(t);
   });
 });
 

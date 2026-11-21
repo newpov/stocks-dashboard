@@ -37,7 +37,10 @@ def test_snapshot_latest_date(tmp_path):
 
 def _write_cache(path, days_old):
     d = (_today() - pd.Timedelta(days=days_old)).strftime("%Y-%m-%d")
-    pd.DataFrame({"ret_12m": [1.0], "cache_date": [d]}).to_parquet(path)
+    # v3.10: a current-schema cache (carries the short-interest columns); one
+    # without them counts as stale by design -- see test_bear_watch.py.
+    cols = {c: [float("nan")] for c in build.UNIVERSE_REQUIRED_COLS}
+    pd.DataFrame({"ret_12m": [1.0], **cols, "cache_date": [d]}).to_parquet(path)
 
 
 def test_universe_cache_date_roundtrip(tmp_path):

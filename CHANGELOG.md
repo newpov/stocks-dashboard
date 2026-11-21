@@ -14,6 +14,31 @@ than a barely-working prototype.
 
 ---
 
+## v3.10 — "Bear watch" short-side screen · 21 November 2026
+
+### Added
+- **Bear watch module** (right after the Value screen): the short-side
+  counterpart of the Value screen. It lists S&P 500 names you have never held
+  where at least three independent signals agree the stock looks weak, at
+  least one of them from price action or analysts (fundamentals alone are not
+  treated as a short case). Signals: analyst target below price, sell-side
+  bearish rating, downtrend (12-month loss in the bottom quarter of the
+  52-week range), shrinking revenue, cash burn, debt over 2× equity,
+  loss-making, P/E above 60. Ranked by how many agree, then by how far below
+  the price analysts' targets sit; up to 10 names.
+- **Counter-evidence stays visible.** When analysts still see 20%+ upside, the
+  row carries an "analysts bullish" chip instead of being hidden.
+- **Crowding badge from short interest** (share of float sold short, days to
+  cover, change on last month), read from the same data call the universe
+  already makes. Heavily shorted names are flagged "crowded · squeeze risk":
+  short interest confirms a bearish consensus but is also what powers a
+  squeeze, so it informs rather than ranks.
+- **Risk framing is part of the module:** a screen, not advice; shorting can
+  lose more than 100%, costs a borrow fee, can be recalled and can squeeze; the
+  dashboard models prices only.
+- The universe cache now counts as stale when it lacks the short-interest
+  columns, forcing one refresh instead of waiting up to a month.
+
 ## v3.9.1 — 2026-11-21
 
 ### Security
