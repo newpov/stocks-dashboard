@@ -14,6 +14,38 @@ than a barely-working prototype.
 
 ---
 
+## v3.8.2 — 2026-11-21
+
+Fixes from a code and security review.
+
+### Security
+- **Live-news links could inject script.** The browser-side escaper used for
+  news fetched through the Cloudflare Worker didn't escape quotes, yet its
+  output went into `href="…"` attributes. A feed link containing a quote could
+  break out of the attribute and add an event handler (reproduced against the
+  published page). It now escapes quotes exactly like the Python side.
+- **Inline JSON also neutralises `<!--`**, which could otherwise make the HTML
+  parser swallow the page's own closing `</script>` tag.
+- **News worker cache can't be bypassed with query strings.** `/news?x=1`,
+  `/news?x=2`, … each missed the edge cache and triggered five upstream feed
+  fetches; the cache now keys on the path only. *(Takes effect when the worker
+  is redeployed.)*
+
+### Fixed
+- **A silent outside source now raises a warning.** When news, Kalshi,
+  Polymarket or the AI-capex statements return nothing on a live build, the
+  build prints a "Source health" warning that appears on the GitHub Actions run
+  page (Kalshi once went silent for weeks unnoticed).
+- **CI runs no longer race.** A push-triggered rebuild and the nightly one are
+  queued instead of both building and racing to push.
+
+### Reviewed, no change needed
+- The news worker only fetches its fixed list of feeds, so it is not an open
+  proxy. Build-time HTML escapes every third-party string (`_esc`, `safe_url`),
+  and all inline payloads go through `_json_for_script`. The workflow takes no
+  untrusted input (no pull-request triggers) and its write permission is only
+  what publishing needs.
+
 ## v3.8.1 — 2026-11-20
 
 ### Fixed

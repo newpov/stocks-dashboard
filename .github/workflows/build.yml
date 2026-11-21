@@ -38,6 +38,13 @@ on:
 permissions:
   contents: write
 
+# One rebuild at a time: a push-triggered run and the nightly cron could
+# otherwise both build and race to push (the loser fails non-fast-forward).
+# Queue rather than cancel, so a running publish always finishes.
+concurrency:
+  group: rebuild
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-latest
