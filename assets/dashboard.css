@@ -14,11 +14,12 @@
     --display-weight:600;    /* headings; serif/poster palettes set 400 */
     --page-glow:none;        /* body background-image; Classic restores its glow */
   }
-  /* Classic -- the May 2026 default (dark + amber, Instrument Serif headings).
+  /* Classic -- the May 2026 default (dark + amber, Instrument Serif headings);
+     v3.12: --text-dim lightened #6b7185 -> #868b9d to meet 4.5:1 small-text contrast.
      Its fonts are fetched on demand when chosen (setupPalette). */
   body.palette-classic{
     --ink:#0b0e17; --ink-soft:#11151f; --surface:#161b27; --surface-2:#1d2330;
-    --border:#232a3d; --text:#ece8e0; --text-2:#b4b9c4; --text-dim:#6b7185;
+    --border:#232a3d; --text:#ece8e0; --text-2:#b4b9c4; --text-dim:#868b9d;
     --up:#34d399; --down:#f87171; --accent:#f59e0b;
     --hero-basket:#f59e0b;
     --font-display:"Instrument Serif",Georgia,serif;
@@ -35,19 +36,19 @@
   /* Palette A — Softer dark (lighter version of default, easier on eyes) */
   body.palette-softdark{
     --ink:#1a1d29; --ink-soft:#22263a; --surface:#262b3a; --surface-2:#2f3548;
-    --border:#3a4156; --text:#f1f5f9; --text-2:#cbd5e1; --text-dim:#7d8aa8;
+    --border:#3a4156; --text:#f1f5f9; --text-2:#cbd5e1; --text-dim:#95a0b8;
     --up:#34d399; --down:#fb7185; --accent:#fbbf24;
   }
   /* Palette B — Editorial light (FT/NYT vibe, prints well, dense-table friendly) */
   body.palette-light{
     --ink:#fffaf0; --ink-soft:#fff5e6; --surface:#ffffff; --surface-2:#f5efe2;
-    --border:#e2d8c2; --text:#1f2937; --text-2:#4a5568; --text-dim:#94816a;
+    --border:#e2d8c2; --text:#1f2937; --text-2:#4a5568; --text-dim:#796956;
     --up:#047857; --down:#b91c1c; --accent:#ad1f17;
   }
   /* Palette C — Bloomberg amber-on-black (terminal aesthetic) */
   body.palette-bloomberg{
     --ink:#000000; --ink-soft:#0a0a0a; --surface:#111111; --surface-2:#1a1a1a;
-    --border:#2a2a2a; --text:#ffb800; --text-2:#cc9300; --text-dim:#806000;
+    --border:#2a2a2a; --text:#ffb800; --text-2:#cc9300; --text-dim:#a77d00;
     --up:#00ff66; --down:#ff3030; --accent:#ffb800;
   }
   /* Palette D -- Neon Coast (v3.8): 80s neon-coast sunset. Gains cyan, losses
@@ -234,7 +235,7 @@
   .sw-seg:first-child{border-radius:8px 0 0 8px}
   .sw-seg:last-child{border-radius:0 8px 8px 0}
   .sw-seg.on{background:var(--accent);color:var(--ink);border-color:var(--accent);font-weight:600}
-  .sw-hero{font-family:Georgia,'Times New Roman',serif;font-size:34px;line-height:1.1;margin:12px 0 2px;font-variant-numeric:tabular-nums}
+  .sw-hero{font-family:var(--font-display);font-weight:var(--display-weight);font-size:34px;line-height:1.1;margin:12px 0 2px;font-variant-numeric:tabular-nums}
   .sw-hero small{font-family:inherit;font-size:12px;color:var(--text-dim);margin-left:8px}
   .sw-action{font-size:13px;line-height:1.5;padding:8px 11px;border-left:3px solid var(--border);margin:8px 0 4px;color:var(--text)}
   .sw-field{width:100%;height:auto;margin-top:6px}
@@ -273,7 +274,7 @@
     border:1px solid var(--border);color:var(--text-dim)}
   .doc-chip.doc-danger{border-color:#f87171;color:#f87171}
   .doc-chip.doc-warning{border-color:#fbbf24;color:#fbbf24}
-  .doctor-diagnosis{font-family:Georgia,'Times New Roman',serif;font-size:.95rem;
+  .doctor-diagnosis{font-family:var(--font-display);font-size:.95rem;
     line-height:1.5;color:var(--text);margin:10px 0 14px}
   .doctor-actions{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
   @media (max-width:760px){.doctor-actions{grid-template-columns:1fr}}
@@ -1257,6 +1258,20 @@
     .ia-bar-label{font-size:9.5px}
     .ia-table th,.ia-table td{padding:8px 6px;font-size:11.5px}
   }
+
+  /* v3.12 Shockwave hedge lens */
+  .sw-hedge{margin:10px 0 12px;border:1px solid var(--border);border-radius:9px;background:var(--surface-2)}
+  .sw-hedge summary{cursor:pointer;padding:9px 12px;font-family:var(--font-ui);font-size:12.5px;font-weight:600;color:var(--text);list-style:revert}
+  .sw-hedge .sw-hs{font-family:var(--font-mono);font-weight:400;color:var(--text-2);margin-left:8px}
+  #sw-hedge-body{padding:0 12px 10px;font-family:var(--font-ui);font-size:12px;color:var(--text-2);line-height:1.5}
+  #sw-hedge-body p{margin:4px 0 8px}
+  #sw-hedge-body b{color:var(--text)}
+  .sw-htable{border-collapse:collapse;margin:2px 0 8px;font-variant-numeric:tabular-nums}
+  .sw-htable th{font-size:9.5px;text-transform:uppercase;letter-spacing:.06em;color:var(--text-dim);font-weight:400;text-align:right;padding:3px 10px}
+  .sw-htable td{padding:4px 10px;text-align:right;font-family:var(--font-mono)}
+  .sw-htable td:first-child,.sw-htable th:first-child{text-align:left;font-family:var(--font-ui);padding-left:0}
+  .sw-hdecay{margin:0 0 8px;padding-left:18px}
+  .sw-hrisk{font-size:11px;color:var(--text-dim);border-left:2px solid var(--down);padding-left:8px}
 
   /* v3.10 Bear watch -- short-side screen (sibling of the Value screen) */
   .bw-head{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:6px}

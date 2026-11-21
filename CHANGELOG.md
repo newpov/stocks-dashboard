@@ -14,6 +14,48 @@ than a barely-working prototype.
 
 ---
 
+## v3.12 — Shockwave "hedge lens" · 21 November 2026
+
+Short-side phase B (phase A was the v3.10 Bear watch).
+
+### Added
+- **Hedge lens in Shockwave** (expand it under the projected move). It shows
+  how much of a −1× S&P 500 fund and a −1× Nasdaq-100 fund would offset the
+  basket's fitted market and tech sensitivities, then, for whichever scenario
+  is selected, the move unhedged vs hedged, plus the same if markets move the
+  other way (a hedge gives up the upside too). The summary line updates live
+  ("−27% → −5% hedged").
+- **The hedge never turns into a bet.** The Nasdaq fund covers the tech tilt
+  only up to the basket's market sensitivity, so the funds offset the market
+  exactly once; any extra tech tilt is shown as left unhedged. (Covering it
+  all would have left a tech-heavy basket net short, "hedged" +31% in a crash.)
+  Funds are assumed priced in your currency, so the hedge carries no dollar bet.
+- **Leveraged-fund decay from real prices:** over the last ~3 months of daily
+  S&P and Nasdaq closes, what a daily-reset −3× fund actually returned vs the
+  naive −3× of the move (e.g. Nasdaq −10%: the fund +22%, not +30%).
+- Risk note: illustration, not advice; daily resets, fees, lost upside.
+
+### Fixed
+- Shockwave's headline figure and the Doctor's diagnosis line used a
+  hard-coded serif font; they now follow the theme (serif only in Classic).
+- Shockwave's advice line read "~4years": the code stripped every space from
+  "~4 years" rather than just the leading "~".
+- On phones, the hero chart's "FY25/26 +x%" stat no longer overprints the
+  dashed fiscal-year marker's label; a marker that falls inside the stat's
+  space drops its label one line below.
+- **Every palette now meets the 4.5:1 small-text contrast minimum.** Only the
+  default did in v3.11; Soft Dark, Light, Amber and Classic grey labels were
+  3.0-4.1:1 and are now lightened (darkened on Light) just enough, keeping
+  each palette's hue.
+
+### Privacy
+- **Fonts are self-hosted.** The page no longer loads Google Fonts, which sent
+  every visitor's IP address to Google. Inter, Geist Mono, Geist, Anton and
+  Instrument Serif (Latin subset, ~156 KB, SIL Open Font License, licences
+  included) ship in `assets/fonts/` and are published to `docs/fonts/`.
+  Browsers download a face only when text uses it, so Neon Coast's and
+  Classic's fonts still load only when chosen.
+
 ## v3.11 — new default look · 21 November 2026
 
 ### Changed

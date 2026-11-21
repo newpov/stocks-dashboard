@@ -44,14 +44,15 @@ def test_default_fonts_are_inter_and_geist_mono():
     assert '"Inter"' in _tok(root, "--font-ui") and '"Inter"' in _tok(root, "--font-display")
     # Geist Mono for figures: JetBrains Mono's flat-sided rounds read "squared"
     assert '"Geist Mono"' in _tok(root, "--font-mono")
-    assert "family=Inter" in SRC and "family=Geist+Mono" in SRC
-    assert "Instrument+Serif" not in SRC          # Classic's fonts load on demand only
+    fonts = (ROOT / "assets" / "fonts" / "fonts.css").read_text(encoding="utf-8")
+    assert 'font-family:"Inter"' in fonts and 'font-family:"Geist Mono"' in fonts
 
 
 def test_may_look_survives_as_classic():
     cl = _block("body.palette-classic")
     assert "--ink:#0b0e17" in cl and "--accent:#f59e0b" in cl and "Instrument Serif" in cl
-    assert "Instrument+Serif" in JS                # fetched when Classic is chosen
+    fonts = (ROOT / "assets" / "fonts" / "fonts.css").read_text(encoding="utf-8")
+    assert 'font-family:"Instrument Serif"' in fonts   # self-hosted, loads when used
 
 
 def test_palette_order_new_default_then_neon_then_classic_last():
@@ -73,3 +74,18 @@ def test_heading_weight_is_a_token():
     assert "--display-weight:600" in _block(":root")
     assert "--display-weight:400" in _block("body.palette-classic")
     assert "--display-weight:400" in _block("body.palette-neon")   # Anton: one weight
+
+
+def test_every_palette_meets_small_text_contrast():
+    # v3.12: only the default passed in v3.11; Soft Dark / Light / Amber /
+    # Classic labels were 3.0-4.1:1 on their lighter card colour.
+    for sel in (":root", "body.palette-softdark", "body.palette-light",
+                "body.palette-bloomberg", "body.palette-classic", "body.palette-neon"):
+        b = _block(sel)
+        for bg in ("--surface", "--surface-2"):
+            for fg in ("--text", "--text-2", "--text-dim"):
+                assert _contrast(_tok(b, fg), _tok(b, bg)) >= 4.5, (sel, fg, bg)
+
+
+def test_fy_marker_labels_avoid_the_fy_stat():
+    assert "FY_STAT_RESERVE" in JS and "padL + FY_STAT_RESERVE" in JS

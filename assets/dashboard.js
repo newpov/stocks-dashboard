@@ -361,6 +361,7 @@ function renderHeroChart() {
     return basket.xs[basket.xs.length - 1];
   }
   let fyHtml = '';
+  const FY_STAT_RESERVE = 120;   // px reserved for the "FY25/26 +37.9%" stat
   if (basket.dates.length) {
     const yr0 = new Date(basket.dates[0] + 'T00:00:00').getFullYear();
     const yr1 = new Date(basket.dates[basket.dates.length - 1] + 'T00:00:00').getFullYear();
@@ -370,7 +371,10 @@ function renderHeroChart() {
       if (fxx == null) continue;
       const lbl = `FY${String(yr % 100).padStart(2, '0')}/${String((yr + 1) % 100).padStart(2, '0')}`;
       fyHtml += `<line x1="${fxx.toFixed(1)}" y1="${padT}" x2="${fxx.toFixed(1)}" y2="${(padT + innerH).toFixed(1)}" stroke="${TH.dim}" stroke-width="0.8" stroke-dasharray="2 4" opacity="0.45"/>`;
-      fyHtml += `<text x="${(fxx + 3).toFixed(1)}" y="${(padT + 9).toFixed(1)}" fill="${TH.dim}" font-size="8.5" font-family="${TH.mono}" opacity="0.85">${lbl}</text>`;
+      // v3.12: a marker inside the top-left FY-return stat's ~120px (narrow
+      // phone charts) drops one line below it instead of overprinting it.
+      const lblY = (fxx + 3 < padL + FY_STAT_RESERVE) ? padT + 24 : padT + 9;
+      fyHtml += `<text class="fy-mark" x="${(fxx + 3).toFixed(1)}" y="${lblY.toFixed(1)}" fill="${TH.dim}" font-size="8.5" font-family="${TH.mono}" opacity="0.85">${lbl}</text>`;
     }
   }
   // v2.7: last-COMPLETED UK fiscal year return (6 Apr -> 6 Apr), shown top-left.
@@ -1945,6 +1949,39 @@ document.getElementById('hero-chart').addEventListener('click', (e) => {
     function rad(f){if(sizeMode==='eq')return 5; if(sizeMode==='w'){var w=f.weight||1; return 3+Math.min(6,w*2.1);} if(!f.mcap)return 5; return 3+Math.sqrt(f.mcap/maxMc)*7;}
     function move(f,sc){var bm=(f.b_mkt===f.b_mkt&&f.b_mkt!=null)?f.b_mkt:0, bt=(f.b_tech===f.b_tech&&f.b_tech!=null)?f.b_tech:0; var m=bm*sc.spy+bt*sc.tech; if((f.ccy||base)===SHOCKWAVE.fx_ccy && SHOCKWAVE.fx_ccy!==base) m+=sc.usd; return Math.max(m,-100);}
     function recov(b){if(b>=-6)return null; if(b>=-15)return'~1 year'; if(b>=-25)return'~2 years'; if(b>=-40)return'~4 years'; return'~5-6 years';}
+    // v3.12 hedge lens: mirrors hedge_mix / hedged_move in build.py.
+    var HM=(SHOCKWAVE.hedge&&SHOCKWAVE.hedge.mix)||null, HD=(SHOCKWAVE.hedge&&SHOCKWAVE.hedge.decay)||{};
+    var hSum=document.getElementById('sw-hedge-sum'), hBody=document.getElementById('sw-hedge-body');
+    function hedgePnl(sc){ if(!HM) return 0;   // funds assumed currency-hedged: no dollar term
+      return HM.h_spx*(-sc.spy)+HM.h_ndx*(-(sc.spy+sc.tech)); }
+    function basketFor(sc){ var tw=0,a=0; F.forEach(function(f){var w=f.weight||1; tw+=w; a+=w*move(f,sc);}); return tw?a/tw:0; }
+    function x2(v){ return (Math.round(v*10)/10).toFixed(1)+'\u00d7'; }
+    function decayLine(lbl,d){ if(!d||d.inv3==null) return '';
+      return '<li><b>'+lbl+'</b> '+fmt(d.index)+' over the last '+d.days+' sessions: a \u22123\u00d7 fund returned <b>'+fmt(d.inv3)+'</b>, not the '+fmt(d.naive3)+' you might expect ('+fmt(d.decay3)+' lost to daily resets).</li>'; }
+    function fundParts(){   // name only the funds actually needed
+      var p=[];
+      if(HM.h_ndx>=0.05) p.push('<b>'+x2(HM.h_ndx)+'</b> its value in a −1× Nasdaq-100 fund (covers the tech tilt and that much of the market)');
+      if(HM.h_spx>=0.05) p.push('<b>'+x2(HM.h_spx)+'</b>'+(p.length?'':' its value')+' in a −1× S&amp;P 500 fund (the rest of the market exposure)');
+      return p.join(' plus ');
+    }
+    function renderHedge(sc, basket){
+      if(!hSum||!hBody||!HM) return;
+      var hedged=basket+hedgePnl(sc);
+      var mir={spy:-sc.spy,tech:-sc.tech,usd:-sc.usd};
+      var mUn=basketFor(mir), mHe=mUn+hedgePnl(mir);
+      hSum.innerHTML='Hedge lens <span class="sw-hs">'+fmt(basket)+' \u2192 '+fmt(hedged)+' hedged</span>';
+      var none=(HM.h_spx+HM.h_ndx)<0.05;
+      var mixTxt=none?'<p>This basket has little fitted market sensitivity, so there is little to hedge.</p>'
+        :'<p>Offsetting this basket\u2019s fitted sensitivities takes about '+fundParts()+'; a third of that with \u22123\u00d7 funds.'+(HM.tech_left>0.05?' About <b>'+x2(HM.tech_left)+'</b> of tech tilt is left unhedged: hedging more would short the market overall, a bet rather than a hedge.':'')+'</p>';
+      var tbl='<table class="sw-htable"><thead><tr><th></th><th>Unhedged</th><th>Hedged</th></tr></thead><tbody>'
+        +'<tr><td>This scenario</td><td style="color:'+col(basket)+'">'+fmt(basket)+'</td><td style="color:'+col(hedged)+'">'+fmt(hedged)+'</td></tr>'
+        +'<tr><td>If markets move the other way</td><td style="color:'+col(mUn)+'">'+fmt(mUn)+'</td><td style="color:'+col(mHe)+'">'+fmt(mHe)+'</td></tr>'
+        +'</tbody></table>';
+      var dec=decayLine('S&amp;P 500',HD.spx)+decayLine('Nasdaq-100',HD.ndx);
+      hBody.innerHTML=mixTxt+(none?'':tbl)
+        +(dec?'<ul class="sw-hdecay">'+dec+'</ul>':'')
+        +'<p class="sw-hrisk">Illustration, not advice. Inverse funds reset daily, so over weeks they drift from \u22121\u00d7 or \u22123\u00d7 the index (above); they charge fees. Assumes funds priced in '+base+' (currency-hedged), so the dollar doesn’t move the hedge. A hedge also gives up the upside. Sizes come from each holding\u2019s fitted sensitivity; low-fit names make it rougher.</p>';
+    }
     function render(){
       var sc={spy:+mkt.value, tech:+tec.value, usd:usd};
       document.getElementById('sw-mktv').textContent=fmt(+mkt.value);
@@ -1956,10 +1993,11 @@ document.getElementById('hero-chart').addEventListener('click', (e) => {
       var rc=recov(basket);   // v3.9: always YOUR basket's depth, never the preset's market figure
       hero.innerHTML=fmt(basket)+'<small>estimated basket move'+(rc?' &middot; est. basket recovery '+rc:'')+'</small>';
       hero.style.color=col(basket);
+      renderHedge(sc, basket);
       var worst=d.slice().sort(function(a,b){return a.m-b.m;})[0]||{t:'',m:0};
       var best=d.slice().sort(function(a,b){return b.m-a.m;})[0]||{t:'',m:0};
       var act;
-      if(basket<=-15) act='Deep drawdown. Most exposed: '+worst.t+' ('+fmt(worst.m)+')'+(rc?', ~'+rc.replace(/[~ ]/g,'')+' to recover historically':'')+' &mdash; consider trimming high-beta names.';
+      if(basket<=-15) act='Deep drawdown. Most exposed: '+worst.t+' ('+fmt(worst.m)+')'+(rc?', ~'+rc.replace(/^~\s*/,'')+' to recover historically':'')+' &mdash; consider trimming high-beta names.';
       else if(basket<=-5) act='Moderate hit. '+worst.t+' leads the downside ('+fmt(worst.m)+') &mdash; worth a hedge or a lighter position.';
       else if(basket<3) act='Your basket looks resilient to this scenario &mdash; no urgent action.';
       else act='Upside scenario: '+best.t+' benefits most ('+fmt(best.m)+'). Defensive names lag.';
@@ -2051,27 +2089,15 @@ document.getElementById('hero-chart').addEventListener('click', (e) => {
   const ORDER = ['default', 'neon', 'softdark', 'light', 'bloomberg', 'classic'];
   const LABELS = {default: 'Default', neon: 'Neon Coast', softdark: 'Soft Dark',
                   light: 'Light', bloomberg: 'Amber', classic: 'Classic'};
-  // Palettes with their own type fetch it only when applied, so visitors on
-  // the default never download it (v3.8 Neon's Anton; v3.11 Classic's fonts).
-  const PALETTE_FONTS = {
-    neon: 'family=Anton',
-    classic: 'family=Geist+Mono:wght@400;500&family=Geist:wght@400;500;600&family=Instrument+Serif:ital@0;1',
-  };
-  function loadPaletteFont(name) {
-    const fam = PALETTE_FONTS[name];
-    if (!fam || document.getElementById('font-' + name)) return;
-    const l = document.createElement('link');
-    l.id = 'font-' + name; l.rel = 'stylesheet';
-    l.href = 'https://fonts.googleapis.com/css2?' + fam + '&display=swap';
-    document.head.appendChild(l);
-  }
+  // v3.12: fonts are self-hosted @font-face rules (assets/fonts/fonts.css).
+  // Browsers fetch a face only when text uses it, so Neon's Anton and
+  // Classic's Geist / Instrument Serif still download only when chosen.
   const btn = document.getElementById('palette-cycle-btn');
   if (!btn) return;
   function apply(name) {
     document.body.classList.remove('palette-softdark','palette-light','palette-bloomberg',
                                    'palette-neon','palette-classic');
     if (name && name !== 'default') document.body.classList.add('palette-' + name);
-    loadPaletteFont(name);
     // the hero bakes its line colour into SVG attributes -> redraw on switch
     if (typeof renderHeroChart === 'function') { try { renderHeroChart(); } catch (e) { /* hero absent */ } }
     // v2.1: button is icon-only; the human-readable name now lives in the
