@@ -86,3 +86,44 @@ def test_source_health_quiet_when_everything_arrives():
 def test_main_prints_source_health_as_ci_annotations():
     src = Path(build.__file__).read_text(encoding="utf-8")
     assert "::warning title=Source health::" in src
+
+
+# --- v3.8.4: CI supply-chain hardening ---------------------------------------
+WF = (ROOT / ".github" / "workflows" / "build.yml").read_text(encoding="utf-8")
+
+
+def test_ci_token_is_not_left_in_git_config_for_the_build():
+    # actions/checkout persists the write token in .git/config by default, so
+    # every step -- including `python build.py`, which imports third-party
+    # packages -- could read it. Only the final push step may see it.
+    assert "persist-credentials: false" in WF
+    assert WF.count("secrets.GITHUB_TOKEN") == 1
+    push_step = WF[WF.index("Commit & push"):]
+    assert "secrets.GITHUB_TOKEN" in push_step
+
+
+def test_ci_actions_pinned_to_commit_shas():
+    uses = re.findall(r"uses:\s*([^\s#]+)", WF)
+    assert uses and all(re.fullmatch(r"[\w.-]+/[\w.-]+@[0-9a-f]{40}", u) for u in uses), uses
+
+
+def test_ci_installs_the_hashed_lock():
+    assert "pip install --require-hashes -r requirements-ci.txt" in WF
+    lock = (ROOT / "requirements-ci.txt").read_text(encoding="utf-8")
+    pkgs = re.findall(r"^([A-Za-z0-9_.-]+)==\S+ \\$", lock, re.M)
+    assert len(pkgs) >= 20
+    # every pinned package carries at least one hash
+    blocks = re.split(r"^(?=[A-Za-z0-9_.-]+==)", lock, flags=re.M)[1:]
+    assert all("--hash=sha256:" in b for b in blocks)
+
+
+def test_ci_lock_matches_its_direct_pins():
+    pins = dict(re.findall(r"^([A-Za-z0-9_.-]+)==(\S+)$",
+                           (ROOT / "requirements-ci.in").read_text(encoding="utf-8"), re.M))
+    lock = (ROOT / "requirements-ci.txt").read_text(encoding="utf-8")
+    for name, ver in pins.items():
+        assert re.search(rf"^{re.escape(name)}=={re.escape(ver)} ", lock, re.M | re.I), name
+
+
+def test_ci_reruns_when_the_lock_changes():
+    assert "'requirements-ci.txt'" in WF

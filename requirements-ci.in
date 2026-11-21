@@ -1,0 +1,13 @@
+# CI-only direct dependencies, pinned exactly (v3.8.4 supply-chain hardening).
+# requirements-ci.txt is generated from this file, with hashes, for the CI
+# runner (Linux, Python 3.11), ignoring anything published in the two weeks
+# before the lock date. Regenerate after changing a pin:
+#   uv pip compile requirements-ci.in --python-version 3.11 \
+#     --python-platform x86_64-unknown-linux-gnu --generate-hashes \
+#     --exclude-newer <today minus 14 days> -o requirements-ci.txt
+# Local/forker installs keep using the looser requirements.txt.
+yfinance==1.4.0
+pandas==3.0.3
+pyarrow==24.0.0
+openpyxl==3.1.5
+feedparser==6.0.12
