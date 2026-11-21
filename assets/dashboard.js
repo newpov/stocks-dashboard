@@ -2811,10 +2811,14 @@ function relativeNewsTime(date) {
   return date.toLocaleDateString('en-GB', {day: '2-digit', month: 'short'});
 }
 
+// v3.8.2: mirrors Python's _esc -- escapes quotes too, so the result is safe in
+// attribute context. The previous textContent->innerHTML trick left " and '
+// untouched, and this helper feeds href="..." / data-source="..." for live
+// worker news: a feed link containing a quote could break out of the attribute.
 function escapeNewsHtml(s) {
-  const d = document.createElement('div');
-  d.textContent = String(s == null ? '' : s);
-  return d.innerHTML;
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
 // Only allow http(s) hrefs from untrusted feed/worker links — a javascript:/data:

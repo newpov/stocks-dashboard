@@ -3456,7 +3456,9 @@ def _json_for_script(obj, **kw) -> str:
     string value containing the literal '</script>' can't terminate the element
     early (standard JSON-in-HTML hardening that json.dumps does NOT do). Use for
     every inline payload; the fetched sidecar payload.json doesn't need it."""
-    return json.dumps(obj, **kw).replace("</", "<\\/")
+    # v3.8.2: also break "<!--" -- "<!--<script" in a string would put the HTML
+    # parser in the script-data-double-escaped state and swallow our </script>.
+    return json.dumps(obj, **kw).replace("</", "<\\/").replace("<!--", "<\\!--")
 
 
 def render_svg_defs() -> str:
@@ -9763,6 +9765,27 @@ def _is_sample_build(demo: bool, source: str) -> bool:
     return demo or source == "csv"
 
 
+def source_health_warnings(news_items, pred_current, pred_themes, ai_fresh) -> list[str]:
+    """v3.8.2: one ASCII message per outside source that returned nothing on a
+    live build. Kalshi once dropped a JSON field and its whole feed went silent
+    for weeks without any signal; main() prints these as GitHub Actions
+    `::warning::` annotations so a silent source shows up on the run page.
+    Pure; never raises."""
+    out: list[str] = []
+    if not news_items:
+        out.append("News feeds returned no items (all RSS sources failed or changed format).")
+    got = {str(r.get("source") or "").lower() for r in (pred_current or [])}
+    wanted = sorted({str(t.get("source") or "").lower() for t in (pred_themes or [])} - {""})
+    for src in wanted:
+        if src not in got:
+            out.append(f"Market expectations: no {src} markets parsed "
+                       f"(API down, or a field it returns has changed).")
+    if ai_fresh is None or getattr(ai_fresh, "empty", True):
+        out.append("AI capex fetch returned nothing (yfinance statements); "
+                   "the AI build-out module is showing stored history only.")
+    return out
+
+
 def main(demo: bool = False, watchlist_only: bool = False,
          from_snapshot: bool = False) -> None:
     # Source selection (see resolve_basket_source for forker safety):
@@ -10108,6 +10131,9 @@ def main(demo: bool = False, watchlist_only: bool = False,
     print(f"AI build-out: {ai_capex_history['ticker'].nunique() if not ai_capex_history.empty else 0} "
           f"cohort companies, {len(ai_capex_history)} quarter rows "
           f"({'live' if not demo else 'stored'})")
+    if not demo:   # demo reads caches, so only the live build can judge sources
+        for _w in source_health_warnings(news_items, pred_current, pred_themes, _ai_fresh):
+            print(f"::warning title=Source health::{_w}")
 
     # v2.2 Big Brain: universe discovery lane (shortlist + deepen)
     bb_universe_obs = []

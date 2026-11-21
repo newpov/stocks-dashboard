@@ -56,7 +56,9 @@ export default {
 
     // Edge cache: serve from cache when we have a fresh entry.
     const cache = caches.default;
-    const cacheKey = new Request(url.toString(), { method: "GET" });
+    // Key on the path only: with the full URL, /news?x=1, /news?x=2 ... each
+    // missed the cache and triggered five upstream feed fetches.
+    const cacheKey = new Request(new URL("/news", url.origin).toString(), { method: "GET" });
     const cached = await cache.match(cacheKey);
     if (cached) return cached;
 
