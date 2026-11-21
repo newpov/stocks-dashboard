@@ -1176,7 +1176,7 @@ FUND_NAME_TICKERS: list[tuple[str, str]] = [
     ("ishares v plc s&p 500 consumer staples",          "ICSU.L"),
     ("wisdomtree core physical gold",                   "GLDW.L"),
     # Legal & General International Index Trust is a unit trust, not an ETF;
-    # no yfinance ticker known → stays in the untracked panel.
+    # no yfinance ticker known → stays untracked (excluded from the basket; the panel that listed these was removed in v3.8.3).
 ]
 
 
@@ -1239,7 +1239,7 @@ def load_transactions_from_log() -> tuple[pd.DataFrame, pd.DataFrame]:
     # Pass 1: try to recover a ticker by NAME for rows missing both ticker
     # and ISIN (manual fund entries). Anything resolved gets promoted into
     # the tracked stream below; anything left in (no ticker, no ISIN) stays
-    # in the untracked panel.
+    # untracked (excluded from the basket).
     needs_resolve = (df["isin"] == "") & (df["ticker"] == "")
     for idx in df[needs_resolve].index:
         resolved = _resolve_fund_by_name(df.at[idx, "name"])
@@ -3956,57 +3956,6 @@ def render_regret_tracker(returns: pd.DataFrame, meta: pd.DataFrame, n: int = 5)
     <table class="regret-table">
       <thead><tr><th>Ticker</th><th class="num">Sold @</th><th class="num">Now</th><th class="num">Post-exit</th></tr></thead>
       <tbody>{escape_rows}</tbody>
-    </table>
-  </div>
-</section>"""
-
-
-def render_untracked(untracked: pd.DataFrame) -> str:
-    """Render the 'manual fund' rows that have no ticker/ISIN.
-
-    These can't be priced by yfinance but are surfaced so the user knows
-    what's been excluded from the basket math. Embedded "@ <price>" in the
-    name is parsed back out into its own column for readability.
-    """
-    if untracked is None or untracked.empty:
-        return ""
-
-    import re
-    rows = []
-    for _, r in untracked.iterrows():
-        name = str(r.get("name", ""))
-        # The name field looks like "Fund description here  @  1234.5678" —
-        # split into a friendly name + execution price.
-        m = re.match(r"^(.*?)\s*@\s*([\d.,]+)\s*$", name)
-        if m:
-            fund_name, exec_price = m.group(1).strip(), m.group(2).strip()
-        else:
-            fund_name, exec_price = name, ""
-        dt = r.get("date")
-        date_str = pd.Timestamp(dt).strftime("%d %b %y") if pd.notna(dt) else "?"
-        action = str(r.get("action", "")).strip()
-        action_tone = "neg" if "sell" in action.lower() else "pos"
-        rows.append(
-            f'<tr>'
-            f'<td class="ut-date">{date_str}</td>'
-            f'<td class="ut-action ut-{action_tone}">{_esc(action)}</td>'
-            f'<td class="ut-name">{_esc(fund_name)}</td>'
-            f'<td class="num ut-price">{_esc(exec_price)}</td>'
-            f'</tr>'
-        )
-    n = len(untracked)
-    return f"""<section class="untracked">
-  <div class="untracked-head">
-    <h3>Untracked entries <span class="muted">({n})</span></h3>
-    <p class="muted">These fund rows have no ticker/ISIN in <code>log.xlsx</code>, so they
-    are excluded from the basket math above. Provide LSE/yfinance tickers to fold them in.</p>
-  </div>
-  <div class="table-scroll">
-    <table class="untracked-table">
-      <thead><tr>
-        <th>Date</th><th>Action</th><th>Fund</th><th class="num">Exec price</th>
-      </tr></thead>
-      <tbody>{''.join(rows)}</tbody>
     </table>
   </div>
 </section>"""
@@ -8471,7 +8420,6 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     attribution_rows, basket_avg = build_industry_attribution(returns, meta)
     attribution_html = render_industry_attribution(attribution_rows, basket_avg)
     regret_html = render_regret_tracker(returns, meta)
-    untracked_html = render_untracked(untracked) if untracked is not None else ""
     # v2.7: revived + enriched watchlist. Base card data, then an entry-signal
     # layer (verdict + trigger chips + news cite) reusing already-computed
     # quant/analyst/news. The module is reinstated next to "Re-entry ideas".

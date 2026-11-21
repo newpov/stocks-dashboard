@@ -5,7 +5,7 @@ dashboard can fetch fresh news directly from the browser on every page load
 (instead of being frozen until the next CI rebuild).
 
 - **Zero dependencies** (single `index.js`, regex-based RSS parser).
-- **Allowlisted** to two feeds (Yahoo Finance + MarketWatch). Not an open CORS proxy.
+- **Allowlisted** to a fixed list of five finance feeds (MarketWatch ×2, Motley Fool, CNBC, Yahoo Finance; see `FEEDS` in `index.js`). Not an open CORS proxy.
 - **Edge-cached for 10 minutes**: most visitors hit Cloudflare's cache, not the origin feed.
 - **Free** within Cloudflare's 100,000 requests/day Workers tier.
 
