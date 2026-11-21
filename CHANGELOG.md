@@ -14,6 +14,16 @@ than a barely-working prototype.
 
 ---
 
+## v3.8.3 — 2026-11-21
+
+### Removed
+- The panel listing manual funds without a ticker, which had not been shown
+  on the page since an early version (dropped deliberately), along with its
+  styles. Such rows are still kept out of the basket.
+
+### Docs
+- Worker README now lists the five allowlisted feeds (it said two).
+
 ## v3.8.2 — 2026-11-21
 
 Fixes from a code and security review.

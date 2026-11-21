@@ -1446,32 +1446,6 @@
     .wl-pct{font-size:12.5px}
   }
 
-  .untracked{margin:32px 0 8px;padding:18px 20px;border:1px solid var(--border);
-    border-radius:12px;background:var(--surface);}
-  .untracked-head h3{margin:0 0 4px;font-family:var(--font-display);font-size:18px;
-    font-weight:400;color:var(--text);letter-spacing:-0.01em}
-  .untracked-head h3 .muted{color:var(--text-dim);font-size:14px;margin-left:4px}
-  .untracked-head p.muted{margin:0 0 14px;font-family:var(--font-ui);font-size:12px;
-    color:var(--text-dim);line-height:1.5}
-  .untracked-head code{font-family:var(--font-mono);font-size:11px;color:var(--text-2);
-    background:var(--surface-2);padding:1px 5px;border-radius:3px}
-  .untracked-table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
-  .untracked-table th{text-align:left;padding:8px 10px;border-bottom:1px solid var(--border);
-    font-family:var(--font-ui);font-size:10px;text-transform:uppercase;letter-spacing:0.06em;
-    color:var(--text-dim);font-weight:500}
-  .untracked-table th.num{text-align:right}
-  .untracked-table td{padding:9px 10px;border-bottom:1px solid var(--border);
-    font-family:var(--font-ui);font-size:12.5px;color:var(--text-2)}
-  .untracked-table tbody tr:last-child td{border-bottom:none}
-  .untracked-table .ut-date{font-family:var(--font-mono);font-size:11.5px;color:var(--text-dim);
-    white-space:nowrap;width:80px}
-  .untracked-table .ut-action{font-family:var(--font-mono);font-size:10.5px;
-    text-transform:uppercase;letter-spacing:0.05em;font-weight:500;width:90px}
-  .untracked-table .ut-action.ut-pos{color:var(--up)}
-  .untracked-table .ut-action.ut-neg{color:var(--down)}
-  .untracked-table .ut-name{color:var(--text)}
-  .untracked-table .ut-price{font-family:var(--font-mono);font-size:12px;color:var(--text-2);
-    text-align:right;white-space:nowrap}
 
   /* Single panel layout (tabs removed in v9 — modal handles per-ticker drill) */
   .panel{display:block;margin-top:32px}
