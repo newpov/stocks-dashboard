@@ -1800,11 +1800,29 @@ def _universe_cache_age_days(path: "Path | None" = None):
     return (pd.Timestamp(datetime.now(timezone.utc).date()).normalize() - cd).days
 
 
+# v3.10: columns the universe cache must carry. A cache written before they
+# existed counts as stale, forcing ONE full refresh instead of waiting up to
+# UNIVERSE_TTL_DAYS for the short-interest fields the Bear watch needs.
+UNIVERSE_REQUIRED_COLS = ("short_pct_float", "short_ratio", "shares_short",
+                          "shares_short_prior")
+
+
+def _universe_cache_has_schema(path: "Path | None" = None) -> bool:
+    p = path or UNIVERSE_CACHE
+    try:
+        import pyarrow.parquet as _pq
+        names = set(_pq.read_schema(p).names)
+    except Exception:
+        return False
+    return all(c in names for c in UNIVERSE_REQUIRED_COLS)
+
+
 def _universe_cache_is_fresh(ttl_days: int = UNIVERSE_TTL_DAYS) -> bool:
     age = _universe_cache_age_days()
     # No cache, or an old pre-`cache_date` parquet → treat as stale so the next
     # build refetches and rewrites it in the dated format (one-time migration).
-    return age is not None and age < ttl_days
+    # v3.10: likewise a cache missing UNIVERSE_REQUIRED_COLS.
+    return age is not None and age < ttl_days and _universe_cache_has_schema()
 
 
 def fetch_universe_outlook(universe: list[str], meta_cache: pd.DataFrame,
@@ -1902,7 +1920,8 @@ def fetch_universe_outlook(universe: list[str], meta_cache: pd.DataFrame,
     df["num_analysts"]  = a.reindex(df.index)["num_analysts"]
     df["market_cap"]    = a.reindex(df.index)["market_cap"]
     # v2.6 Value screen fundamentals (reindexed from the analyst fetch)
-    for _c in ("pe", "pb", "roe", "rev_growth", "fcf", "debt_to_equity"):
+    for _c in ("pe", "pb", "roe", "rev_growth", "fcf", "debt_to_equity",
+               *UNIVERSE_REQUIRED_COLS):   # v3.10 short interest
         df[_c] = a.reindex(df.index)[_c] if _c in a.columns else float("nan")
     # Upside %: (target / current - 1) * 100, when both are defined
     df["upside"] = df.apply(
@@ -2099,6 +2118,12 @@ def fetch_analyst_data(tickers: list[str], cache: pd.DataFrame,
                 "rev_growth":     info.get("revenueGrowth"),
                 "fcf":            info.get("freeCashflow"),
                 "debt_to_equity": info.get("debtToEquity"),
+                # v3.10 Bear watch crowding badge: short interest (US names;
+                # same info call, no extra request)
+                "short_pct_float":    info.get("shortPercentOfFloat"),
+                "short_ratio":        info.get("shortRatio"),
+                "shares_short":       info.get("sharesShort"),
+                "shares_short_prior": info.get("sharesShortPriorMonth"),
                 "fetched_at":   now,
             }, None
         except Exception as e:
@@ -2111,7 +2136,9 @@ def fetch_analyst_data(tickers: list[str], cache: pd.DataFrame,
                 "num_analysts": None, "recommendation": "", "rec_mean": None,
                 "current_price": None, "market_cap": None,
                 "pe": None, "pb": None, "roe": None, "rev_growth": None,
-                "fcf": None, "debt_to_equity": None, "fetched_at": pd.NaT,
+                "fcf": None, "debt_to_equity": None,
+                "short_pct_float": None, "short_ratio": None,
+                "shares_short": None, "shares_short_prior": None, "fetched_at": pd.NaT,
             }, str(e)
 
     rows = []
@@ -5873,6 +5900,173 @@ def render_industry_outlook(groups: list[dict], universe_size: int, as_of: str =
 </section>"""
 
 
+# === v3.10 Bear watch: names several signals rate weak (short-side screen) ===
+# Counterpart of the Value screen: universe names never held, where >= 3 signals
+# agree, at least one from price/analysts (fundamentals alone are not a short
+# case). Short interest drives a crowding badge, not the ranking: it confirms a
+# bearish consensus but is also what powers a squeeze. See temp/bear-watch-spec.md.
+BEAR_MIN_STRIKES    = 3
+BEAR_MAX_ROWS       = 10
+BEAR_TARGET_GAP     = -5.0    # analyst mean target this % (or more) below price
+BEAR_DOWNTREND_RET  = -15.0   # 12m return at or below ...
+BEAR_DOWNTREND_RNG  = 25.0    # ... and in the bottom quarter of the 52-week range
+BEAR_MAX_DE         = 200.0   # yfinance D/E is a percent: > 200 = > 2.0x
+BEAR_MAX_PE         = 60.0
+BEAR_COUNTER_UPSIDE = 20.0    # analysts still see >= this upside -> caution chip
+BEAR_MARKET_SIGNALS = ("target_below", "bearish_rating", "downtrend")
+BEAR_SIGNAL_LABELS = {
+    "target_below":   "Target below price",
+    "bearish_rating": "Sell-side bearish",
+    "downtrend":      "Downtrend",
+    "rev_shrinking":  "Revenue shrinking",
+    "cash_burn":      "Burning cash",
+    "heavy_debt":     "Debt > 2x equity",
+    "unprofitable":   "Loss-making (ROE < 0)",
+    "very_expensive": "P/E > 60",
+}
+
+
+def _bear_num(v):
+    try:
+        f = float(v)
+        return f if f == f else None
+    except (TypeError, ValueError):
+        return None
+
+
+def short_crowding(short_pct_float, short_ratio, shares_short=None,
+                   shares_short_prior=None) -> dict:
+    """Crowding tier from short interest. crowded: >= 15% of float or >= 7 days
+    to cover; elevated: >= 7% or >= 4 days; light otherwise; na when both are
+    missing (mostly non-US names). Pure; never raises."""
+    pct, days = _bear_num(short_pct_float), _bear_num(short_ratio)
+    cur, prior = _bear_num(shares_short), _bear_num(shares_short_prior)
+    change = ((cur / prior - 1.0) * 100.0) if (cur is not None and prior) else None
+    if pct is None and days is None:
+        tier = "na"
+    elif (pct or 0) >= 0.15 or (days or 0) >= 7:
+        tier = "crowded"
+    elif (pct or 0) >= 0.07 or (days or 0) >= 4:
+        tier = "elevated"
+    else:
+        tier = "light"
+    return {"tier": tier, "pct": pct, "days": days, "change_pct": change}
+
+
+def build_bear_watch(universe_outlook: "pd.DataFrame | None",
+                     log_tickers: "set[str] | None" = None) -> list[dict]:
+    """Rows for the Bear watch, ranked by signal count, then most bearish analyst
+    target, then weakest 12m return; capped at BEAR_MAX_ROWS. Pure; never raises."""
+    if universe_outlook is None or len(universe_outlook) == 0:
+        return []
+    skip = log_tickers or set()
+    out = []
+    for tkr, r in universe_outlook.iterrows():
+        if tkr in skip:
+            continue
+        up, ret = _bear_num(r.get("upside")), _bear_num(r.get("ret_12m"))
+        rng = _bear_num(r.get("range52w_pct"))
+        rev, fcf = _bear_num(r.get("rev_growth")), _bear_num(r.get("fcf"))
+        de, roe, pe = (_bear_num(r.get("debt_to_equity")), _bear_num(r.get("roe")),
+                       _bear_num(r.get("pe")))
+        rec = str(r.get("recommendation") or "").lower()
+        sig = []
+        if up is not None and up <= BEAR_TARGET_GAP:
+            sig.append("target_below")
+        if rec in ("underperform", "sell", "strong_sell"):
+            sig.append("bearish_rating")
+        if (ret is not None and rng is not None and ret <= BEAR_DOWNTREND_RET
+                and rng <= BEAR_DOWNTREND_RNG):
+            sig.append("downtrend")
+        if rev is not None and rev < 0:
+            sig.append("rev_shrinking")
+        if fcf is not None and fcf < 0:
+            sig.append("cash_burn")
+        if de is not None and de > BEAR_MAX_DE:
+            sig.append("heavy_debt")
+        if roe is not None and roe < 0:
+            sig.append("unprofitable")
+        if pe is not None and pe > BEAR_MAX_PE:
+            sig.append("very_expensive")
+        if len(sig) < BEAR_MIN_STRIKES or not any(x in BEAR_MARKET_SIGNALS for x in sig):
+            continue
+        counter = (f"analysts bullish {up:+.0f}%"
+                   if up is not None and up >= BEAR_COUNTER_UPSIDE else None)
+        out.append({
+            "ticker": str(tkr), "name": str(r.get("name") or tkr),
+            "sector": str(r.get("sector") or ""), "ret_12m": ret, "upside": up,
+            "signals": sig, "n": len(sig), "counter": counter,
+            "crowding": short_crowding(r.get("short_pct_float"), r.get("short_ratio"),
+                                       r.get("shares_short"), r.get("shares_short_prior")),
+        })
+    out.sort(key=lambda x: (-x["n"],
+                            x["upside"] if x["upside"] is not None else float("inf"),
+                            x["ret_12m"] if x["ret_12m"] is not None else float("inf")))
+    return out[:BEAR_MAX_ROWS]
+
+
+_BEAR_RISK_NOTE = ("A screen, not advice. Shorting can lose more than 100% (a stock can "
+                   "keep rising), costs a borrow fee, and the lender can recall the shares; "
+                   "a crowded short can squeeze sharply. Prices only: no borrow costs or margin.")
+
+
+def _bear_pct(v):
+    return "&mdash;" if v is None else f"{v:+.0f}%"
+
+
+def _bear_crowd_html(c: dict) -> str:
+    if c["tier"] == "na":
+        return ('<span class="bw-crowd bw-crowd-na" title="No short-interest data '
+                '(common for non-US names)">n/a</span>')
+    bits = []
+    if c["pct"] is not None:
+        bits.append(f'{c["pct"] * 100:.1f}%')
+    if c["days"] is not None:
+        bits.append(f'{c["days"]:.1f}d')
+    arrow = ""
+    if c["change_pct"] is not None and abs(c["change_pct"]) >= 1:
+        arrow = (f' <span class="bw-chg">{"&uarr;" if c["change_pct"] > 0 else "&darr;"}'
+                 f'{abs(c["change_pct"]):.0f}%</span>')
+    label = {"crowded": "crowded &middot; squeeze risk", "elevated": "elevated",
+             "light": "light"}[c["tier"]]
+    return (f'<span class="bw-crowd bw-crowd-{c["tier"]}" title="Short interest: % of float '
+            f'sold short &middot; days to cover &middot; change vs last month">{label}'
+            f'<small>{" &middot; ".join(bits)}{arrow}</small></span>')
+
+
+def render_bear_watch(rows: list[dict], as_of_str: str) -> str:
+    head = ('<div class="bw-head"><h3>Bear watch</h3>'
+            '<span class="bw-sub">names several signals rate weak &middot; S&amp;P 500, '
+            f'never held &middot; as of {_esc(as_of_str)}</span></div>')
+    risk = f'<p class="bw-risk">{_esc(_BEAR_RISK_NOTE)}</p>'
+    if not rows:
+        return (f'<section class="bear-watch-section">{head}'
+                '<p class="bw-empty">No names met the bar this build (3+ weak signals, '
+                f'at least one from price or analysts).</p>{risk}</section>')
+    trs = []
+    for r in rows:
+        chips = "".join(
+            f'<span class="bw-chip{" bw-mkt" if s in BEAR_MARKET_SIGNALS else ""}">'
+            f'{_esc(BEAR_SIGNAL_LABELS.get(s, s))}</span>' for s in r["signals"])
+        if r.get("counter"):
+            chips += f'<span class="bw-chip bw-counter">{_esc(r["counter"])}</span>'
+        ret_cls = "neg" if (r["ret_12m"] or 0) < 0 else "pos"
+        up_cls = "neg" if (r["upside"] or 0) < 0 else "pos"
+        trs.append(
+            f'<tr><td class="bw-tkr"><span class="ticker-clickable" '
+            f'data-ticker="{_esc(r["ticker"])}">{_esc(r["ticker"])}</span></td>'
+            f'<td class="bw-name">{_esc(r["name"])}<small>{_esc(r["sector"])}</small></td>'
+            f'<td class="num {ret_cls}">{_bear_pct(r["ret_12m"])}</td>'
+            f'<td class="num {up_cls}">{_bear_pct(r["upside"])}</td>'
+            f'<td class="bw-sigs">{chips}</td><td>{_bear_crowd_html(r["crowding"])}</td></tr>')
+    table = ('<div class="bw-scroll"><table class="bw-table"><thead><tr><th>Ticker</th>'
+             '<th>Name</th><th class="num">12-mo</th>'
+             '<th class="num" title="Analyst mean target vs price">vs target</th>'
+             '<th>Weak signals</th><th title="Short interest">Crowding</th></tr></thead>'
+             f'<tbody>{"".join(trs)}</tbody></table></div>')
+    return f'<section class="bear-watch-section">{head}{risk}{table}</section>'
+
+
 def build_value_screen(universe_outlook: "pd.DataFrame | None",
                        log_tickers: "set[str] | None" = None,
                        bb_idea_tickers: "set[str] | None" = None,
@@ -8563,6 +8757,10 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     # since the screen's data is only as fresh as that fetch (computed once up top
     # as uni_as_of from the embedded cache_date, NOT mtime which CI resets).
     value_html = render_value_screen(value_rows, uni_as_of)
+    # v3.10 Bear watch (short-side screen), same universe + exclusions.
+    bear_html = (render_bear_watch(build_bear_watch(universe_outlook, log_tickers=log_tickers_set),
+                                   uni_as_of)
+                 if universe_outlook is not None and len(universe_outlook) else "")
 
     # v3.2 Doctor -- deterministic whole-basket check-up over already-computed
     # data (zero extra fetch). Toggled panel; pinned far-left in the topbar.
@@ -9183,6 +9381,7 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     _module_defs = [
         ("bigbrain", "Big Brain says", bigbrain_html),
         ("value_screen", "Value screen", value_html),
+        ("bear_watch", "Bear watch", bear_html),
         ("outlook", "Sector outlook", industry_html),
         ("news", "News", news_html),
         ("ai_buildout", "AI build-out", ai_buildout_html),

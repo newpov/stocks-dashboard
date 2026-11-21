@@ -14,6 +14,52 @@ than a barely-working prototype.
 
 ---
 
+## v3.10.1 — 2026-11-21
+
+### Changed
+- **CI now runs Python 3.14** (was 3.11), the same version the author uses
+  locally, so what passes locally is exactly what the nightly build runs.
+  3.11 rejected some newer f-string syntax and set a version floor for one
+  dependency. The hashed lock was regenerated for 3.14 (only change: numpy
+  2.4.6 → 2.5.4, its 3.14 build) and still checks clean against osv.dev.
+  Verified in a clean 3.14 environment with the CI versions: full test suite,
+  demo build, live build and sanity gate all pass.
+
+## v3.10 — "Bear watch" short-side screen · 21 November 2026
+
+### Added
+- **Bear watch module** (right after the Value screen): the short-side
+  counterpart of the Value screen. It lists S&P 500 names you have never held
+  where at least three independent signals agree the stock looks weak, at
+  least one of them from price action or analysts (fundamentals alone are not
+  treated as a short case). Signals: analyst target below price, sell-side
+  bearish rating, downtrend (12-month loss in the bottom quarter of the
+  52-week range), shrinking revenue, cash burn, debt over 2× equity,
+  loss-making, P/E above 60. Ranked by how many agree, then by how far below
+  the price analysts' targets sit; up to 10 names.
+- **Counter-evidence stays visible.** When analysts still see 20%+ upside, the
+  row carries an "analysts bullish" chip instead of being hidden.
+- **Crowding badge from short interest** (share of float sold short, days to
+  cover, change on last month), read from the same data call the universe
+  already makes. Heavily shorted names are flagged "crowded · squeeze risk":
+  short interest confirms a bearish consensus but is also what powers a
+  squeeze, so it informs rather than ranks.
+- **Risk framing is part of the module:** a screen, not advice; shorting can
+  lose more than 100%, costs a borrow fee, can be recalled and can squeeze; the
+  dashboard models prices only.
+- The universe cache now counts as stale when it lacks the short-interest
+  columns, forcing one refresh instead of waiting up to a month.
+
+## v3.9.1 — 2026-11-21
+
+### Security
+- **CI lock: `soupsieve` 2.10 → 4.0.1**, clearing the three advisories GitHub
+  flagged (2 high, 1 moderate: GHSA-6655-6qjp-jx7x, GHSA-7g44-g9rc-x53w,
+  GHSA-mmhr-3c5m-f64f). All are denial-of-service bugs triggered by hostile
+  CSS-selector strings; here the selectors are fixed strings inside yfinance,
+  so the build was not practically exposed. The whole lock now checks clean
+  against osv.dev (0 of 27 packages with advisories). Verified on Python 3.11.
+
 ## v3.9 — "Sector outlook" + honest labels · 21 November 2026
 
 ### Changed
