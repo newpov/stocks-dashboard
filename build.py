@@ -242,8 +242,8 @@ POCKET_LESSONS: list[dict[str, str]] = [
      "body": "The red drawdown sparkline shows how far below the prior peak the basket sits at each date. A nearly-flat line at 0% means a smooth ride; deep red excursions are stress tests you survived. Pair the current drawdown with the worst-seen number to gauge familiarity."},
     {"title": "Weekly movers",
      "body": "Click any weekly point on the hero chart to see that week's biggest up and down movers in your basket. Most weeks are dominated by 2-3 names; concentration of P&L into a few stocks is normal but worth noticing. If the same name dominates week after week, it's becoming your portfolio."},
-    {"title": "Industry outlook",
-     "body": "The industry-outlook section shows 12-month returns across an S&P 500-wide universe, grouped by industry. It tells you which industries are hot or cold — useful for spotting where the market is allocating attention. Industries already up 50%+ tend to mean-revert; bottom-quartile industries often lead the next cycle."},
+    {"title": "Sector outlook",
+     "body": "The sector-outlook section shows 12-month returns across an S&P 500-wide universe, grouped by sector and weighted by each company's size a year ago, so one runaway stock can't set a sector's number. It tells you which sectors are hot or cold — useful for spotting where the market is allocating attention. Sectors already up 50%+ tend to mean-revert; bottom-quartile sectors often lead the next cycle."},
     {"title": "Top contributor / detractor",
      "body": "These stats name your basket's single biggest positive and negative driver. Healthy diversification looks like contributions spread across many names. If your top contributor is +12pp while everyone else is +1pp each, your basket's fate is really one stock's fate."},
     {"title": "Renormalised contribution",
@@ -352,7 +352,7 @@ POCKET_LESSON_CATEGORIES: dict[str, list[str]] = {
     ],
     "Dashboard": [
         "The loss-zone", "The WATCH", "Closed positions", "Why some positions",
-        "Weekly movers", "Industry outlook", "Top contributor",
+        "Weekly movers", "Sector outlook", "Top contributor",
         "Renormalised contribution", "Why the hero", "Basket leading SPY",
         "The news section", "Per-ticker news", "The sector chip filter",
         "What this dashboard",
@@ -5711,17 +5711,29 @@ def render_basket_diversification(data: dict | None, meta: pd.DataFrame) -> str:
 </section>"""
 
 
+SECTOR_OUTLOOK_MIN_NAMES = 8   # v3.9: a sector needs this many non-held names to show
+
+
 def build_industry_outlook(universe_outlook: pd.DataFrame | None,
                            log_tickers: set[str] | None = None,
                            min_holdings: int = 3,
-                           top_industries: int = 6, top_stocks_per: int = 3) -> list[dict]:
-    """Industry leaderboard built from the reference universe ONLY, with any
+                           top_industries: int = 6, top_stocks_per: int = 3,
+                           group_by: str = "industry") -> list[dict]:
+    """Group leaderboard built from the reference universe ONLY, with any
     ticker the user already holds (open or closed) filtered out so the section
     surfaces genuinely new ideas.
 
-    Aggregates by industry: avg 12-month return, top stocks by analyst price-
-    target upside. Requires min_holdings tickers per industry so a single
-    name can't dominate the ranking.
+    Aggregates by `group_by` ("industry" or "sector"): 12-month return weighted
+    by START-of-period market cap, plus top stocks by analyst upside. Requires
+    min_holdings tickers per group so a single name can't dominate. The group
+    label stays under the "industry" key for existing consumers (hero overlay,
+    Doctor); "group_by" records which level it is.
+
+    v3.9: weights are start-of-window caps, market_cap / (1 + ret/100). Today's
+    cap let a moonshot -- huge now *because* it ran -- dominate its group
+    ("Computer Hardware +1606%"); the start cap is what an index bought a year
+    ago actually held. The page's Sector outlook uses group_by="sector" (broad
+    groups); the hero overlay and Doctor keep industry-level groups.
     """
     if universe_outlook is None or universe_outlook.empty:
         return []
@@ -5730,7 +5742,7 @@ def build_industry_outlook(universe_outlook: pd.DataFrame | None,
     for tkr, row in universe_outlook.iterrows():
         if tkr in skip:
             continue
-        industry = str(row.get("industry") or "").strip()
+        industry = str(row.get(group_by) or "").strip()
         if not industry:
             continue
         ret_12m = row.get("ret_12m")
@@ -5738,13 +5750,17 @@ def build_industry_outlook(universe_outlook: pd.DataFrame | None,
             continue
         up_val = row.get("upside")
         mc_val = row.get("market_cap")
+        # v3.9: start-of-period cap = today's cap / growth factor. NaN when the
+        # cap is missing/non-positive or the name lost ~everything (growth <=
+        # 0), so it drops out of the weighting instead of dividing by ~0.
+        growth = 1.0 + float(ret_12m) / 100.0
+        start_cap = (float(mc_val) / growth
+                     if mc_val is not None and pd.notna(mc_val) and float(mc_val) > 0
+                     and growth > 1e-6 else float("nan"))
         records.append({
             "ticker": tkr, "industry": industry,
             "ret_12m": float(ret_12m),
-            # market cap drives the group's cap-weighted return (v2.5 #1); NaN
-            # when missing/non-positive so it drops out of the weighting.
-            "market_cap": (float(mc_val) if mc_val is not None and pd.notna(mc_val)
-                           and float(mc_val) > 0 else float("nan")),
+            "market_cap": start_cap,
             "upside": (None if up_val is None or pd.isna(up_val) else float(up_val)),
             "rec": str(row.get("recommendation") or ""),
             "n_an": int(row["num_analysts"]) if pd.notna(row.get("num_analysts")) else 0,
@@ -5759,9 +5775,8 @@ def build_industry_outlook(universe_outlook: pd.DataFrame | None,
     for ind, g in df.groupby("industry"):
         if len(g) < min_holdings:
             continue
-        # v2.5 #1: market-cap-weighted average 12mo return — a bigger company
-        # moves the group number more (standard index-weighting). Falls back to
-        # the simple mean if no constituent has a usable market cap.
+        # Cap-weighted 12mo return (v2.5 #1), on START-of-period caps (v3.9).
+        # Falls back to the simple mean if no constituent has a usable cap.
         mc = g["market_cap"]
         mask = mc > 0
         if mask.any():
@@ -5785,6 +5800,7 @@ def build_industry_outlook(universe_outlook: pd.DataFrame | None,
         } for r in g_sorted.itertuples(index=False)]
         groups.append({
             "industry": ind,
+            "group_by": group_by,
             "n_holdings": int(len(g)),
             "avg_ret_12m": avg_ret,
             "top_stocks": top,
@@ -5827,23 +5843,31 @@ def render_industry_outlook(groups: list[dict], universe_size: int, as_of: str =
         # T11: each card is clickable -> opens "all tickers in this industry"
         # info-modal. The header carries a tiny "see all" hint so the
         # interaction is discoverable without cluttering the card body.
+        grp = str(g.get("group_by") or "industry")
         cards.append(
             f'<div class="io-card industry-clickable" data-industry="{_esc(g["industry"])}" '
+            f'data-group="{_esc(grp)}" '
             f'title="Click to see every tracked ticker in {_esc(g["industry"])}">'
             f'<div class="io-head">'
             f'<div class="io-industry">{_esc(g["industry"])}</div>'
-            f'<div class="io-avg {avg_cls}" title="Market-cap-weighted average 12-month return '
-            f'(bigger companies count more)">{g["avg_ret_12m"]:+.0f}% avg 12mo</div>'
+            f'<div class="io-avg {avg_cls}" title="12-month return weighted by each company&#39;s '
+            f'market cap at the start of the period (what an index bought a year ago held)">'
+            f'{g["avg_ret_12m"]:+.0f}% 12mo</div>'
             f'</div>'
             f'<div class="io-sub muted">{g["n_holdings"]} tracked stocks <span class="io-expand-hint">&rarr; see all</span></div>'
             f'<div class="io-stocks">{"".join(stock_rows)}</div>'
             f'</div>'
         )
     as_of_note = f" &middot; as of {as_of}" if as_of else ""
+    by_sector = bool(groups) and groups[0].get("group_by") == "sector"
+    title = "Sector outlook" if by_sector else "Industry outlook"
+    basis = ("weighted by each company's size at the start of the period, so a "
+             "single runaway stock can't set the number" if by_sector else
+             "start-of-period cap-weighted")
     return f"""<section class="industry-section">
   <div class="io-head-row">
-    <h3>Industry outlook <span class="muted">({len(groups)})</span></h3>
-    <p class="muted">12-mo return leaders from <code>universe.csv</code> ({universe_size} stocks), excluding everything in <code>log.xlsx</code>. Refreshed monthly{as_of_note}.</p>
+    <h3>{title} <span class="muted">({len(groups)})</span></h3>
+    <p class="muted">12-mo returns across <code>universe.csv</code> ({universe_size} stocks), {basis}; excludes everything you hold or held. Refreshed monthly{as_of_note}.</p>
   </div>
   <div class="io-grid">{''.join(cards)}</div>
 </section>"""
@@ -7547,7 +7571,8 @@ def build_aux_payload(returns: pd.DataFrame, prices: pd.DataFrame,
       - pairs:         [{a, b, corr}, ...] (sorted by abs(corr) desc)
       - weekly_movers: dict[date_str]       -> {up: [...], down: [...]}
     """
-    out: dict = {"industries": {}, "sectors": {}, "pairs": [], "weekly_movers": {}}
+    out: dict = {"industries": {}, "sectors": {}, "universe_sectors": {},
+                 "pairs": [], "weekly_movers": {}}
 
     # T11: every universe ticker grouped by industry (so a click on the
     # industry-outlook card opens "all tickers in this industry").
@@ -7579,6 +7604,13 @@ def build_aux_payload(returns: pd.DataFrame, prices: pd.DataFrame,
                 "cap_tier": (str(tier) if pd.notna(tier) and tier else ""),
             }
             out["industries"].setdefault(ind, []).append(entry)
+            # v3.9: same entries grouped by sector for the Sector outlook cards.
+            sec = str(row.get("sector") or "").strip()
+            if sec:
+                out["universe_sectors"].setdefault(sec, []).append(entry)
+        for sec in out["universe_sectors"]:
+            out["universe_sectors"][sec].sort(
+                key=lambda e: (e["return_12mo"] is None, -(e["return_12mo"] or 0)))
         # Sort each industry by 12mo return descending (best at top).
         for ind in out["industries"]:
             out["industries"][ind].sort(
@@ -7690,13 +7722,13 @@ SHOCKWAVE_MAX_DAILY_MOVE = 0.60
 # Narrative scenarios mapped onto the 3 factors (an approximation, not literal
 # instrument betas). Negative + positive; likelihood + historical recovery.
 SHOCKWAVE_PRESETS = [
-    {"label": "Tech correction",   "spy": -8,  "tech": -18, "usd": 0,  "likelihood": "occasional", "recovery": "~1 yr"},
-    {"label": "Risk-off bear",     "spy": -22, "tech": -8,  "usd": 6,  "likelihood": "occasional", "recovery": "~2 yrs"},
-    {"label": "2008-style crash",  "spy": -45, "tech": -15, "usd": 10, "likelihood": "rare",       "recovery": "~4 yrs"},
-    {"label": "Rate shock",        "spy": -12, "tech": -22, "usd": 8,  "likelihood": "occasional", "recovery": "~1.5 yrs"},
-    {"label": "Soft-landing rally","spy": 10,  "tech": 8,   "usd": 0,  "likelihood": "common",     "recovery": None},
-    {"label": "AI breakthrough",   "spy": 8,   "tech": 30,  "usd": 0,  "likelihood": "rare",       "recovery": None},
-    {"label": "Crypto mainstream", "spy": 6,   "tech": 18,  "usd": -5, "likelihood": "rare",       "recovery": None},
+    {"label": "Tech correction",   "spy": -8,  "tech": -18, "usd": 0,  "likelihood": "occasional"},
+    {"label": "Risk-off bear",     "spy": -22, "tech": -8,  "usd": 6,  "likelihood": "occasional"},
+    {"label": "2008-style crash",  "spy": -45, "tech": -15, "usd": 10, "likelihood": "rare"},
+    {"label": "Rate shock",        "spy": -12, "tech": -22, "usd": 8,  "likelihood": "occasional"},
+    {"label": "Soft-landing rally","spy": 10,  "tech": 8,   "usd": 0,  "likelihood": "common"},
+    {"label": "AI breakthrough",   "spy": 8,   "tech": 30,  "usd": 0,  "likelihood": "rare"},
+    {"label": "Crypto mainstream", "spy": 6,   "tech": 18,  "usd": -5, "likelihood": "rare"},
 ]
 
 
@@ -7799,6 +7831,14 @@ def recovery_estimate(basket_move: float) -> "str | None":
     if m >= -40:
         return "~4 years"
     return "~5-6 years"
+
+
+# v3.9: each preset's recovery is the model's estimate for that preset's MARKET
+# move (hand-set strings had drifted from recovery_estimate, e.g. a -45% crash
+# said "~4 yrs" vs the model's "~5-6 years"). The UI labels it "mkt"; the hero
+# separately shows recovery for the user's own basket move.
+for _p in SHOCKWAVE_PRESETS:
+    _p["recovery"] = recovery_estimate(_p["spy"])
 
 
 def build_shockwave_payload(factors, presets, as_of, base_ccy,
@@ -8049,7 +8089,7 @@ def pick_defend(returns, meta, signals, analyst, diversification_data,
                 "lens": "defend", "tickers": tks, "verb": "trim",
                 "why": f"{top_sector} is {top_share*100:.0f}% of your open names - "
                        f"a single-sector shock would hit hard.",
-                "module_key": "industry", "module_label": "Industry outlook"}))
+                "module_key": "industry", "module_label": "Sector outlook"}))
 
     if returns is not None and not returns.empty:
         for t in returns[returns["status"] == "open"].index.tolist():
@@ -8438,12 +8478,21 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     analyst_html = render_analyst_signals(analyst_rows, len(candidates), as_of=close_as_of) if (analyst_rows or candidates) else ""
     # Industry outlook — universe-only, excluding everything in log.xlsx
     log_tickers_set = set(transactions.ticker.unique().tolist()) if not transactions.empty else set()
+    # Industry-level groups still feed the hero overlay + Doctor (owned lines are
+    # industries, so the "skip owned" match must stay at that level).
     industry_groups = build_industry_outlook(
         universe_outlook,
         log_tickers=log_tickers_set,
     )
+    # v3.9: the page module shows SECTORS (broad, ~20-80 names each), so no
+    # single name decides a group's number. SECTOR_OUTLOOK_MIN_NAMES keeps
+    # thin sectors out.
+    sector_groups = build_industry_outlook(
+        universe_outlook, log_tickers=log_tickers_set,
+        group_by="sector", min_holdings=SECTOR_OUTLOOK_MIN_NAMES,
+    )
     universe_count = (len(universe_outlook) if universe_outlook is not None else 0)
-    industry_html = render_industry_outlook(industry_groups, universe_count, as_of=uni_as_of)
+    industry_html = render_industry_outlook(sector_groups, universe_count, as_of=uni_as_of)
     news_html = render_news(news_items or [])
 
     # Basket diversification — 6-month pairwise correlation summary across
@@ -9134,7 +9183,7 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     _module_defs = [
         ("bigbrain", "Big Brain says", bigbrain_html),
         ("value_screen", "Value screen", value_html),
-        ("outlook", "Industry outlook", industry_html),
+        ("outlook", "Sector outlook", industry_html),
         ("news", "News", news_html),
         ("ai_buildout", "AI build-out", ai_buildout_html),
         ("predictions", "Market expectations", market_expectations_html),

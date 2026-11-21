@@ -14,6 +14,34 @@ than a barely-working prototype.
 
 ---
 
+## v3.9 — "Sector outlook" + honest labels · 21 November 2026
+
+### Changed
+- **Industry outlook is now Sector outlook, with credible numbers.** It used
+  to group the universe into 3-7-company industries weighted by today's market
+  cap, so one stock whose value had exploded set its whole group's figure
+  ("Computer Hardware +1606%"). It now groups by sector (16-62 companies each)
+  and weights each company by its size at the start of the 12 months, which is
+  what an index bought a year ago actually held. No cap on the result: a
+  booming sector still reads high (Energy +61% is a genuine sector-wide move,
+  median stock +52%). Clicking a sector lists its companies. The hero's
+  industry overlay and the Doctor keep industry-level groups, now on the same
+  start-of-period weights.
+
+### Fixed
+- **Shockwave recovery times no longer contradict the projected move.** Preset
+  chips showed hand-written market recovery times that the headline then
+  repeated beside the basket's (often much deeper) fall: "Tech correction"
+  showed a −27% basket move with "~1 yr". Chips now show the market's
+  recovery from the model ("mkt ~1 year"), and the headline always shows
+  recovery for your basket's own move ("est. basket recovery ~4 years"). Two
+  hand-written figures had also drifted from the model (a 2008-style crash now
+  reads ~5-6 years, matching history).
+- **Market expectations theme names no longer state a level the question
+  doesn't.** Since Kalshi strikes are picked near 50/50, "Bitcoin above $110k"
+  and "CPI inflation above 4.5%" sat over different levels; they are now
+  "Bitcoin price by year-end" and "Annual CPI inflation".
+
 ## v3.8.4 — 2026-11-21
 
 CI supply-chain hardening (from the deeper security review).

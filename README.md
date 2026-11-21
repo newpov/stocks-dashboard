@@ -169,7 +169,7 @@ then context, then details, then actions:
 │ Scorecard table, heat-shaded cells, BB cross-tag. Discovery-only.     │
 └───────────────────────────────────────────────────────────────────────┘
 
-┌─ Industry outlook ─────────┬─ Market news ──────────────────────────┐
+┌─ Sector outlook ───────────┬─ Market news ──────────────────────────┐
 │ 6 industries from universe │ Live finance headlines (Worker) or    │
 │ minus log.xlsx, top 3      │ build-time RSS (fallback). Source     │
 │ stocks by analyst upside,  │ filter chips: All / MarketWatch /     │
@@ -285,7 +285,7 @@ A composed visualisation with several layers sharing one x-axis:
 - **Industry lines (optional, v3.4):** tap **Industries** in the legend to overlay
   the top **3 owned industries** as real equal-weight trajectory lines (built like
   the basket, from each industry's held tickers) plus the top **2 non-owned
-  industries** as hollow-diamond **"12m" markers** from the Industry outlook. Owned
+  industries** as hollow-diamond **"12m" markers** from the industry-level outlook data. Owned
   lines are since-inception, non-owned markers are a 12-month figure (clearly
   tagged — different horizons on purpose). Off by default; toggling hides all five
   and frees the legend.
@@ -404,7 +404,7 @@ above the board when a tracked prediction market moves ≥ 8pp build-over-build
 
 ### Value screen — quality + value near a 52-week low (v2.6)
 
-A fundamentals lens (Big Brain reads technicals, Industry outlook reads returns;
+A fundamentals lens (Big Brain reads technicals, Sector outlook reads returns;
 this reads the balance sheet). It screens the S&P 500 universe for names trading
 **near their 52-week low** that also clear quality/value checks — "quality on
 sale" — built transparently from public yfinance fundamentals, not a proprietary
