@@ -36,8 +36,10 @@ def test_palette_cycle_includes_neon():
     assert "'palette-neon'" in JS          # removed again when cycling away
 
 
-def test_hero_basket_colour_comes_from_css_with_amber_default():
-    assert "--hero-basket:#f59e0b" in _block(":root")   # existing palettes unchanged
+def test_hero_basket_colour_comes_from_css():
+    # v3.11: the default line is now blue; the May amber lives on in Classic.
+    assert "--hero-basket:" in _block(":root")
+    assert "--hero-basket:#f59e0b" in _block("body.palette-classic")
     assert "const basketColor = '#f59e0b';" not in JS
     assert "--hero-basket" in JS
 

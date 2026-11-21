@@ -9511,7 +9511,7 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
 <title>Portfolio &middot; since {first_purchase_str}</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400;500&family=Geist:wght@400;500;600&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
 :root{{--watch-cols-desktop:{WATCH_COLS_DESKTOP};--watch-cols-mobile:{WATCH_COLS_MOBILE}}}
 {css_block}</style>
@@ -9579,7 +9579,7 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     </svg>
   </button>
   <!-- v2.1: 4 palette buttons collapsed to a single cycling button. Click
-       advances Default -> Soft Dark -> Light -> Amber -> Neon Coast -> Default. The icon
+       advances Default -> Neon Coast -> Soft Dark -> Light -> Amber -> Classic -> Default. The icon
        is a filled circle in var(--accent) so the active palette is visible
        at a glance; data-tooltip carries the palette name (updated by JS). -->
   <button class="layout-toggle icon-btn palette-cycle-btn" id="palette-cycle-btn" type="button"

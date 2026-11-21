@@ -14,6 +14,22 @@ than a barely-working prototype.
 
 ---
 
+## v3.11 — new default look · 21 November 2026
+
+### Changed
+- **A fresh, more readable default theme.** Neutral near-black greys with a
+  blue accent (shadcn/ui colours, MIT) and Inter for all text, Geist Mono for
+  figures (both OFL), with numbers aligned in columns. The May default's
+  secondary labels (axis labels, subtitles, "as of" dates) contrasted at 3.5:1,
+  below the 4.5:1 small-text minimum; they are now about 6.9:1. Headings use a
+  weight token so sans-serif titles read solid rather than thin.
+- **Chart colours follow the palette.** The hero chart's axis labels, S&P line,
+  shaded areas and labels, plus sparkline and Shockwave gain/loss colours, were
+  hard-coded to the May palette; they now come from the active theme.
+- **Palette order:** Default → Neon Coast (temporarily second) → Soft Dark →
+  Light → Amber → **Classic**. Classic is the May look (dark + amber,
+  Instrument Serif headings); its fonts download only when it's chosen.
+
 ## v3.10.1 — 2026-11-21
 
 ### Changed
