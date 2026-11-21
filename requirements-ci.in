@@ -1,8 +1,10 @@
 # CI-only direct dependencies, pinned exactly (v3.8.4 supply-chain hardening).
 # requirements-ci.txt is generated from this file, with hashes, for the CI
 # runner (Linux, Python 3.11), ignoring anything published in the two weeks
-# before the lock date. Regenerate after changing a pin:
-#   uv pip compile requirements-ci.in --python-version 3.11 \
+# before the lock date. 3.11.5 is the floor some pins need (setup-python '3.11'
+# installs the latest 3.11.x, so CI always satisfies it). Then check the lock
+# against known advisories (osv.dev). Regenerate after changing a pin:
+#   uv pip compile requirements-ci.in --python-version 3.11.5 \
 #     --python-platform x86_64-unknown-linux-gnu --generate-hashes \
 #     --exclude-newer <today minus 14 days> -o requirements-ci.txt
 # Local/forker installs keep using the looser requirements.txt.
@@ -11,3 +13,6 @@ pandas==3.0.3
 pyarrow==24.0.0
 openpyxl==3.1.5
 feedparser==6.0.12
+# Security floor (v3.9.1): soupsieve <4.0 has 2 high + 1 moderate ReDoS/DoS
+# advisories (GHSA-6655-6qjp-jx7x, GHSA-7g44-g9rc-x53w, GHSA-mmhr-3c5m-f64f).
+soupsieve==4.0.1

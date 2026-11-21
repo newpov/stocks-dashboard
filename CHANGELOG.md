@@ -14,6 +14,16 @@ than a barely-working prototype.
 
 ---
 
+## v3.9.1 — 2026-11-21
+
+### Security
+- **CI lock: `soupsieve` 2.10 → 4.0.1**, clearing the three advisories GitHub
+  flagged (2 high, 1 moderate: GHSA-6655-6qjp-jx7x, GHSA-7g44-g9rc-x53w,
+  GHSA-mmhr-3c5m-f64f). All are denial-of-service bugs triggered by hostile
+  CSS-selector strings; here the selectors are fixed strings inside yfinance,
+  so the build was not practically exposed. The whole lock now checks clean
+  against osv.dev (0 of 27 packages with advisories). Verified on Python 3.11.
+
 ## v3.9 — "Sector outlook" + honest labels · 21 November 2026
 
 ### Changed
