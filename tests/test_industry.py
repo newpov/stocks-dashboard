@@ -28,9 +28,11 @@ def test_industry_outlook_is_market_cap_weighted():
         {"ticker": "BIG2", "industry": "Tech", "ret_12m": 10.0, "market_cap": 100e9},
     ]), min_holdings=3)
     assert len(groups) == 1
-    # straight mean would be (100+10+10)/3 = 40.0; market-cap-weighted:
-    # (1*100 + 100*10 + 100*10) / (1+100+100) = 2100/201 = 10.45
-    assert abs(groups[0]["avg_ret_12m"] - (2100.0 / 201.0)) < 0.01
+    # straight mean would be (100+10+10)/3 = 40.0; cap-weighted on START-of-
+    # period caps (v3.9: cap / (1 + ret)): SMALL 0.5bn, BIGs 100/1.1 bn each.
+    w_small, w_big = 1e9 / 2.0, 100e9 / 1.1
+    expected = (w_small * 100 + 2 * w_big * 10) / (w_small + 2 * w_big)
+    assert abs(groups[0]["avg_ret_12m"] - expected) < 0.01
     assert groups[0]["avg_ret_12m"] < 15.0   # nowhere near the straight-mean 40
 
 

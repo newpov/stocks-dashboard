@@ -1574,7 +1574,10 @@ document.querySelectorAll('.industry-clickable[data-industry]').forEach(card => 
     const inner = e.target.closest && e.target.closest('.io-stock');
     if (inner && inner.dataset.ticker && DATA[inner.dataset.ticker]) return;
     const ind = card.dataset.industry;
-    const entries = (AUX_DATA.industries && AUX_DATA.industries[ind]) || [];
+    // v3.9: Sector outlook cards carry data-group="sector" -> list that sector.
+    const bySector = card.dataset.group === 'sector';
+    const pool = bySector ? AUX_DATA.universe_sectors : AUX_DATA.industries;
+    const entries = (pool && pool[ind]) || [];
     const rows = entries.map(en => (
       `<tr class="ticker-clickable" data-ticker="${en.ticker}">`
       + `<td class="im-tkr">${en.ticker}${_capTierBadge(en.cap_tier)}</td>`
@@ -1585,8 +1588,8 @@ document.querySelectorAll('.industry-clickable[data-industry]').forEach(card => 
     const sub = `${entries.length} tracked ticker${entries.length === 1 ? '' : 's'} &middot; sorted by 12-mo return`;
     const body = entries.length
       ? `<table class="im-table"><thead><tr><th>Ticker</th><th>Name</th><th class="num">12-mo</th></tr></thead><tbody>${rows}</tbody></table>`
-      : `<p class="muted">No tracked tickers in this industry.</p>`;
-    openInfoModal(`Industry &middot; ${escapeNewsHtml(ind)}`, sub, body);
+      : `<p class="muted">No tracked tickers in this ${bySector ? 'sector' : 'industry'}.</p>`;
+    openInfoModal(`${bySector ? 'Sector' : 'Industry'} &middot; ${escapeNewsHtml(ind)}`, sub, body);
   });
 });
 
@@ -1905,7 +1908,7 @@ document.getElementById('hero-chart').addEventListener('click', (e) => {
     });
     P.forEach(function(p){
       var b=document.createElement('button'); b.className='sw-chip';
-      b.innerHTML='<span class="sw-lk" style="background:'+(LK[p.likelihood]||FLAT)+'"></span>'+p.label+(p.recovery?'<span style="color:var(--text-dim)"> '+p.recovery+'</span>':'');
+      b.innerHTML='<span class="sw-lk" style="background:'+(LK[p.likelihood]||FLAT)+'"></span>'+p.label+(p.recovery?'<span style="color:var(--text-dim)" title="Typical market recovery after a fall this size"> '+'mkt '+p.recovery+'</span>':'');
       b.onclick=function(){mkt.value=p.spy; tec.value=p.tech; usd=p.usd; usdS.value=p.usd; active=p; render();};
       chips.appendChild(b);
     });
@@ -1924,8 +1927,8 @@ document.getElementById('hero-chart').addEventListener('click', (e) => {
       var d=F.map(function(f){var m=move(f,sc); return {f:f,t:f.ticker,m:m,proj:Math.max((f.ret||0)+m,-100),w:f.weight||1,bm:(f.b_mkt||0),lc:f.low_conf,contrib:Math.abs(m)*(f.weight||1)};});
       var tw=d.reduce(function(a,x){return a+x.w;},0)||1;
       var basket=d.reduce(function(a,x){return a+x.w*x.m;},0)/tw;
-      var rc=active&&active.recovery?active.recovery:recov(basket);
-      hero.innerHTML=fmt(basket)+'<small>estimated basket move'+(rc?' &middot; est. recovery '+rc:'')+'</small>';
+      var rc=recov(basket);   // v3.9: always YOUR basket's depth, never the preset's market figure
+      hero.innerHTML=fmt(basket)+'<small>estimated basket move'+(rc?' &middot; est. basket recovery '+rc:'')+'</small>';
       hero.style.color=col(basket);
       var worst=d.slice().sort(function(a,b){return a.m-b.m;})[0]||{t:'',m:0};
       var best=d.slice().sort(function(a,b){return b.m-a.m;})[0]||{t:'',m:0};
