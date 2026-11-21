@@ -14,6 +14,25 @@ than a barely-working prototype.
 
 ---
 
+## v3.8.4 — 2026-11-21
+
+CI supply-chain hardening (from the deeper security review).
+
+### Security
+- **The nightly build can no longer read the publish token.** The checkout
+  step used to leave GitHub's write token in the repository config for the
+  whole job, readable by the build, which runs third-party packages. Only the
+  final push step receives it now.
+- **Every CI package is locked to an exact version and checksum.**
+  `requirements-ci.txt` (generated from `requirements-ci.in`) pins all 27
+  packages, including their dependencies, with sha256 hashes, and ignores
+  releases from the two weeks before the lock was made. A new or tampered
+  release can't slip into the nightly build. Local and forker installs keep
+  using the looser `requirements.txt`.
+- **GitHub Actions pinned to commit hashes** (same versions as before).
+- Verified on a real Python 3.11 environment with the pinned versions: full
+  test suite, demo build, live build and sanity gate all pass.
+
 ## v3.8.3 — 2026-11-21
 
 ### Removed
