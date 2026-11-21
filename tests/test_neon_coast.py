@@ -45,9 +45,12 @@ def test_hero_basket_colour_comes_from_css():
 
 
 def test_display_font_loaded_only_for_neon():
-    # Anton is fetched on demand when the skin is applied, not for every visitor.
-    assert "family=Anton" in JS
-    assert "Anton" not in build.Path(build.__file__).read_text(encoding="utf-8")
+    # v3.12: Anton is a self-hosted @font-face; browsers fetch it only when text
+    # uses it, and only body.palette-neon sets it as a font.
+    fonts = (ASSETS / "fonts" / "fonts.css").read_text(encoding="utf-8")
+    assert 'font-family:"Anton"' in fonts
+    uses = [m.start() for m in __import__("re").finditer(r'"Anton"', CSS)]
+    assert uses and all(CSS.rfind("body.palette-neon{", 0, i) > CSS.rfind("}", 0, i) for i in uses)
 
 
 def test_skin_is_original_not_a_copy():

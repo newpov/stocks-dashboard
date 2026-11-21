@@ -996,6 +996,37 @@ NEWS_WORKER_URL = "https://stocks-dashboard-news.newpov.workers.dev/news"
 _ASSET_DIR = Path(__file__).parent / "assets"
 
 
+FONT_ASSET_DIR = Path(__file__).parent / "assets" / "fonts"
+
+
+def _font_face_css(demo_mode: bool) -> str:
+    """v3.12 self-hosted fonts: the @font-face rules with their URL base filled
+    in. The live page (docs/index.html) loads docs/fonts/; the standalone
+    demo.html sits at the repo root, so it points at docs/fonts/ too."""
+    base = "docs/fonts" if demo_mode else "fonts"
+    return _read_asset("fonts/fonts.css").replace("__FONT_BASE__", base)
+
+
+def _publish_fonts(docs_dir: Path) -> int:
+    """Copy the font files + OFL licences next to the published page (only
+    files that changed). Returns how many were written. Never raises."""
+    n = 0
+    try:
+        dest = docs_dir / "fonts"
+        dest.mkdir(parents=True, exist_ok=True)
+        for src in sorted(FONT_ASSET_DIR.glob("*")):
+            if src.suffix not in (".woff2", ".txt"):
+                continue
+            tgt = dest / src.name
+            data = src.read_bytes()
+            if not tgt.exists() or tgt.read_bytes() != data:
+                tgt.write_bytes(data)
+                n += 1
+    except Exception as e:
+        print(f"WARN couldn't publish fonts: {e}", file=sys.stderr)
+    return n
+
+
 def _read_asset(name: str) -> str:
     """Read a static asset for build-time inlining. encoding= is mandatory:
     Path.read_text() defaults to the locale codec on Windows (cp1252), which
@@ -8035,8 +8066,83 @@ for _p in SHOCKWAVE_PRESETS:
     _p["recovery"] = recovery_estimate(_p["spy"])
 
 
+# --- v3.12 Shockwave hedge lens (short-side phase B) ----------------------
+# How much of a -1x S&P 500 fund and a -1x Nasdaq-100 fund would offset the
+# basket's fitted sensitivities, and what that does in a scenario. A -1x
+# Nasdaq fund moves -(SPY + tech tilt), so it covers the tech exposure, capped
+# at the basket's market sensitivity so the two funds together offset the
+# market exactly once (uncapped, a tech-heavy basket ended up net SHORT -- a
+# bet, not a hedge); the -1x S&P fund covers the rest. Funds are assumed priced
+# in the investor's currency (currency-hedged), so the hedge carries no dollar
+# bet. Linear, first-order, ignores fees/tracking. Mirrored in the JS.
+HEDGE_DECAY_DAYS = 63     # ~3 months of trading days for the decay example
+
+
+def hedge_mix(factors, base_ccy: str = "GBP") -> dict:
+    """Weighted basket exposures and the hedge units (per 1 unit of basket
+    value) that cancel them. Pure; never raises."""
+    def _n(v):
+        try:
+            f = float(v)
+            return f if f == f else 0.0
+        except (TypeError, ValueError):
+            return 0.0
+    tw = bm = bt = fxw = 0.0
+    for f in (factors or []):
+        w = _n(f.get("weight")) or 1.0
+        if w <= 0:
+            continue
+        tw += w
+        bm += w * _n(f.get("b_mkt"))
+        bt += w * _n(f.get("b_tech"))
+        if str(f.get("ccy") or base_ccy) == SHOCKWAVE_FX_CCY and SHOCKWAVE_FX_CCY != base_ccy:
+            fxw += w
+    if tw <= 0:
+        return {"b_mkt": 0.0, "b_tech": 0.0, "fx_share": 0.0, "h_spx": 0.0, "h_ndx": 0.0,
+                "tech_left": 0.0, "fx_applies": SHOCKWAVE_FX_CCY != base_ccy}
+    b_mkt, b_tech = bm / tw, bt / tw
+    h_ndx = max(0.0, min(b_tech, b_mkt))
+    h_spx = max(0.0, b_mkt - h_ndx)
+    return {"b_mkt": b_mkt, "b_tech": b_tech, "fx_share": fxw / tw,
+            "h_spx": h_spx, "h_ndx": h_ndx, "tech_left": b_tech - h_ndx,
+            "fx_applies": SHOCKWAVE_FX_CCY != base_ccy}
+
+
+def hedged_move(mix: dict, scenario: dict) -> dict:
+    """Unhedged basket move, the hedge's P&L and the hedged total (all % of
+    basket value) for a {spy, tech, usd} scenario. Pure."""
+    spy = float(scenario.get("spy") or 0)
+    tech = float(scenario.get("tech") or 0)
+    usd = float(scenario.get("usd") or 0) if mix.get("fx_applies") else 0.0
+    unhedged = mix["b_mkt"] * spy + mix["b_tech"] * tech + mix["fx_share"] * usd
+    hedge = mix["h_spx"] * -spy + mix["h_ndx"] * -(spy + tech)   # no currency term
+    return {"unhedged": unhedged, "hedge": hedge, "hedged": unhedged + hedge}
+
+
+def inverse_fund_decay(prices, days: int = HEDGE_DECAY_DAYS) -> "dict | None":
+    """Simulate daily-reset -1x and -3x funds on an index's last `days`
+    sessions. Returns % figures: index move, each fund's actual return, the
+    naive -3x-the-period expectation and the gap (decay). None if thin."""
+    try:
+        s = pd.Series(prices).dropna().astype(float)
+    except Exception:
+        return None
+    s = s[s > 0].tail(days + 1)
+    if len(s) < 20:
+        return None
+    r = s.pct_change().dropna().to_numpy()
+    idx = s.iloc[-1] / s.iloc[0] - 1.0
+    def _fund(lev):
+        return float(np.prod(np.maximum(1.0 + lev * r, 0.0)) - 1.0)
+    inv1, inv3 = _fund(-1.0), _fund(-3.0)
+    return {"days": int(len(r)), "index": idx * 100, "inv1": inv1 * 100,
+            "inv3": inv3 * 100, "naive3": -3.0 * idx * 100,
+            "decay3": (inv3 + 3.0 * idx) * 100}
+
+
 def build_shockwave_payload(factors, presets, as_of, base_ccy,
-                            mcap_by_ticker: "dict | None" = None) -> dict:
+                            mcap_by_ticker: "dict | None" = None,
+                            hedge_decay: "dict | None" = None) -> dict:
     """Assemble the inline payload block. Enriches each factor with mcap (or
     None). Privacy-safe: weight is unitless, mcap is public company data; no
     shares or money amounts. size_default follows WEIGHT_MODE."""
@@ -8059,6 +8165,9 @@ def build_shockwave_payload(factors, presets, as_of, base_ccy,
         "as_of": as_of,
         "fx_ccy": SHOCKWAVE_FX_CCY,
         "size_default": "eq" if WEIGHT_MODE == "equal" else "w",
+        # v3.12 hedge lens: mix from the fitted sensitivities + decay example
+        "hedge": {"mix": hedge_mix(factors, base_ccy),
+                  "decay": hedge_decay or {}},
     }
 
 
@@ -8080,6 +8189,7 @@ def render_shockwave(payload: dict) -> str:
     <div class="sw-hero" id="sw-hero"></div>
     <div class="sw-action" id="sw-action"></div>
     <svg class="sw-field" id="sw-field" viewBox="0 0 900 350" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Resilience field"></svg>
+    <details class="sw-hedge" id="sw-hedge"><summary id="sw-hedge-sum">Hedge lens</summary><div id="sw-hedge-body"></div></details>
     <div class="sw-impact" id="sw-impact"></div>
     <div class="sw-note">First-order 2-factor estimate; likelihood + recovery are historical rules of thumb, not predictions.</div>
   </div>
@@ -8628,6 +8738,7 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
                 value_rows: "list[dict] | None" = None,
                 auto_tickers: "list[str] | None" = None,
                 stress_factors: "list[dict] | None" = None,
+                hedge_decay: "dict | None" = None,
                 signal_history: "pd.DataFrame | None" = None,
                 ai_capex_history: "pd.DataFrame | None" = None) -> str:
     weekly = prices.resample("W-FRI").last().ffill()
@@ -8786,7 +8897,7 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
                     _mcap_by_ticker[_t] = float(_mv)
     _shockwave_payload = build_shockwave_payload(
         stress_factors or [], SHOCKWAVE_PRESETS, close_as_of, BASE_CCY,
-        mcap_by_ticker=_mcap_by_ticker)
+        mcap_by_ticker=_mcap_by_ticker, hedge_decay=hedge_decay)
     shockwave_html = render_shockwave(_shockwave_payload)
     shockwave_json = _json_for_script(_shockwave_payload, separators=(",", ":"), ensure_ascii=False)
 
@@ -9311,6 +9422,7 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
     else:
         light, heavy = split_payload(data_dict)
         HEAVY_JSON.parent.mkdir(parents=True, exist_ok=True)
+        _publish_fonts(HEAVY_JSON.parent.parent)   # v3.12 docs/fonts/
         HEAVY_JSON.write_text(           # fetched sidecar, not inlined -> plain dumps
             json.dumps(heavy, separators=(",", ":")), encoding="utf-8"
         )
@@ -9496,7 +9608,8 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
 
     base_symbol_js = _json_for_script(BASE_SYMBOL)
     base_ccy_js = _json_for_script(BASE_CCY)
-    css_block = _read_asset("dashboard.css")
+    # v3.12: self-hosted @font-face rules first (no Google Fonts requests).
+    css_block = _font_face_css(demo_mode) + "\n" + _read_asset("dashboard.css")
     js_body = _read_asset("dashboard.js")
 
     return f"""<!DOCTYPE html>
@@ -9509,9 +9622,6 @@ def render_html(returns: pd.DataFrame, prices: pd.DataFrame, meta: pd.DataFrame,
      accent color -- looks reasonable at 16x16 in the tab. -->
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%230b0e17'/%3E%3Cpolyline points='5,22 11,17 16,20 21,11 27,6' fill='none' stroke='%23f59e0b' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
 <title>Portfolio &middot; since {first_purchase_str}</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
 :root{{--watch-cols-desktop:{WATCH_COLS_DESKTOP};--watch-cols-mobile:{WATCH_COLS_MOBILE}}}
 {css_block}</style>
@@ -10392,6 +10502,8 @@ def main(demo: bool = False, watchlist_only: bool = False,
     # v3.3 Shockwave: per-name 2-factor sensitivities (uses the RAW SPY/QQQ price
     # series + native prices, all in scope here), threaded into render_html.
     stress_factors = compute_stress_factors(prices_native, bench, nasdaq_b, meta, returns)
+    # v3.12 hedge lens: daily-reset -1x/-3x decay on the same raw index prices.
+    hedge_decay = {"spx": inverse_fund_decay(bench), "ndx": inverse_fund_decay(nasdaq_b)}
 
     # v3.4 #2: record today's non-owned signal flags (real builds only) and load
     # the rolling history for the Signal-stacking panel. Demo reads only.
@@ -10439,6 +10551,7 @@ def main(demo: bool = False, watchlist_only: bool = False,
                        value_rows=auto_value_rows,
                        auto_tickers=auto_tickers,
                        stress_factors=stress_factors,
+                       hedge_decay=hedge_decay,
                        signal_history=signal_history,
                        ai_capex_history=ai_capex_history)
 
