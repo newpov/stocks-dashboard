@@ -88,7 +88,30 @@ function computeBlendedSeries(i0, basketWinCum) {
   }
   return compoundToCum(daily);
 }
+// v3.11: chart colours + fonts come from the active palette's CSS tokens, so
+// every palette controls them (SVG attributes can't use var(), so they are
+// resolved here at draw time; the hero redraws on palette change).
+function themeTok(name, fb) {
+  try { const v = getComputedStyle(document.body).getPropertyValue(name).trim(); return v || fb; }
+  catch (e) { return fb; }
+}
+function tokAlpha(col, a) {
+  const m = /^#?([0-9a-f]{6})$/i.exec(String(col || '').trim());
+  if (!m) return col;
+  const n = parseInt(m[1], 16);
+  return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
+}
+function chartTheme() {
+  return {
+    dim: themeTok('--text-dim', '#a1a1aa'),
+    up: themeTok('--up', '#22c55e'),
+    down: themeTok('--down', '#ef4444'),
+    mono: themeTok('--font-mono', 'monospace').replace(/"/g, "'"),
+  };
+}
+
 function renderHeroChart() {
+  const TH = chartTheme();
   const svg = document.getElementById('hero-chart');
   const wrap = svg.parentElement;
   const tip = document.getElementById('hero-tip');
@@ -139,7 +162,7 @@ function renderHeroChart() {
   // outlook return can never flatten the chart.
   const indVals = [];
   ind.forEach(e => { if (e.series) indVals.push(...e.series.values); });
-  if (!b.values.length) { svg.innerHTML = '<text x="50%" y="50%" fill="#6b7185" font-family="Geist Mono" font-size="12" text-anchor="middle">No basket data</text>'; return; }
+  if (!b.values.length) { svg.innerHTML = `<text x="50%" y="50%" fill="${TH.dim}" font-family="${TH.mono}" font-size="12" text-anchor="middle">No basket data</text>`; return; }
 
   // Combined min/max across both series. v3.6: the what-if + blended lines are
   // real trajectories the user chose to see, so (unlike non-owned industry
@@ -223,12 +246,12 @@ function renderHeroChart() {
   // v3.8: from the palette (--hero-basket), so a skin can recolour the line;
   // every palette except Neon Coast keeps the original amber.
   const basketColor = getComputedStyle(document.body).getPropertyValue('--hero-basket').trim() || '#f59e0b';
-  const spyColor = '#6b7185';
+  const spyColor = TH.dim;
   const whatifColor = '#2dd4bf';    // teal — distinct from the amber basket
   const blendedColor = '#c084fc';   // purple — basket blended with the selection
-  const greenFill = 'rgba(52,211,153,0.22)';   // outperforming SPY
-  const redFill = 'rgba(248,113,113,0.22)';    // underperforming SPY
-  const lossWashFill = 'rgba(248,113,113,0.09)'; // subtle below-zero wash
+  const greenFill = tokAlpha(TH.up, 0.22);   // outperforming SPY
+  const redFill = tokAlpha(TH.down, 0.22);    // underperforming SPY
+  const lossWashFill = tokAlpha(TH.down, 0.09); // subtle below-zero wash
 
   // Vs-SPY area segments: between basket and SPY lines, painted green when
   // basket is above SPY and red when below. Crossovers are split exactly via
@@ -346,8 +369,8 @@ function renderHeroChart() {
       const fxx = xForDate(fyMs);
       if (fxx == null) continue;
       const lbl = `FY${String(yr % 100).padStart(2, '0')}/${String((yr + 1) % 100).padStart(2, '0')}`;
-      fyHtml += `<line x1="${fxx.toFixed(1)}" y1="${padT}" x2="${fxx.toFixed(1)}" y2="${(padT + innerH).toFixed(1)}" stroke="#6b7185" stroke-width="0.8" stroke-dasharray="2 4" opacity="0.45"/>`;
-      fyHtml += `<text x="${(fxx + 3).toFixed(1)}" y="${(padT + 9).toFixed(1)}" fill="#6b7185" font-size="8.5" font-family="Geist Mono, monospace" opacity="0.85">${lbl}</text>`;
+      fyHtml += `<line x1="${fxx.toFixed(1)}" y1="${padT}" x2="${fxx.toFixed(1)}" y2="${(padT + innerH).toFixed(1)}" stroke="${TH.dim}" stroke-width="0.8" stroke-dasharray="2 4" opacity="0.45"/>`;
+      fyHtml += `<text x="${(fxx + 3).toFixed(1)}" y="${(padT + 9).toFixed(1)}" fill="${TH.dim}" font-size="8.5" font-family="${TH.mono}" opacity="0.85">${lbl}</text>`;
     }
   }
   // v2.7: last-COMPLETED UK fiscal year return (6 Apr -> 6 Apr), shown top-left.
@@ -375,9 +398,9 @@ function renderHeroChart() {
     const vE = valForDate(Date.parse(fyEndYr + '-04-06T00:00:00'));
     if (vS !== null && vE !== null) {
       const fyRet = ((1 + vE / 100) / (1 + vS / 100) - 1) * 100;
-      const col = fyRet >= 0 ? '#34d399' : '#f87171';
+      const col = fyRet >= 0 ? TH.up : TH.down;
       const lbl = `FY${String((fyEndYr - 1) % 100).padStart(2, '0')}/${String(fyEndYr % 100).padStart(2, '0')}`;
-      fyStatHtml = `<text x="${(padL + 5).toFixed(1)}" y="${(padT + 11).toFixed(1)}" font-family="Geist Mono, monospace" font-size="11" font-weight="600"><tspan fill="#6b7185">${lbl} </tspan><tspan fill="${col}">${fyRet >= 0 ? '+' : ''}${fyRet.toFixed(1)}%</tspan><title>Basket return over the last completed UK fiscal year (6 Apr ${fyEndYr - 1} to 6 Apr ${fyEndYr})</title></text>`;
+      fyStatHtml = `<text x="${(padL + 5).toFixed(1)}" y="${(padT + 11).toFixed(1)}" font-family="${TH.mono}" font-size="11" font-weight="600"><tspan fill="${TH.dim}">${lbl} </tspan><tspan fill="${col}">${fyRet >= 0 ? '+' : ''}${fyRet.toFixed(1)}%</tspan><title>Basket return over the last completed UK fiscal year (6 Apr ${fyEndYr - 1} to 6 Apr ${fyEndYr})</title></text>`;
     }
   }
 
@@ -385,7 +408,7 @@ function renderHeroChart() {
   // Y grid (with axis labels)
   html += yTicks.map(t =>
     `<line x1="${padL}" y1="${t.y.toFixed(1)}" x2="${padL + innerW}" y2="${t.y.toFixed(1)}" stroke="rgba(255,255,255,0.04)" stroke-width="1"/>` +
-    `<text x="${padL - 8}" y="${(t.y + 3.5).toFixed(1)}" fill="#6b7185" font-size="10" font-family="Geist Mono, monospace" text-anchor="end">${t.v >= 0 ? '+' : ''}${t.v.toFixed(0)}%</text>`
+    `<text x="${padL - 8}" y="${(t.y + 3.5).toFixed(1)}" fill="${TH.dim}" font-size="10" font-family="${TH.mono}" text-anchor="end">${t.v >= 0 ? '+' : ''}${t.v.toFixed(0)}%</text>`
   ).join('');
   // Loss-zone wash: subtle red rectangle from the zero line down to the chart
   // floor so "below baseline" reads at a glance, even before reading any number.
@@ -406,7 +429,7 @@ function renderHeroChart() {
   // X labels — positioned below the FX band (or below the line chart when no FX)
   const xLabelY = padT + innerH + FX_GAP + FX_H + 16;
   html += xTicks.map(t =>
-    `<text x="${t.x.toFixed(1)}" y="${xLabelY.toFixed(1)}" fill="#6b7185" font-size="10" font-family="Geist Mono, monospace" text-anchor="middle">${fmtAxisDate(t.date)}</text>`
+    `<text x="${t.x.toFixed(1)}" y="${xLabelY.toFixed(1)}" fill="${TH.dim}" font-size="10" font-family="${TH.mono}" text-anchor="middle">${fmtAxisDate(t.date)}</text>`
   ).join('');
   // v2.7 #2: UK FY-start vertical markers (drawn under the data lines).
   html += fyHtml;
@@ -437,7 +460,7 @@ function renderHeroChart() {
         const mx = padL + innerW;
         html += `<path d="M${(mx-4).toFixed(1)},${my.toFixed(1)} L${mx.toFixed(1)},${(my-4).toFixed(1)} L${(mx+4).toFixed(1)},${my.toFixed(1)} L${mx.toFixed(1)},${(my+4).toFixed(1)} Z" fill="none" stroke="${e.color}" stroke-width="1.4"/>`;
         const sgn = e.endpoint >= 0 ? '+' : '';
-        html += `<text x="${(mx-8).toFixed(1)}" y="${(my+3).toFixed(1)}" text-anchor="end" fill="${e.color}" font-size="8.5" font-family="Geist Mono, monospace">${sgn}${Math.round(e.endpoint)}% 12m</text>`;
+        html += `<text x="${(mx-8).toFixed(1)}" y="${(my+3).toFixed(1)}" text-anchor="end" fill="${e.color}" font-size="8.5" font-family="${TH.mono}">${sgn}${Math.round(e.endpoint)}% 12m</text>`;
       }
     });
   }
@@ -459,29 +482,29 @@ function renderHeroChart() {
   if (isAll) html += fyStatHtml;   // v3.4 #3: since-inception only
 
   // End labels (basket + SPY) + vs-SPY delta badge
-  html += `<text x="${(padL + innerW + 6).toFixed(1)}" y="${(basket.ys[n-1] + 4).toFixed(1)}" fill="${basketColor}" font-size="11" font-family="Geist Mono, monospace" font-weight="500">${basketEnd >= 0 ? '+' : ''}${basketEnd.toFixed(1)}%</text>`;
+  html += `<text x="${(padL + innerW + 6).toFixed(1)}" y="${(basket.ys[n-1] + 4).toFixed(1)}" fill="${basketColor}" font-size="11" font-family="${TH.mono}" font-weight="500">${basketEnd >= 0 ? '+' : ''}${basketEnd.toFixed(1)}%</text>`;
   if (spy.ys.length) {
-    html += `<text x="${(padL + innerW + 6).toFixed(1)}" y="${(spy.ys[spy.ys.length-1] + 4).toFixed(1)}" fill="${spyColor}" font-size="11" font-family="Geist Mono, monospace">${spyEnd >= 0 ? '+' : ''}${spyEnd.toFixed(1)}%</text>`;
+    html += `<text x="${(padL + innerW + 6).toFixed(1)}" y="${(spy.ys[spy.ys.length-1] + 4).toFixed(1)}" fill="${spyColor}" font-size="11" font-family="${TH.mono}">${spyEnd >= 0 ? '+' : ''}${spyEnd.toFixed(1)}%</text>`;
     // Vs-SPY delta in percentage points, positioned BELOW both end labels
     // (use the max y = the lower of the two lines, plus 14px offset).
     const vsDelta = basketEnd - spyEnd;
-    const vsColor = vsDelta >= 0 ? '#34d399' : '#f87171';
+    const vsColor = vsDelta >= 0 ? TH.up : TH.down;
     const vsY = Math.max(basket.ys[n-1], spy.ys[spy.ys.length-1]) + 16;
     // Δ is the "delta" — implies "basket minus SPY" without spelling it out.
     // Keeps the badge within the chart's right padding (~50px).
-    html += `<text x="${(padL + innerW + 6).toFixed(1)}" y="${vsY.toFixed(1)}" fill="${vsColor}" font-size="10.5" font-family="Geist Mono, monospace" font-weight="600">&#916; ${vsDelta >= 0 ? '+' : ''}${vsDelta.toFixed(1)}pp</text>`;
+    html += `<text x="${(padL + innerW + 6).toFixed(1)}" y="${vsY.toFixed(1)}" fill="${vsColor}" font-size="10.5" font-family="${TH.mono}" font-weight="600">&#916; ${vsDelta >= 0 ? '+' : ''}${vsDelta.toFixed(1)}pp</text>`;
   }
   if (nasdaq.ys.length) {
-    html += `<text x="${(padL + innerW + 6).toFixed(1)}" y="${(nasdaq.ys[nasdaq.ys.length-1] + 4).toFixed(1)}" fill="${nasdaqColor}" font-size="11" font-family="Geist Mono, monospace">${nasdaqEnd >= 0 ? '+' : ''}${nasdaqEnd.toFixed(1)}%</text>`;
+    html += `<text x="${(padL + innerW + 6).toFixed(1)}" y="${(nasdaq.ys[nasdaq.ys.length-1] + 4).toFixed(1)}" fill="${nasdaqColor}" font-size="11" font-family="${TH.mono}">${nasdaqEnd >= 0 ? '+' : ''}${nasdaqEnd.toFixed(1)}%</text>`;
   }
   // v3.6: what-if + blended end labels (window Δ)
   if (wiPts && wiPts.ys.length) {
     const ev = wiSeries.values[wiSeries.values.length - 1];
-    html += `<text x="${(padL + innerW + 6).toFixed(1)}" y="${(wiPts.ys[wiPts.ys.length-1] + 4).toFixed(1)}" fill="${whatifColor}" font-size="11" font-family="Geist Mono, monospace" font-weight="500">${ev >= 0 ? '+' : ''}${ev.toFixed(1)}%</text>`;
+    html += `<text x="${(padL + innerW + 6).toFixed(1)}" y="${(wiPts.ys[wiPts.ys.length-1] + 4).toFixed(1)}" fill="${whatifColor}" font-size="11" font-family="${TH.mono}" font-weight="500">${ev >= 0 ? '+' : ''}${ev.toFixed(1)}%</text>`;
   }
   if (blPts && blPts.ys.length) {
     const ev = blSeries.values[blSeries.values.length - 1];
-    html += `<text x="${(padL + innerW + 6).toFixed(1)}" y="${(blPts.ys[blPts.ys.length-1] + 4).toFixed(1)}" fill="${blendedColor}" font-size="11" font-family="Geist Mono, monospace">${ev >= 0 ? '+' : ''}${ev.toFixed(1)}%</text>`;
+    html += `<text x="${(padL + innerW + 6).toFixed(1)}" y="${(blPts.ys[blPts.ys.length-1] + 4).toFixed(1)}" fill="${blendedColor}" font-size="11" font-family="${TH.mono}">${ev >= 0 ? '+' : ''}${ev.toFixed(1)}%</text>`;
   }
 
   // FX bar band — weekly GBP/USD rate, centered on the baseline (first value).
@@ -502,23 +525,23 @@ function renderHeroChart() {
       const half = (Math.abs(d) / fxMaxAbs) * (FX_H / 2 - 1);
       const y = d >= 0 ? fxBaseY - half : fxBaseY;
       const h = half;
-      const fill = d >= 0 ? '#34d399' : '#f87171';
+      const fill = d >= 0 ? TH.up : TH.down;
       return `<rect x="${(fxXs[i] - barW/2).toFixed(1)}" y="${y.toFixed(1)}" width="${barW.toFixed(1)}" height="${h.toFixed(1)}" fill="${fill}" opacity="0.55" data-i="${i}"/>`;
     }).join('');
     // Baseline midline + label (shows the reference value the bars deviate from)
     html += `<line x1="${padL}" y1="${fxBaseY.toFixed(1)}" x2="${padL + innerW}" y2="${fxBaseY.toFixed(1)}" stroke="rgba(255,255,255,0.10)" stroke-width="0.7"/>`;
     html += fxBars;
     // Left axis: label + the actual baseline rate in $/£ so bar magnitudes are interpretable
-    html += `<text x="${padL - 8}" y="${(fxBaseY - 1).toFixed(1)}" fill="#6b7185" font-size="9" font-family="Geist Mono, monospace" text-anchor="end">GBP/$</text>`;
-    html += `<text x="${padL - 8}" y="${(fxBaseY + 9).toFixed(1)}" fill="#6b7185" font-size="8.5" font-family="Geist Mono, monospace" text-anchor="end">ref $${fxBaseline.toFixed(3)}</text>`;
+    html += `<text x="${padL - 8}" y="${(fxBaseY - 1).toFixed(1)}" fill="${TH.dim}" font-size="9" font-family="${TH.mono}" text-anchor="end">GBP/$</text>`;
+    html += `<text x="${padL - 8}" y="${(fxBaseY + 9).toFixed(1)}" fill="${TH.dim}" font-size="8.5" font-family="${TH.mono}" text-anchor="end">ref $${fxBaseline.toFixed(3)}</text>`;
     // Range labels at top/bottom of the FX strip — show $min and $max
-    html += `<text x="${(padL + innerW + 6).toFixed(1)}" y="${(fxTop + 4).toFixed(1)}" fill="#34d399" font-size="8.5" font-family="Geist Mono, monospace">$${fxMax.toFixed(3)}</text>`;
-    html += `<text x="${(padL + innerW + 6).toFixed(1)}" y="${(fxTop + FX_H - 1).toFixed(1)}" fill="#f87171" font-size="8.5" font-family="Geist Mono, monospace">$${fxMin.toFixed(3)}</text>`;
+    html += `<text x="${(padL + innerW + 6).toFixed(1)}" y="${(fxTop + 4).toFixed(1)}" fill="${TH.up}" font-size="8.5" font-family="${TH.mono}">$${fxMax.toFixed(3)}</text>`;
+    html += `<text x="${(padL + innerW + 6).toFixed(1)}" y="${(fxTop + FX_H - 1).toFixed(1)}" fill="${TH.down}" font-size="8.5" font-family="${TH.mono}">$${fxMin.toFixed(3)}</text>`;
     // Current value (slightly larger) at end of baseline
     const fxEnd = fx.values[fx.values.length - 1];
     const fxEndDelta = fxDeltas[fxDeltas.length - 1];
-    const fxColor = fxEndDelta >= 0 ? '#34d399' : '#f87171';
-    html += `<text x="${(padL + innerW + 6).toFixed(1)}" y="${(fxBaseY + 3).toFixed(1)}" fill="${fxColor}" font-size="10" font-family="Geist Mono, monospace" font-weight="500">$${fxEnd.toFixed(3)}</text>`;
+    const fxColor = fxEndDelta >= 0 ? TH.up : TH.down;
+    html += `<text x="${(padL + innerW + 6).toFixed(1)}" y="${(fxBaseY + 3).toFixed(1)}" fill="${fxColor}" font-size="10" font-family="${TH.mono}" font-weight="500">$${fxEnd.toFixed(3)}</text>`;
   }
 
   // Crosshair + hover dots. pointer-events="none" so they don't intercept
@@ -1167,7 +1190,7 @@ function renderBigChart(ticker) {
     ys[i] = _modalY(rebased[i], chart.vmin, chart.vmax);
   }
   const isUp = d.total >= 0;
-  const color = isUp ? '#34d399' : '#f87171';
+  const color = isUp ? themeTok('--up', '#22c55e') : themeTok('--down', '#ef4444');
   const gradId = isUp ? 'grad-up-lg' : 'grad-down-lg';
   const labelY = MODAL_VB_PAD_T + MODAL_VB_INNER_H;
   // Area path = polyline + corner anchors. Cheap to rebuild from `chart.points`.
@@ -1205,7 +1228,7 @@ function renderBigChart(ticker) {
   // older than v1.9).
   if (Array.isArray(chart.segments) && chart.segments.length > 0) {
     for (const seg of chart.segments) {
-      const segColor = seg.above ? '#34d399' : '#f87171';
+      const segColor = seg.above ? themeTok('--up', '#22c55e') : themeTok('--down', '#ef4444');
       html += `<polyline points="${seg.pts}" fill="none" stroke="${segColor}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
     }
   } else {
@@ -1231,7 +1254,7 @@ function renderBigChart(ticker) {
       seenMarkers.add(seenKey);
       const mx = xs[bestIdx];
       const isBuy = t.action === 'BUY';
-      const mColor = isBuy ? '#34d399' : '#f87171';
+      const mColor = isBuy ? themeTok('--up', '#22c55e') : themeTok('--down', '#ef4444');
       const label = isBuy ? 'B' : 'S';
       const ly = labelY - 8;
       html += `<line x1="${mx.toFixed(1)}" y1="${MODAL_VB_PAD_T}" x2="${mx.toFixed(1)}" y2="${labelY.toFixed(1)}" stroke="${mColor}" stroke-width="0.7" stroke-dasharray="3 2" opacity="0.45"/>`;
@@ -1890,7 +1913,7 @@ document.getElementById('hero-chart').addEventListener('click', (e) => {
 
   function initPanel(){
     var F=SHOCKWAVE.factors||[], P=SHOCKWAVE.presets||[], base=SHOCKWAVE.base_ccy||'GBP';
-    var LOSS='#f87171', GAIN='#34d399', FLAT='#8a8a8a';
+    var LOSS=themeTok('--down','#ef4444'), GAIN=themeTok('--up','#22c55e'), FLAT='#8a8a8a';
     var LK={common:'#34d399',occasional:'#fbbf24',rare:'#f87171'};
     var sizeMode=SHOCKWAVE.size_default||'eq'; try{var sm=localStorage.getItem(SKEY); if(sm)sizeMode=sm;}catch(e){}
     var usd=0, active=null, showAll=false;
@@ -2024,23 +2047,31 @@ document.getElementById('hero-chart').addEventListener('click', (e) => {
 // still apply correctly.
 (function setupPalette() {
   const PALETTE_KEY = 'stocks-dashboard-palette';
-  const ORDER = ['default', 'softdark', 'light', 'bloomberg', 'neon'];
-  const LABELS = {default: 'Default', softdark: 'Soft Dark', light: 'Light', bloomberg: 'Amber', neon: 'Neon Coast'};
-  // v3.8: Neon Coast's poster type (Anton) is fetched only when the skin is
-  // applied, so visitors on the other palettes never download it.
-  function loadNeonFont() {
-    if (document.getElementById('neon-font')) return;
+  // v3.11: new default first, Neon Coast temporarily second, the May look last.
+  const ORDER = ['default', 'neon', 'softdark', 'light', 'bloomberg', 'classic'];
+  const LABELS = {default: 'Default', neon: 'Neon Coast', softdark: 'Soft Dark',
+                  light: 'Light', bloomberg: 'Amber', classic: 'Classic'};
+  // Palettes with their own type fetch it only when applied, so visitors on
+  // the default never download it (v3.8 Neon's Anton; v3.11 Classic's fonts).
+  const PALETTE_FONTS = {
+    neon: 'family=Anton',
+    classic: 'family=Geist+Mono:wght@400;500&family=Geist:wght@400;500;600&family=Instrument+Serif:ital@0;1',
+  };
+  function loadPaletteFont(name) {
+    const fam = PALETTE_FONTS[name];
+    if (!fam || document.getElementById('font-' + name)) return;
     const l = document.createElement('link');
-    l.id = 'neon-font'; l.rel = 'stylesheet';
-    l.href = 'https://fonts.googleapis.com/css2?family=Anton&display=swap';
+    l.id = 'font-' + name; l.rel = 'stylesheet';
+    l.href = 'https://fonts.googleapis.com/css2?' + fam + '&display=swap';
     document.head.appendChild(l);
   }
   const btn = document.getElementById('palette-cycle-btn');
   if (!btn) return;
   function apply(name) {
-    document.body.classList.remove('palette-softdark','palette-light','palette-bloomberg','palette-neon');
+    document.body.classList.remove('palette-softdark','palette-light','palette-bloomberg',
+                                   'palette-neon','palette-classic');
     if (name && name !== 'default') document.body.classList.add('palette-' + name);
-    if (name === 'neon') loadNeonFont();
+    loadPaletteFont(name);
     // the hero bakes its line colour into SVG attributes -> redraw on switch
     if (typeof renderHeroChart === 'function') { try { renderHeroChart(); } catch (e) { /* hero absent */ } }
     // v2.1: button is icon-only; the human-readable name now lives in the
