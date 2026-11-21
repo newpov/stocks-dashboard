@@ -14,6 +14,17 @@ than a barely-working prototype.
 
 ---
 
+## v3.10.1 — 2026-11-21
+
+### Changed
+- **CI now runs Python 3.14** (was 3.11), the same version the author uses
+  locally, so what passes locally is exactly what the nightly build runs.
+  3.11 rejected some newer f-string syntax and set a version floor for one
+  dependency. The hashed lock was regenerated for 3.14 (only change: numpy
+  2.4.6 → 2.5.4, its 3.14 build) and still checks clean against osv.dev.
+  Verified in a clean 3.14 environment with the CI versions: full test suite,
+  demo build, live build and sanity gate all pass.
+
 ## v3.10 — "Bear watch" short-side screen · 21 November 2026
 
 ### Added

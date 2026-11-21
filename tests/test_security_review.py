@@ -127,3 +127,12 @@ def test_ci_lock_matches_its_direct_pins():
 
 def test_ci_reruns_when_the_lock_changes():
     assert "'requirements-ci.txt'" in WF
+
+
+def test_ci_python_matches_the_lock():
+    # v3.10.1: CI moved 3.11 -> 3.14 (the author's local version). The lock
+    # must be generated for the same interpreter the workflow installs.
+    m = re.search(r"python-version:\s*'([\d.]+)'", WF)
+    assert m and m.group(1) == "3.14"
+    lock = (ROOT / "requirements-ci.txt").read_text(encoding="utf-8")
+    assert f"--python-version {m.group(1)} " in lock
